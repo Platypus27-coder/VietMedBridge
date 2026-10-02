@@ -16,9 +16,11 @@ Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuố
    kiểm đủ ID/URL của mẫu, retry một lượt trong cùng checkpoint và xuất ledger lỗi theo domain.
 4. [01c — Chẩn đoán robots và thử Scrapling](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01c_colab_robots_and_scrapling_pilot.ipynb):
    đọc báo cáo sau retry, phân loại robots và thử phục hồi có checkpoint riêng trên các URL được phép; không đổi `stage-a-v2`.
-5. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
+5. [01d — Thử lại có robots guard và pacing](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01d_colab_guarded_recovery.ipynb):
+   chỉ xử lý những URL chưa thành article candidate từ experiment 01c đã khóa hash; kiểm robots trước từng request/redirect/retry và xuất báo cáo riêng.
+6. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
    trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
-6. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
+7. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
    kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
 
 Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
@@ -50,9 +52,11 @@ chạy notebook 02–03 trên checkpoint Stage A này.
 Notebook 01c dùng runtime CPU mới và `recovery_code_lock.json` riêng để tải mã
 mới mà không làm đổi code hash của checkpoint Stage A. Nó đối chiếu
 `failures_after_retry.csv` với official corpus, ghi từng robots probe/HTTP thử
-nghiệm lên Drive, và mặc định **chưa bật** browser. Sau khi xem `robots.csv`,
-bật browser cho tối đa 5 URL được phép nếu cần. `article_candidate` chỉ là ứng
-viên cần người kiểm nội dung, chưa được nhập vào canonical corpus. Muốn tiếp
+nghiệm lên Drive. Browser hiện tạm dừng vì Scrapling 0.4.15 có thể tiếp tục
+điều hướng khi callback cài route guard lỗi. Notebook 01d dùng code lock riêng,
+chỉ thử lại các URL chưa thành ứng viên bằng HTTP có kiểm robots và pacing ở
+từng bước; không cần chạy lại 01c. `article_candidate` chỉ là ứng viên cần người
+kiểm nội dung, chưa được nhập vào canonical corpus. Muốn tiếp
 tục notebook 02 trên raw `stage-a-v2`, dùng lại `code_lock.json` cũ trong một
 runtime mới; thay package code giữa runtime đang import sẽ bị chặn.
 

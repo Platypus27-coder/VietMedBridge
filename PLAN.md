@@ -2772,6 +2772,21 @@ Only after all above pass **và** source-access/valid-article-coverage gate ở
 
 # 56. Decision Table for Current Pilot Failures
 
+Kết quả 01c do người chạy Colab cung cấp ngày 2026-10-02: 83 ID sau retry,
+15 URL được robots resolver cho phép và đã thử HTTP, 4 lần thử tạo
+`article_candidate` **chưa human review**. Trong 68 URL không thử HTTP,
+44 có robots 403, 10 Disallow, 8 ConnectTimeout, 5 robots 5xx và 1 connection
+error. `ROBOTS_403` là phản hồi của `/robots.txt`, không tự động đồng nghĩa
+trang bài viết trả 403. Chưa có breakdown của 15 `attempts.csv` trong
+workspace để xác nhận loại lỗi của 11 lần còn lại; không tính 4 ứng viên là
+`valid_article_coverage` và không scale 10k dựa trên tỷ lệ này.
+
+Thử nghiệm 01d tách riêng nhằm sửa hai thiếu sót của 01c: request Scrapling
+chưa pacing theo `Crawl-delay`/`Request-rate`, và redirect chưa được recheck
+robots trước mỗi hop. Browser của 01c tạm dừng vì `page_setup` trong Scrapling
+0.4.15 có thể nuốt exception của route guard. 01d chỉ thử lại 11 URL chưa thành
+ứng viên và không tự động merge vào Stage A.
+
 | Initial pilot failure (trước retry) | Immediate action | Scrapling? | Final state if unresolved |
 |---|---|---|---|
 | 54 robots blocked | verify parser, respect Disallow | No bypass | `POLICY_ROBOTS_DISALLOWED` |

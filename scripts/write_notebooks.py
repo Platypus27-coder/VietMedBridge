@@ -95,6 +95,9 @@ print("Dữ liệu/checkpoint:", DATA_ROOT)
 
 # Recovery experiments use new code without changing the pinned stage-a-v2 code.
 RECOVERY_BOOTSTRAP = BOOTSTRAP.replace("code_lock.json", "recovery_code_lock.json")
+GUARDED_RECOVERY_BOOTSTRAP = BOOTSTRAP.replace(
+    "code_lock.json", "guarded_recovery_code_lock.json"
+)
 
 
 def md(source):
@@ -569,8 +572,9 @@ def main():
 
         Chạy trong **runtime Colab CPU mới** sau 01b. Notebook này đọc đúng
         `failures_after_retry.csv`, kiểm official ID/URL, phân loại lại robots,
-        rồi thử HTTP kiểu browser và một mẫu nhỏ bằng Chromium chỉ khi robots
-        cho phép. Mỗi ID/method có marker riêng trên Drive để resume.
+        rồi thử HTTP kiểu browser chỉ khi robots cho phép. Chromium tạm dừng
+        vì route guard của Scrapling 0.4.15 chưa fail-closed. Mỗi ID/method có
+        marker riêng trên Drive để resume.
 
         Mã mới được khóa trong `recovery_code_lock.json`; không đổi
         `code_lock.json` hoặc checkpoint `stage-a-v2`. Kết quả là experiment
@@ -771,65 +775,16 @@ def main():
         print("HTTP experiment markers:", len(list(HTTP_DIR.glob("*.json"))))
         """),
         md("""
-        ## 4. Thử Chromium trên tối đa 5 URL còn cần xem
+        ## 4. Chromium tạm dừng
 
-        Chạy CPU. Cell đầu tiên cài Chromium, có thể mất vài phút. `DynamicFetcher`
-        chỉ render trang; không bật giải CAPTCHA hay vượt robots. Có thể đặt
-        `ENABLE_BROWSER=False` để bỏ qua mà vẫn giữ kết quả HTTP.
+        Scrapling 0.4.15 nuốt lỗi trong `page_setup`, nên route guard có thể
+        không được cài mà browser vẫn tiếp tục điều hướng. Chưa bật Chromium
+        cho recovery cho tới khi có adapter fail-closed được kiểm thử.
         """),
         code("""
-        ENABLE_BROWSER = False  # Bật sau khi xem robots.csv và duyệt 5 URL cụ thể.
-        MAX_BROWSER_CASES = 5
         BROWSER_DIR = EXPERIMENT_DIR / "browser"
         BROWSER_DIR.mkdir(exist_ok=True)
-        http_records = [read_json(HTTP_DIR / f"{int(i)}.json") for i in candidates["doc_id"]]
-        browser_candidates = [row for row in http_records if not row.get("article_candidate")]
-        browser_candidates = browser_candidates[:MAX_BROWSER_CASES]
-        if ENABLE_BROWSER and browser_candidates:
-            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-            from scrapling.fetchers import DynamicFetcher
-            from urllib.parse import urlsplit
-            for row in browser_candidates:
-                marker = BROWSER_DIR / f"{row['doc_id']}.json"
-                if marker.exists():
-                    if read_json(marker)["url"] != row["url"]:
-                        raise ValueError(f"Browser checkpoint URL không khớp: {row['doc_id']}")
-                    continue
-                started = time.monotonic()
-                record = {"doc_id": row["doc_id"], "url": row["url"],
-                          "original_error": row["original_error"],
-                          "robots_state": row["robots_state"],
-                          "method": "dynamic_browser", "started_at": utc_now()}
-                try:
-                    original = urlsplit(row["url"])
-                    original_target = (original.scheme, original.netloc, original.path, original.query)
-
-                    def guard_navigation(page):
-                        def route_request(route):
-                            request = route.request
-                            if request.is_navigation_request():
-                                target = urlsplit(request.url)
-                                target_key = (target.scheme, target.netloc, target.path, target.query)
-                                if target_key != original_target:
-                                    route.abort()
-                                    return
-                            route.continue_()
-                        page.route("**/*", route_request)
-
-                    response = DynamicFetcher.fetch(
-                        row["url"], headless=True, timeout=60000, retries=0,
-                        google_search=False, useragent=USER_AGENT,
-                        page_setup=guard_navigation,
-                    )
-                    record.update(assess_and_archive(response, doc_id=row["doc_id"],
-                                                     method="browser", capture_kind="rendered_dom"))
-                except Exception as exc:
-                    record.update(outcome="fetch_error", error_type=type(exc).__name__,
-                                  error_message=str(exc)[:300])
-                record.update(elapsed_ms=round((time.monotonic() - started) * 1000),
-                              finished_at=utc_now())
-                atomic_json(marker, record)
-        print("Browser experiment markers:", len(list(BROWSER_DIR.glob("*.json"))))
+        print("Browser recovery chưa bật; dùng notebook 01d cho HTTP retry có robots guard.")
         """),
         md("## 5. Xuất báo cáo để review, không sửa Stage A checkpoint"),
         code("""
@@ -859,6 +814,183 @@ def main():
                            "article_candidate", "elapsed_ms"]
         display(pd.DataFrame(attempts).reindex(columns=preview_columns))
         print("Gửi cho tôi robots.csv và attempts.csv để audit. Chưa merge vào stage-a-v2.")
+        """),
+    ])
+
+    save("01d_colab_guarded_recovery.ipynb", [
+        md("""
+        # VietMedBridge — 01d: Thử lại có robots guard và pacing
+
+        Chạy trong **Colab CPU mới** sau 01c. Notebook này đọc experiment 01c đã
+        khóa bằng SHA-256, chỉ thử lại 11 URL chưa tạo article candidate. Mỗi
+        request, redirect và retry đều kiểm robots và áp dụng Crawl-delay hoặc
+        Request-rate. Không bật browser, không vượt Disallow/robots lỗi, không
+        tự nhập kết quả vào Stage A. Mỗi ID có marker trên Drive để resume.
+        """),
+        code(GUARDED_RECOVERY_BOOTSTRAP),
+        md("## 1. Kiểm input 01c và lập danh sách 11 URL"),
+        code("""
+        import pandas as pd
+        from vietmedbridge.artifacts import (
+            atomic_json, code_fingerprint, digest_json, read_json, sha256_file, utc_now,
+        )
+
+        SOURCE_KEY = "6a5793cdc03be0cb"
+        EXPECTED_ATTEMPTS_SHA256 = "09f3edd03c459b8791bb819805656e01626a837eec898c2a1d46130af5de5244"
+        EXPECTED_ROBOTS_SHA256 = "637738e9641c7b8cfa668b9f30ea547e9de664fe8a9204458e6836bd023b3a27"
+        REPORT_DIR = DATA_ROOT / "reports/crawl_recovery/stage-a-v2"
+        SOURCE_DIR = REPORT_DIR / "experiments" / SOURCE_KEY
+        SOURCE = read_json(SOURCE_DIR / "summary.json")
+        SOURCE_EXPERIMENT = read_json(SOURCE_DIR / "experiment.json")
+        TRIAGE = read_json(REPORT_DIR / "triage.json")
+        if SOURCE_EXPERIMENT["source_run_signature"] != TRIAGE["run_signature"]:
+            raise ValueError("01c và 01b không cùng Stage A run.")
+        if SOURCE["attempts_sha256"] != EXPECTED_ATTEMPTS_SHA256 or SOURCE["robots_sha256"] != EXPECTED_ROBOTS_SHA256:
+            raise ValueError("01c summary khác experiment đã báo; xác minh key và hash trước khi chạy.")
+        ATTEMPTS_PATH = DATA_ROOT / SOURCE["attempts_csv"]
+        ROBOTS_PATH = DATA_ROOT / SOURCE["robots_csv"]
+        if sha256_file(ATTEMPTS_PATH) != EXPECTED_ATTEMPTS_SHA256 or sha256_file(ROBOTS_PATH) != EXPECTED_ROBOTS_SHA256:
+            raise ValueError("CSV 01c đã đổi hoặc tải thiếu.")
+        ATTEMPTS = pd.read_csv(ATTEMPTS_PATH, dtype={"doc_id": "int64", "url": "string"})
+        ROBOTS = pd.read_csv(ROBOTS_PATH, dtype={"doc_id": "int64", "url": "string"})
+        if len(ROBOTS) != SOURCE["input_unresolved"] or ROBOTS["doc_id"].duplicated().any():
+            raise ValueError("robots.csv không đủ 83 official IDs hoặc có ID trùng.")
+        if len(ATTEMPTS) != SOURCE["attempts"] or ATTEMPTS[["doc_id", "method"]].duplicated().any():
+            raise ValueError("attempts.csv không đủ 15 thử nghiệm hoặc có ID/method trùng.")
+        ATTEMPTS["article_candidate"] = ATTEMPTS["article_candidate"].astype(str).str.lower().eq("true")
+        ROBOTS["robots_allowed"] = ROBOTS["robots_allowed"].astype(str).str.lower().eq("true")
+        official = ROBOTS.set_index("doc_id")
+        for row in ATTEMPTS.itertuples(index=False):
+            if row.doc_id not in official.index or row.url != official.loc[row.doc_id, "url"]:
+                raise ValueError(f"ID/URL trong attempts không khớp robots: {row.doc_id}")
+            if not bool(official.loc[row.doc_id, "robots_allowed"]):
+                raise ValueError(f"01c đã thử URL không được phép: {row.doc_id}")
+        if int(ATTEMPTS["article_candidate"].sum()) != SOURCE["article_candidates_needing_human_review"]:
+            raise ValueError("Số article candidate khác summary.json.")
+        REMAINING = ATTEMPTS[~ATTEMPTS["article_candidate"]].copy().sort_values("doc_id")
+        print("01c attempts:", len(ATTEMPTS), "| cần thử lại:", len(REMAINING))
+        display(REMAINING.reindex(columns=[
+            "doc_id", "url", "original_error", "outcome", "http_status", "error_type",
+        ]).fillna(""))
+        print("4 article candidates từ 01c vẫn cần human review; notebook này không fetch lại chúng.")
+        """),
+        md("## 2. Thử Scrapling HTTP với robots mới, pacing và redirect guard"),
+        code("""
+        import importlib.metadata
+        import subprocess
+        import time
+        from urllib.parse import urlsplit
+        from vietmedbridge.artifacts import publish_file
+        from vietmedbridge.crawl import CrawlConfig, Fetcher
+        from vietmedbridge.recovery import RecoveryConfig, guarded_http_fetch
+        from vietmedbridge.text import EXPECTED_PARSE_ERRORS, extract_source
+        from vietmedbridge.quality import document_quality
+
+        if importlib.metadata.packages_distributions().get("scrapling") is None or (
+            importlib.metadata.version("scrapling") != "0.4.15"
+        ):
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                            "scrapling[fetchers]==0.4.15"], check=True)
+        from scrapling.fetchers import Fetcher as ScraplingFetcher
+
+        FOLLOWUP_KEY = digest_json({
+            "source_key": SOURCE_KEY, "attempts_sha256": EXPECTED_ATTEMPTS_SHA256,
+            "code_sha256": code_fingerprint(), "policy": "guarded-http-v1",
+            "scrapling_version": "0.4.15",
+        })[:16]
+        FOLLOWUP_DIR = REPORT_DIR / "experiments" / FOLLOWUP_KEY
+        MARKERS_DIR = FOLLOWUP_DIR / "markers"
+        ASSETS_DIR = FOLLOWUP_DIR / "assets"
+        MARKERS_DIR.mkdir(parents=True, exist_ok=True)
+        ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        manifest_path = FOLLOWUP_DIR / "experiment.json"
+        manifest = {"source_key": SOURCE_KEY, "source_attempts_sha256": EXPECTED_ATTEMPTS_SHA256,
+                    "code_commit": CODE_COMMIT, "code_sha256": code_fingerprint(),
+                    "policy": "guarded-http-v1", "input_ids": len(REMAINING)}
+        if manifest_path.exists() and read_json(manifest_path) != manifest:
+            raise ValueError("Follow-up checkpoint khác cấu hình hiện tại.")
+        if not manifest_path.exists():
+            atomic_json(manifest_path, manifest)
+
+        USER_AGENT = "VietMedBridge/0.2 (+https://github.com/Platypus27-coder/VietMedBridge)"
+        guard = Fetcher(CrawlConfig(concurrency=1, per_host_delay=3, attempts=1))
+        settings = RecoveryConfig(attempts=2, max_redirects=5, max_body_bytes=16 * 1024 * 1024)
+        held_hosts = set()
+        try:
+            for row in REMAINING.itertuples(index=False):
+                marker = MARKERS_DIR / f"{int(row.doc_id)}.json"
+                if marker.exists():
+                    saved = read_json(marker)
+                    if saved["url"] != row.url or saved["source_attempt_outcome"] != row.outcome:
+                        raise ValueError(f"Marker khác URL/outcome gốc: {row.doc_id}")
+                    if saved.get("outcome") in ("rate_limited_retry_later", "server_retry_later", "host_rate_limit_hold"):
+                        held_hosts.add(urlsplit(saved.get("final_url", row.url)).hostname)
+                    continue
+                started = time.monotonic()
+                record = {"doc_id": int(row.doc_id), "url": row.url,
+                          "source_attempt_outcome": row.outcome,
+                          "method": "guarded_scrapling_http", "started_at": utc_now(),
+                          "article_candidate": False}
+                if urlsplit(row.url).hostname in held_hosts:
+                    record["outcome"] = "host_rate_limit_hold"
+                else:
+                    result, body = await guarded_http_fetch(
+                        row.url, guard, ScraplingFetcher.get,
+                        user_agent=USER_AGENT, config=settings, held_hosts=held_hosts,
+                    )
+                    record.update(result)
+                    if body is not None:
+                        local_asset = WORK_DIR / f"guarded-recovery-{int(row.doc_id)}.bin"
+                        local_asset.write_bytes(body)
+                        target = ASSETS_DIR / local_asset.name
+                        try:
+                            record["body_sha256"] = publish_file(local_asset, target)
+                        finally:
+                            local_asset.unlink(missing_ok=True)
+                        record["asset_path"] = str(target.relative_to(DATA_ROOT))
+                        try:
+                            extracted = extract_source(body, record["content_type"])
+                            quality = document_quality(
+                                extracted["source_text"], title=extracted["title"],
+                                raw_bytes=len(body), content_type=record["content_type"],
+                            )
+                            record.update(
+                                source_text_sha256=extracted["source_text_sha256"],
+                                source_chars=len(extracted["source_text"]),
+                                source_preview=extracted["source_text"][:500],
+                                quality_tier=quality["quality_tier"],
+                                quality_flags=quality["quality_flags"],
+                                article_candidate=len(extracted["source_text"]) >= 80,
+                            )
+                            record["outcome"] = ("article_candidate" if record["article_candidate"]
+                                                 else "short_text_review")
+                        except EXPECTED_PARSE_ERRORS as exc:
+                            record.update(outcome="extract_rejected", extract_error=str(exc)[:300])
+                record.update(elapsed_ms=round((time.monotonic() - started) * 1000),
+                              finished_at=utc_now())
+                atomic_json(marker, record)
+                print(row.doc_id, record["outcome"])
+        finally:
+            await guard.client.aclose()
+        print("Follow-up experiment:", FOLLOWUP_DIR)
+        """),
+        md("## 3. Xuất kết quả; không nhập vào Stage A"),
+        code("""
+        records = [read_json(MARKERS_DIR / f"{int(i)}.json") for i in REMAINING["doc_id"]]
+        result_path = FOLLOWUP_DIR / "attempts.csv"
+        pd.DataFrame(records).to_csv(result_path, index=False, encoding="utf-8-sig")
+        summary = {"source_experiment": SOURCE_KEY, "input_non_candidates": len(REMAINING),
+                   "outcomes": pd.Series([r["outcome"] for r in records]).value_counts().to_dict(),
+                   "new_article_candidates_needing_human_review": sum(bool(r.get("article_candidate")) for r in records),
+                   "attempts_csv": str(result_path.relative_to(DATA_ROOT)),
+                   "attempts_sha256": sha256_file(result_path), "created_at": utc_now()}
+        atomic_json(FOLLOWUP_DIR / "summary.json", summary)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        display(pd.DataFrame(records).reindex(columns=[
+            "doc_id", "source_attempt_outcome", "outcome", "http_status",
+            "error_type", "article_candidate", "elapsed_ms",
+        ]).fillna(""))
+        print("Gửi attempts.csv và summary.json của experiment này để audit nội dung.")
         """),
     ])
 
