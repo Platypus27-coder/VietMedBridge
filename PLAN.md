@@ -2777,9 +2777,12 @@ Kết quả 01c do người chạy Colab cung cấp ngày 2026-10-02: 83 ID sau 
 `article_candidate` **chưa human review**. Trong 68 URL không thử HTTP,
 44 có robots 403, 10 Disallow, 8 ConnectTimeout, 5 robots 5xx và 1 connection
 error. `ROBOTS_403` là phản hồi của `/robots.txt`, không tự động đồng nghĩa
-trang bài viết trả 403. Chưa có breakdown của 15 `attempts.csv` trong
-workspace để xác nhận loại lỗi của 11 lần còn lại; không tính 4 ứng viên là
-`valid_article_coverage` và không scale 10k dựa trên tỷ lệ này.
+trang bài viết trả 403. Kết quả 01d sau đó xác nhận cả 11 non-candidate từ
+01c đều là URL `nhathuoclongchau.com.vn`, được robots cho phép nhưng trang đích
+trả HTTP 403 ở cả hai lần thử. Không có ứng viên mới; xem
+`reports/stage-a-v2-longchau-access-gap.md` và ledger 11 ID/URL. Không tính
+4 ứng viên 01c là `valid_article_coverage` trước human review và không scale
+10k dựa trên tỷ lệ này.
 
 Thử nghiệm 01d tách riêng nhằm sửa hai thiếu sót của 01c: request Scrapling
 chưa pacing theo `Crawl-delay`/`Request-rate`, và redirect chưa được recheck
