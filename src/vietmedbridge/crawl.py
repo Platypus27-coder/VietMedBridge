@@ -17,6 +17,7 @@ from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 from .artifacts import (
@@ -35,13 +36,16 @@ class CrawlConfig:
     max_bytes: int = 16 * 1024 * 1024
     attempts: int = 3
     respect_robots: bool = True
-    user_agent: str = "VietMedBridge/0.1 (+https://github.com/Platypus27-coder/VietMedBridge)"
+    user_agent: str = "VietMedBridge/0.2 (+https://github.com/Platypus27-coder/VietMedBridge)"
+    max_shard_bytes: int = 512 * 1024 * 1024
 
     def validate(self) -> None:
         if min(self.concurrency, self.shard_size, self.max_bytes, self.attempts) < 1:
             raise ValueError("Concurrency, shard size, byte limit and attempts must be positive.")
         if self.per_host_delay < 0 or self.timeout_seconds <= 0:
             raise ValueError("Invalid host delay or HTTP timeout.")
+        if self.max_shard_bytes < self.max_bytes:
+            raise ValueError("Shard byte budget must be at least the per-response byte limit.")
 
 
 class SourceFailure(Exception):
@@ -148,6 +152,7 @@ class Fetcher:
         raise SourceFailure("too_many_redirects")
 
     async def fetch(self, row: dict) -> dict:
+        started = time.monotonic()
         result = {"doc_id": int(row["id"]), "url": row["url"],
                   "fetched_at": utc_now(), "status": "error"}
         for attempt in range(self.config.attempts):
@@ -158,6 +163,7 @@ class Fetcher:
                     "body_sha256": hashlib.sha256(body).hexdigest(), "body_bytes": len(body),
                     "body_encoding": "base64-decoded-http-entity",
                     "body_base64": base64.b64encode(body).decode("ascii"),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
                 }
             except httpx.HTTPStatusError as exc:
                 code = exc.response.status_code
@@ -189,13 +195,14 @@ class Fetcher:
                 if attempt + 1 < self.config.attempts:
                     await asyncio.sleep(2.0 ** attempt)
         result["attempts"] = attempt + 1
+        result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         return result
 
 
 def completed_parts(run_dir: str | Path, verify: bool = True) -> list[dict]:
     run_dir = Path(run_dir)
     parts = []
-    for pointer in sorted(run_dir.glob("part-*.done.json")):
+    for pointer in sorted(run_dir.rglob("part-*.done.json")):
         manifest = read_json(pointer)
         if verify:
             verify_file(run_dir / manifest["raw_file"], manifest["raw_sha256"])
@@ -208,6 +215,17 @@ def iter_raw_records(path: str | Path):
         for line in stream:
             if line.strip():
                 yield json.loads(line)
+
+
+def range_complete(run: dict, parts: list[dict]) -> bool:
+    """All requested physical rows need outcomes, including failures, without gaps."""
+    requested = run["requested_range"]
+    cursor = requested["start"]
+    for part in sorted(parts, key=lambda row: row["first_input_row"]):
+        if part["run_signature"] != run["signature"] or part["first_input_row"] != cursor:
+            return False
+        cursor += part["records"]
+    return cursor == requested["stop"]
 
 
 async def crawl_links(
@@ -227,13 +245,21 @@ async def crawl_links(
     if max_shards is not None and max_shards < 1:
         raise ValueError("max_shards must be positive or None.")
     links_path, output_root = Path(links_path), Path(output_root)
+    input_rows = pq.ParquetFile(links_path).metadata.num_rows
+    if start < 0 or (stop is not None and stop < start):
+        raise ValueError("Invalid requested row range.")
+    effective_stop = min(input_rows, input_rows if stop is None else stop)
+    if effective_stop <= start:
+        raise ValueError("Requested row range is empty.")
     run_dir = output_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     identity = {
         "links_sha256": sha256_file(links_path),
         "origin_corpus_sha256": origin_corpus_sha256,
         "row_range": {"start": start, "stop": stop},
-        "config": asdict(config), "crawler_version": "http-shards-v1",
+        "requested_range": {"start": start, "stop": effective_stop},
+        "requested_input_records": effective_stop - start,
+        "config": asdict(config), "crawler_version": "http-shards-v2",
         "code_sha256": code_fingerprint(),
         "runtime": runtime_versions(),
     }
@@ -252,7 +278,8 @@ async def crawl_links(
             if index % worker_count != worker_index:
                 continue
             part_name = f"part-{first:010d}-{len(rows):05d}"
-            pointer = run_dir / f"{part_name}.done.json"
+            bucket = Path("parts") / f"{first // (config.shard_size * 128):06d}"
+            pointer = run_dir / bucket / f"{part_name}.done.json"
             input_sha = digest_json(rows)
             old = read_json(pointer) if pointer.exists() else None
             if old:
@@ -267,15 +294,25 @@ async def crawl_links(
             attempt = old["shard_attempt"] + 1 if old else 0
             pending_ids = set(old["failed_ids"]) if old else {int(row["id"]) for row in rows}
             pending = [row for row in rows if int(row["id"]) in pending_ids]
-            filename = f"{part_name}-a{attempt:03d}.raw.jsonl.gz"
+            filename = (bucket / f"{part_name}-a{attempt:03d}.raw.jsonl.gz").as_posix()
             statuses, failed, count, successful_this_call = Counter(), [], 0, 0
             with local_workspace(work_dir) as temporary:
-                local = Path(temporary) / filename
+                local = Path(temporary) / Path(filename).name
+                shard_bytes = 0
                 with local.open("wb") as raw_file:
                     with gzip.GzipFile(fileobj=raw_file, mode="wb", mtime=0) as compressed:
                         def write(record):
-                            nonlocal count
-                            compressed.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+                            nonlocal count, shard_bytes
+                            encoded = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+                            shard_bytes += len(encoded)
+                            if shard_bytes > config.max_shard_bytes:
+                                atomic_json(run_dir / bucket / f"{part_name}.failed.json", {
+                                    "part": part_name, "reason": "SHARD_BYTE_BUDGET_EXCEEDED",
+                                    "run_signature": signature, "recorded_before_failure": count,
+                                    "status": "FAILED", "completed_at": utc_now(),
+                                })
+                                raise ValueError("Shard byte budget exceeded. Use a smaller shard_size in a new run; completed shards remain intact.")
+                            compressed.write(encoded)
                             statuses[record["status"] if record["status"] == "ok"
                                      else record.get("error", "unknown_error")] += 1
                             if record["status"] != "ok":
@@ -299,11 +336,12 @@ async def crawl_links(
             manifest = {
                 "part": part_name, "first_input_row": first, "records": count,
                 "run_signature": signature, "input_sha256": input_sha,
+                "input_pairs_sha256": digest_json(sorted(rows, key=lambda row: row["id"])),
                 "shard_attempt": attempt, "raw_file": filename, "raw_sha256": checksum,
                 "failed_ids": sorted(failed), "statuses": dict(statuses), "completed_at": utc_now(),
             }
             # Attempt manifests remain immutable; only the latest-complete pointer changes.
-            atomic_json(run_dir / f"{part_name}-a{attempt:03d}.manifest.json", manifest)
+            atomic_json(run_dir / bucket / f"{part_name}-a{attempt:03d}.manifest.json", manifest)
             atomic_json(pointer, manifest)
             totals["written_shards"] += 1
             totals["requested_this_call"] += len(pending)
@@ -315,6 +353,8 @@ async def crawl_links(
         summary = {
             "run_name": run_name, "run_signature": signature, "complete_shards": len(parts),
             "recorded_documents": sum(item["records"] for item in parts),
+            "requested_input_records": identity["requested_input_records"],
+            "range_complete": range_complete({**identity, "signature": signature}, parts),
             "statuses": dict(counts), "call": dict(totals), "updated_at": utc_now(),
         }
         atomic_json(run_dir / "summary.json", summary)

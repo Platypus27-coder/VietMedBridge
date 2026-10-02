@@ -9,26 +9,36 @@ trong Google Drive.
 Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuống:
 
 1. [00 — Tải và audit dataset](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb):
-   tải hai file Parquet ở revision cố định, kiểm tra schema/ID, thống kê domain và tạo mẫu crawl.
+   tải snapshot cố định, kiểm tra schema/ID, inventory URL, mẫu Stage A ~1.000 URL phân tầng và golden regression.
 2. [01 — Crawl nguồn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb):
-   thử mẫu nhỏ, lưu bytes nguồn và hash, retry lỗi tạm thời, resume từng shard.
+   crawl Stage A, lưu bytes nguồn/hash và outcome cho từng ID, resume/retry từng shard.
 3. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
-   trích HTML/XML/PDF, tải tokenizer BGE-M3, tạo child/parent và kiểm tra vị trí nguồn.
+   trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
+4. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
+   kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
 
-Package cho phép Python 3.11–3.13. Nếu cần giữ runtime ổn định, chọn Runtime →
-Change runtime type → Runtime Version 2026.07 (Python 3.12), theo
-[danh sách runtime của Google](https://research.google.com/colaboratory/runtime-version-faq.html).
+Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
 
-Cell đầu mount Drive và cài thư viện từ repo. Giữ cùng DATA_ROOT trong cả ba
+Cell đầu mount Drive và cài thư viện từ repo. Giữ cùng DATA_ROOT trong cả bốn
 notebook; mặc định là MyDrive/VietMedBridge/data. code_lock.json lưu commit đã
 chạy để các notebook sau dùng lại cùng mã nguồn. Tokenizer cũng được ghim revision.
 
-Notebook 01 mặc định chạy smoke sample của các domain lớn. Để xử lý phạm vi lớn,
+Nếu Drive đang khóa code cũ API v1, đặt CODE_REVISION="main" trong bootstrap một
+lần để cập nhật sang API v2; restart session nếu runtime đã import package cũ.
+Dùng tên run mới stage-a-v2/stage-a-data-v2; các artifact cũ được giữ để rollback.
+
+Notebook 01 mặc định chạy Stage A phân tầng; MODE="smoke" vẫn dùng được. Để xử lý phạm vi lớn,
 chọn MODE="range", đặt START_ROW/STOP_ROW và giữ range/cấu hình ổn định khi resume.
 MAX_NEW_SHARDS giới hạn lượng công việc trong một phiên Colab. Đổi range hoặc cấu
 hình cần tên run mới. Các runtime đồng thời phải dùng worker index khác nhau.
 Với hàng triệu URL, cần kiểm tra lỗi theo domain và bổ sung bulk/API adapter cho
 những nguồn lớn trước khi triển khai toàn corpus.
+
+Stage A dùng 11 fixture synthetic để bootstrap. Notebook 03 xuất 100 nguồn để
+team gán expected snippets và replay thành golden nguồn thật. Scale-up cần bộ
+100–500 nguồn này pass, human review và toàn bộ range đã có outcome. Stage B2/C
+cần retrieval regression có nhãn; full run cần budget đo thực tế. Các gate không
+tự coi sample audit, query hoặc self-retrieval là nhãn relevance.
 
 ## Dataset
 
@@ -45,9 +55,11 @@ Split tên train chưa cung cấp reference labels để tính F2.
 ## Artifact dữ liệu
 
 - raw/: Parquet và dataset card nguyên bản, revision và SHA-256.
-- reports/: audit, thống kê domain và mẫu link giữ nguyên ID/URL.
+- reports/: inventory, thống kê domain, mẫu phân tầng và golden reports.
 - crawl/: raw snapshot nén theo shard, manifest và trạng thái lỗi của từng ID.
-- processed/: documents, children, parents, failures cùng manifest đầu ra.
+- processed/: documents, sections, children, parents, failures, input ledger và snapshot manifest.
+- processed/<run>/reports/: canonical/representation aliases, health JSON, HTML audit và golden candidates.
+- gates/: evidence của milestone do người review ghi nhận.
 
 Mỗi đoạn có doc_id, source_text_sha256, start_char/end_char và chunk_id ổn định.
 text là lát cắt source_text; retrieval_text được chuẩn hóa riêng. Offset tham
@@ -70,10 +82,18 @@ Tạo môi trường từ thư mục repo:
 Sau khi đặt biến môi trường, activate lại env. Local phục vụ chỉnh sửa và kiểm tra
 nhẹ; các notebook dành cho Colab. Thư viện dữ liệu và tokenizer không yêu cầu GPU.
 
+Env r2ai-stage3 đã được tạo trên máy làm việc; package hiện là 0.2.0.
+
 Kiểm tra mã:
 
     python -m pytest -q
     python scripts/check_notebooks.py
+
+Kiểm tra riêng tokenizer BGE-M3, không tải model weights:
+
+    python scripts/check_tokenizer.py --report artifacts/tokenizer-validation.json
+
+Dùng --local-tokenizer <snapshot-directory> nếu tokenizer pinned đã có trong cache.
 
 Sinh lại notebook sau khi sửa cell source:
 
@@ -81,11 +101,17 @@ Sinh lại notebook sau khi sửa cell source:
 
 ## Phạm vi hiện tại
 
-Giai đoạn này tạo nền xử lý dữ liệu có thể resume. Chưa tạo embedding/index,
+Giai đoạn này triển khai phần data của plan gốc và supplement đã chốt. Chưa tạo embedding/index,
 chưa huấn luyện reranker và chưa triển khai scorer F2 chính thức. Child 180,
 overlap 40 và parent 512 token là các tham số khởi đầu cho thí nghiệm.
-PDF scan/OCR, adapter đặc thù nguồn lớn và section parsing cần được bổ sung theo
-báo cáo sample. Lỗi crawl/parse được lưu; không tạo văn bản thay thế cho nguồn lỗi.
+Section parser dùng heading có thật trong nguồn và fallback body khi không tìm thấy.
+PDF scan/OCR và adapter đặc thù nguồn lớn cần bổ sung theo báo cáo sample. LOW quality
+vẫn eligible; lỗi crawl/parse được lưu và không có văn bản thay thế cho nguồn lỗi.
+
+FROZEN_CANDIDATE là đầu vào bất biến cho index/benchmark. PROMOTED cần evidence
+retrieval, tài nguyên và human review ở giai đoạn sau. Xem
+[phạm vi triển khai supplement](docs/SUPPLEMENT_IMPLEMENTATION.md) và
+[kết quả kiểm tra thực tế](docs/VALIDATION.md).
 
 Hai repo r2ai-stage-1 và r2ai-stage-2 ngoài VietMedBridge dùng làm nguồn tham khảo.
 Các file kế hoạch .md trong repo giữ bối cảnh thiết kế. Data, cache và artifact

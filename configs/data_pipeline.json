@@ -1,0 +1,30 @@
+{
+  "pipeline_api": 2,
+  "stage_a": {"size": 1000, "seed": 20261002},
+  "crawler": {
+    "concurrency": 4,
+    "shard_size": 512,
+    "per_host_delay": 1.0,
+    "timeout_seconds": 30,
+    "max_bytes": 16777216,
+    "max_shard_bytes": 536870912,
+    "attempts": 3,
+    "respect_robots": true
+  },
+  "chunking": {
+    "child_tokens": 180,
+    "overlap_tokens": 40,
+    "parent_tokens": 512,
+    "snap_sentences": true,
+    "prefer_sections": true,
+    "dense_max_tokens": 512
+  },
+  "audit_size": 100,
+  "resources": {
+    "gpu_type": null,
+    "max_gpu_hours": null,
+    "max_storage_bytes": null,
+    "deadline_margin_hours": null,
+    "embedding_policy": "UNDECIDED"
+  }
+}

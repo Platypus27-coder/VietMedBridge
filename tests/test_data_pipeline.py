@@ -110,7 +110,7 @@ def test_resume_retry_preserves_success_and_official_ids(tmp_path):
     assert retried["statuses"] == {"ok": 3}
     assert calls["/a"] == 2  # successful sources are not fetched again
     run = tmp_path / "crawl/smoke-v1"
-    assert len(list(run.glob("*.raw.jsonl.gz"))) == 2  # old attempt remains intact
+    assert len(list(run.rglob("*.raw.jsonl.gz"))) == 2  # old attempt remains intact
     built = build_corpus(
         run, tmp_path / "processed", CharacterTokenizer(), TOKENIZER_SPEC,
         config=ChunkConfig(child_tokens=40, overlap_tokens=10, parent_tokens=90), work_dir=tmp_path,
