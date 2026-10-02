@@ -44,6 +44,12 @@ runs to establish why those requests were denied.
 
 ## Colab follow-up
 
+The uploaded Colab archive `4c49d3358aa818b7` has now passed integrity and
+fetch review for ID 206172: both HTTP and browser returned the correct article
+with status 200. See [the Colab review](stage-a-v2-colab-probe-4c49d3358aa818b7.md).
+The one-URL diagnostic can expand to 11 while preserving its checkpoints;
+generic extraction still needs article-boundary cleanup before ingestion.
+
 Run `01e_colab_browser_diagnosis.ipynb` in a fresh CPU runtime, using the same
 Drive data root and the existing 01d outputs. It has a separate
 `browser_probe_code_lock.json` and does not change Stage A's code lock.
@@ -80,5 +86,5 @@ responses and no website traffic: an allowed first URL redirects to a
 Disallow URL and is blocked; an allowed redirect returning 403 has its actual
 error HTML, DOM and screenshot archived. The local live sample above verifies
 the adapter also works with an actual article. Notebook cells are validated
-for notebook schema and Python syntax; Colab execution remains to be checked
-on the operator's runtime.
+for notebook schema and Python syntax; the uploaded one-URL Colab execution
+has also been reviewed as described above.
