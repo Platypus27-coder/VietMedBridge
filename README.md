@@ -12,9 +12,11 @@ Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuố
    tải snapshot cố định, kiểm tra schema/ID, inventory URL, mẫu Stage A ~1.000 URL phân tầng và golden regression.
 2. [01 — Crawl nguồn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb):
    crawl Stage A, lưu bytes nguồn/hash và outcome cho từng ID, resume/retry từng shard.
-3. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
+3. [01b — Phục hồi URL lỗi Stage A](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01b_colab_recover_failed_urls.ipynb):
+   kiểm đủ ID/URL của mẫu, retry một lượt trong cùng checkpoint và xuất ledger lỗi theo domain.
+4. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
    trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
-4. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
+5. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
    kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
 
 Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
@@ -36,6 +38,13 @@ hình cần tên run mới. Các runtime đồng thời phải dùng worker inde
 Với hàng triệu URL, cần kiểm tra lỗi theo domain và bổ sung bulk/API adapter cho
 những nguồn lớn trước khi triển khai toàn corpus.
 
+Nếu Stage A có URL lỗi, chạy notebook 01b với `code_lock.json` của run hiện tại.
+Notebook kiểm đủ official ID/URL của mẫu, retry một lượt, rồi ghi danh sách URL
+chưa tải được và số URL của từng domain bị ảnh hưởng trong inventory toàn corpus
+vào `reports/crawl_recovery/stage-a-v2/`. Retry không vượt robots.txt hoặc HTTP 403;
+các nguồn này cần quyền truy cập hoặc API/bulk được phép. Giữ cùng code lock khi
+chạy notebook 02–03 trên checkpoint Stage A này.
+
 Stage A dùng 11 fixture synthetic để bootstrap. Notebook 03 xuất 100 nguồn để
 team gán expected snippets và replay thành golden nguồn thật. Scale-up cần bộ
 100–500 nguồn này pass, human review và toàn bộ range đã có outcome. Stage B2/C
@@ -48,7 +57,7 @@ Nguồn: [AIGuruTinix/ViBioMIR](https://huggingface.co/datasets/AIGuruTinix/ViBi
 Hai cấu hình Hub là query và corpus; cả hai dùng split tên train. Cấu hình query
 hiện có id/query; corpus có id/url và chưa chứa văn bản tài liệu.
 
-Revision khởi đầu: ca87a68e42843d0a49b57d02e6e3d28ea15273c9.
+Revision pin kiểm tra ngày 2026-10-02: 0148f6f80ffafed5c005af6d506ccfd9d3fb47a7.
 Metadata tại thời điểm kiểm tra báo 4.394.718 dòng corpus, trong khi dataset card
 ghi 4.420.561 liên kết. Pipeline đếm trực tiếp Parquet và không suy luận rằng ID
 liên tục từ 1. ID chính thức được giữ nguyên, kể cả khi URL hoặc nội dung trùng.

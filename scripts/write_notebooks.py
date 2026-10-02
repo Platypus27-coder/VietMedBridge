@@ -349,6 +349,205 @@ def main():
         khi chưa có benchmark retrieval và budget đã đo.
         """),
     ])
+    save("01b_colab_recover_failed_urls.ipynb", [
+        md("""
+        # VietMedBridge — 01b: Phục hồi và phân loại URL lỗi Stage A
+
+        Chạy sau notebook 01, trước notebook 02. Notebook này dùng đúng package
+        đang khóa trong `code_lock.json` để giữ nguyên checkpoint `stage-a-v2`.
+        Nó kiểm từng official ID/URL trong mẫu, retry một lượt các ID lỗi, rồi
+        lưu danh sách chưa tải được và quy mô domain tương ứng trên toàn corpus.
+
+        Retry vẫn tuân theo robots.txt. HTTP 403, robots_blocked và HTTP 404 cần
+        tuyến truy cập được phép hoặc xác minh nguồn; số URL có outcome không phải
+        số trang đã tải thành công. Chạy trên CPU.
+        """),
+        code(BOOTSTRAP),
+        md("## 1. Kiểm checkpoint và đối chiếu mọi ID/URL trong mẫu"),
+        code("""
+        from collections import Counter
+        from urllib.parse import urlsplit
+        import pandas as pd
+        import pyarrow.parquet as pq
+        from vietmedbridge.artifacts import (
+            atomic_json, code_fingerprint, read_json, sha256_file, utc_now, verify_file,
+        )
+        from vietmedbridge.crawl import (
+            CrawlConfig, completed_parts, crawl_links, iter_raw_records, range_complete,
+        )
+        from vietmedbridge.dataset import load_snapshot
+
+        RUN_NAME = "stage-a-v2"
+        RUN_DIR = DATA_ROOT / "crawl" / RUN_NAME
+        REPORT_DIR = DATA_ROOT / "reports" / "crawl_recovery" / RUN_NAME
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        RUN_INFO = read_json(RUN_DIR / "run.json")
+        SNAPSHOT = load_snapshot(DATA_ROOT)
+        PILOT = read_json(DATA_ROOT / "reports/inventory/stage_a.json")
+        if PILOT["corpus_sha256"] != SNAPSHOT["files"]["links_corpus.parquet"]["sha256"]:
+            raise ValueError("Stage A inventory không thuộc corpus snapshot hiện tại.")
+        INPUT_LINKS = DATA_ROOT / PILOT["files"]["stage_a_links"]["path"]
+        verify_file(INPUT_LINKS, PILOT["files"]["stage_a_links"]["sha256"])
+        if sha256_file(INPUT_LINKS) != RUN_INFO["links_sha256"]:
+            raise ValueError("Checkpoint và Stage A input không cùng file.")
+        if RUN_INFO["origin_corpus_sha256"] != SNAPSHOT["files"]["links_corpus.parquet"]["sha256"]:
+            raise ValueError("Checkpoint không thuộc corpus snapshot hiện tại.")
+        if RUN_INFO["code_sha256"] != code_fingerprint():
+            raise RuntimeError(
+                "Checkpoint dùng code khác runtime hiện tại. Giữ code_lock của run gốc; "
+                "không nâng CODE_REVISION trước khi phục hồi Stage A."
+            )
+
+        input_table = pq.read_table(INPUT_LINKS, columns=["id", "url"])
+        EXPECTED = {int(row["id"]): row["url"] for row in input_table.to_pylist()}
+        if len(EXPECTED) != input_table.num_rows:
+            raise ValueError("Stage A input có ID trùng.")
+        if RUN_INFO["requested_range"] != {"start": 0, "stop": input_table.num_rows}:
+            raise ValueError("Run không bao phủ đúng toàn bộ Stage A input.")
+
+        ERROR_ACTION = {
+            "ConnectTimeout": "retry_later",
+            "ReadTimeout": "retry_later",
+            "robots_unavailable": "check_robots_then_retry",
+            "robots_blocked": "authorized_api_or_permission",
+            "http_403": "review_source_access",
+            "http_404": "verify_moved_or_removed_source",
+        }
+        FAILURE_COLUMNS = [
+            "doc_id", "url", "domain", "error", "http_status", "attempts", "next_action",
+        ]
+
+        def failure_frame():
+            parts = completed_parts(RUN_DIR)
+            if not range_complete(RUN_INFO, parts):
+                raise ValueError("Crawl range còn thiếu shard; resume notebook 01 trước.")
+            seen = set()
+            failures = []
+            for part in parts:
+                for raw in iter_raw_records(RUN_DIR / part["raw_file"]):
+                    doc_id = int(raw["doc_id"])
+                    if doc_id in seen or EXPECTED.get(doc_id) != raw["url"]:
+                        raise ValueError(f"ID/URL trùng hoặc lệch official input: {doc_id}")
+                    seen.add(doc_id)
+                    if raw["status"] != "ok":
+                        error = raw.get("error", "unknown_error")
+                        failures.append({
+                            "doc_id": doc_id, "url": raw["url"],
+                            "domain": (urlsplit(raw["url"]).hostname or "").lower(),
+                            "error": error, "http_status": raw.get("http_status"),
+                            "attempts": raw.get("attempts"),
+                            "next_action": ERROR_ACTION.get(error, "manual_review"),
+                        })
+            if seen != set(EXPECTED):
+                raise ValueError("Crawl ledger thiếu hoặc dư official ID.")
+            return pd.DataFrame(failures, columns=FAILURE_COLUMNS).sort_values(
+                ["error", "domain", "doc_id"], ignore_index=True,
+            )
+
+        BEFORE = failure_frame()
+        BEFORE_PATH = REPORT_DIR / "failures_before_retry.csv"
+        BEFORE.to_csv(BEFORE_PATH, index=False, encoding="utf-8-sig")
+        print("Official Stage A IDs:", len(EXPECTED), "| successful:", len(EXPECTED) - len(BEFORE),
+              "| unresolved:", len(BEFORE))
+        display(BEFORE.groupby(["error", "domain"], dropna=False).size().rename("rows").reset_index())
+        """),
+        md("""
+        ## 2. Retry đúng run hiện tại một lượt
+
+        Package hiện tại retry mọi ID lỗi và giữ lại bản tải thành công. Một lượt
+        giúp phát hiện nguồn vừa phục hồi, nhưng sẽ không tự giải quyết robots
+        blocked hay quyền truy cập HTTP 403. Marker trên Drive tránh chạy lại
+        lượt retry khi mở notebook lần nữa. Nếu Colab ngắt giữa chừng, chạy lại
+        cell này; shard đã commit vẫn giữ nguyên và có thể được retry thêm một lần.
+        """),
+        code("""
+        RETRY_MARKER = REPORT_DIR / "retry_once.json"
+        if RETRY_MARKER.exists():
+            if read_json(RETRY_MARKER)["run_signature"] != RUN_INFO["signature"]:
+                raise ValueError("Retry marker không thuộc run hiện tại.")
+            print("Đã có lượt retry hoàn tất:", RETRY_MARKER)
+        elif BEFORE.empty:
+            atomic_json(RETRY_MARKER, {"run_name": RUN_NAME,
+                                       "run_signature": RUN_INFO["signature"],
+                                       "before_failed": 0,
+                                       "note": "No failed IDs to retry", "completed_at": utc_now()})
+            print("Không có ID lỗi để retry.")
+        else:
+            RETRY_SUMMARY = await crawl_links(
+                INPUT_LINKS, DATA_ROOT / "crawl", run_name=RUN_NAME,
+                config=CrawlConfig(**RUN_INFO["config"]),
+                start=RUN_INFO["row_range"]["start"], stop=RUN_INFO["row_range"]["stop"],
+                worker_index=0, worker_count=1, retry_failed=True,
+                max_shards=None, work_dir=WORK_DIR,
+                origin_corpus_sha256=RUN_INFO["origin_corpus_sha256"],
+            )
+            if not RETRY_SUMMARY["range_complete"] or RETRY_SUMMARY["recorded_documents"] != len(EXPECTED):
+                raise ValueError("Retry chưa ghi đủ outcome cho Stage A input.")
+            atomic_json(RETRY_MARKER, {
+                "run_name": RUN_NAME, "run_signature": RUN_INFO["signature"],
+                "before_failed": len(BEFORE), "call": RETRY_SUMMARY["call"],
+                "completed_at": utc_now(),
+            })
+            print("Sau retry:", RETRY_SUMMARY["statuses"])
+        """),
+        md("""
+        ## 3. Xuất ledger còn lỗi và quy mô domain toàn corpus
+
+        File `failures_after_retry.csv` giữ official ID và URL gốc cho mọi nguồn
+        chưa lấy được nội dung. `affected_domains_in_corpus.csv` đếm chính xác
+        số URL của các domain này trong inventory toàn corpus; số lỗi trên mẫu
+        không được dùng làm tỷ lệ dự báo không trọng số cho toàn corpus.
+        """),
+        code("""
+        AFTER = failure_frame()
+        AFTER_PATH = REPORT_DIR / "failures_after_retry.csv"
+        AFTER.to_csv(AFTER_PATH, index=False, encoding="utf-8-sig")
+        INVENTORY = DATA_ROOT / PILOT["files"]["url_inventory"]["path"]
+        verify_file(INVENTORY, PILOT["files"]["url_inventory"]["sha256"])
+        affected_domains = sorted(AFTER["domain"].dropna().unique().tolist())
+        import duckdb
+        with duckdb.connect() as con:
+            con.execute("SET memory_limit = '512MB'")
+            con.execute("SET temp_directory = ?", [str(WORK_DIR)])
+            con.execute("SET threads = 2")
+            if affected_domains:
+                domains = con.execute(
+                    '''SELECT domain, count(*) AS official_urls
+                       FROM read_parquet(?)
+                       WHERE domain IN (SELECT unnest(?))
+                       GROUP BY domain ORDER BY official_urls DESC, domain''',
+                    [str(INVENTORY), affected_domains],
+                ).df()
+            else:
+                domains = pd.DataFrame(columns=["domain", "official_urls"])
+        domains_path = REPORT_DIR / "affected_domains_in_corpus.csv"
+        domains.to_csv(domains_path, index=False, encoding="utf-8-sig")
+        counts = {str(k): int(v) for k, v in Counter(AFTER["error"]).items()}
+        atomic_json(REPORT_DIR / "triage.json", {
+            "run_name": RUN_NAME, "run_signature": RUN_INFO["signature"],
+            "official_stage_a_ids": len(EXPECTED), "successful": len(EXPECTED) - len(AFTER),
+            "unresolved": len(AFTER), "errors": counts,
+            "failures_csv": str(AFTER_PATH.relative_to(DATA_ROOT)),
+            "failures_sha256": sha256_file(AFTER_PATH),
+            "affected_domains_csv": str(domains_path.relative_to(DATA_ROOT)),
+            "affected_domains_sha256": sha256_file(domains_path),
+            "created_at": utc_now(),
+        })
+        print("Successful:", len(EXPECTED) - len(AFTER), "| unresolved:", len(AFTER))
+        print("Retry result CSV:", AFTER_PATH)
+        print("Affected domain counts:", domains_path)
+        display(AFTER.groupby(["error", "domain", "next_action"], dropna=False).size()
+                .rename("rows").reset_index())
+        display(domains)
+        """),
+        md("""
+        Sau cell cuối, chạy notebook 02 trên cùng `stage-a-v2` và cùng code lock
+        để đánh giá chất lượng phần đã tải. Những ID chưa lấy được nội dung đi vào
+        failures/ledger của build, không biến mất. Trước khi mở rộng corpus, xử lý
+        các domain bị chặn qua API/bulk được phép hoặc quyền truy cập từ nguồn;
+        không coi `range_complete` là 100% tải được nội dung.
+        """),
+    ])
     save("02_colab_extract_and_chunk.ipynb", [
         md("""
         # VietMedBridge — 02: Trích văn bản và chia đoạn có provenance
