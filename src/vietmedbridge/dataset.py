@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import warnings
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -10,16 +11,41 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils import RevisionNotFoundError
 
 from .artifacts import atomic_json, read_json, runtime_versions, sha256_file, utc_now, verify_file
 
 DATASET_ID = "AIGuruTinix/ViBioMIR"
-DATASET_REVISION = "ca87a68e42843d0a49b57d02e6e3d28ea15273c9"
+DATASET_REVISION = "0148f6f80ffafed5c005af6d506ccfd9d3fb47a7"
 
 
 def snapshot_dataset(data_root: str | Path, revision: str = DATASET_REVISION) -> dict:
     root = Path(data_root)
-    info = HfApi().dataset_info(DATASET_ID, revision=revision, files_metadata=True)
+    # Reuse a verified immutable snapshot without requiring the Hub on every rerun.
+    pinned_target = root / "raw" / "hub" / revision
+    pinned_manifest = pinned_target / "snapshot.json"
+    if pinned_manifest.exists():
+        manifest = read_json(pinned_manifest)
+        for entry in manifest["files"].values():
+            verify_file(root / entry["path"], entry["sha256"])
+        atomic_json(root / "raw" / "snapshot.json", manifest)
+        return manifest
+
+    api = HfApi()
+    resolved_from = revision
+    try:
+        info = api.dataset_info(DATASET_ID, revision=revision, files_metadata=True)
+    except RevisionNotFoundError:
+        # Hub repositories can be force-pushed. Fall forward only when an immutable
+        # requested revision disappeared, then record the actual SHA for replay.
+        info = api.dataset_info(DATASET_ID, revision="main", files_metadata=True)
+        resolved_from = "main"
+        warnings.warn(
+            f"Dataset revision {revision!r} no longer exists; using current main "
+            f"({info.sha}). The resolved SHA is recorded in the snapshot manifest.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     target = root / "raw" / "hub" / info.sha
     target.mkdir(parents=True, exist_ok=True)
     existing = target / "snapshot.json"
@@ -47,7 +73,9 @@ def snapshot_dataset(data_root: str | Path, revision: str = DATASET_REVISION) ->
             entry.update(rows=parquet.metadata.num_rows, schema=str(parquet.schema_arrow))
         files[name] = entry
     manifest = {
-        "dataset_id": DATASET_ID, "revision": info.sha, "created_at": utc_now(),
+        "dataset_id": DATASET_ID, "revision": info.sha,
+        "requested_revision": revision, "resolved_from": resolved_from,
+        "created_at": utc_now(),
         "configs": {"query": {"split": "train", "file": "query.parquet"},
                     "corpus": {"split": "train", "file": "links_corpus.parquet"}},
         "files": files, "runtime": runtime_versions(),

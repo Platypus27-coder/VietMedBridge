@@ -139,7 +139,8 @@ def main():
         code("""
         from vietmedbridge.dataset import DATASET_REVISION, snapshot_dataset, audit_dataset
 
-        # Revision đã kiểm tra của AIGuruTinix/ViBioMIR. Đổi revision sẽ tạo snapshot mới.
+        # Revision đã kiểm tra của AIGuruTinix/ViBioMIR. Nếu Hub xóa revision này,
+        # package phân giải main, cảnh báo và vẫn khóa SHA thực tế trong manifest.
         SNAPSHOT = snapshot_dataset(DATA_ROOT, revision=DATASET_REVISION)
         print("Dataset revision:", SNAPSHOT["revision"])
         for name, entry in SNAPSHOT["files"].items():
