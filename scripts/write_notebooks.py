@@ -64,9 +64,18 @@ if "vietmedbridge" in sys.modules and globals().get("_VMB_IMPORTED_COMMIT") != C
     raise RuntimeError("Mã nguồn đổi trong runtime đã import package. Restart session rồi chạy lại notebook.")
 subprocess.run(["git", "-C", str(CHECKOUT), "checkout", "--detach", "FETCH_HEAD"], check=True)
 subprocess.run(
-    [sys.executable, "-m", "pip", "install", "-q", "-e", str(CHECKOUT) + "[notebook]"],
+    [sys.executable, "-m", "pip", "install", "-q", "-e", ".[notebook]"],
+    cwd=CHECKOUT,
     check=True,
 )
+PACKAGE_SOURCE = CHECKOUT / "src"
+if not (PACKAGE_SOURCE / "vietmedbridge" / "__init__.py").is_file():
+    raise RuntimeError(
+        f"Repo checkout thiếu package source: {PACKAGE_SOURCE}; commit={CODE_COMMIT}. "
+        "Kiểm tra lại git fetch/checkout ở output của cell Bootstrap."
+    )
+sys.path.insert(0, str(PACKAGE_SOURCE))
+importlib.invalidate_caches()
 from vietmedbridge.artifacts import atomic_json, runtime_versions
 from vietmedbridge import PIPELINE_API_VERSION
 if PIPELINE_API_VERSION != EXPECTED_PIPELINE_API:
@@ -79,6 +88,8 @@ atomic_json(DATA_ROOT / "runtime.json", {
     "git_commit": CODE_COMMIT, "python": sys.version, "packages": runtime_versions()
 })
 print("Code commit:", CODE_COMMIT)
+import vietmedbridge
+print("Package source:", Path(vietmedbridge.__file__).resolve())
 print("Dữ liệu/checkpoint:", DATA_ROOT)
 '''
 
@@ -152,6 +163,9 @@ def main():
 
         Mẫu ~1.000 URL cân bằng nhóm domain, định dạng và language hint từ URL.
         Đây là mẫu feasibility; tỷ lệ không trọng số chưa phải dự báo toàn corpus.
+        **Kiểm chứng nhanh:** output của cell Bootstrap phải hiện `Code commit` và
+        `Package source` dưới `/content/VietMedBridge/src/vietmedbridge`. Nếu setup
+        dừng ở lệnh pip/git, xử lý lỗi hiển thị tại đó trước khi chạy cell này.
         Khi mở runtime mới hoặc vừa restart, chạy lại cell **Bootstrap** đầu notebook
         (mount Drive, git clone/fetch và pip install) trước khi chạy cell này.
         Golden suite dùng 11 fixture synthetic offline để kiểm tra trước pilot. Team cần
