@@ -34,7 +34,10 @@ additional missing official article IDs.
 Extraction review found genuine article content and its conclusion, but
 generic extraction also retained author biography, display controls and
 related-article titles. The browser variant additionally retained cookie
-consent text. The recorded `quality_tier=HIGH` does not establish clean
+consent text. All six article H2 labels are present in raw HTML but absent
+from both extracted text variants, even after whitespace normalization;
+article structure therefore needs preservation in the extraction stage.
+The recorded `quality_tier=HIGH` does not establish clean
 article boundaries. `NO_SECTIONS` comes from the probe passing the default
 section count into its quality helper; the HTML actually contains the six
 article headings. `ONE_GIANT_PARAGRAPH` also needs to be interpreted with
