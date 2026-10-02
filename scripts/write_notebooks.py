@@ -24,6 +24,7 @@ if importlib.util.find_spec("google.colab") is None:
     raise RuntimeError("Notebook này được thiết kế cho Google Colab.")
 
 from google.colab import drive
+# Chạy lại cell này sau MỖI runtime mới/restart: package chỉ được cài trong phiên Colab.
 drive.mount("/content/drive")
 
 # Giữ cùng DATA_ROOT trong cả bốn notebook.
@@ -151,11 +152,19 @@ def main():
 
         Mẫu ~1.000 URL cân bằng nhóm domain, định dạng và language hint từ URL.
         Đây là mẫu feasibility; tỷ lệ không trọng số chưa phải dự báo toàn corpus.
+        Khi mở runtime mới hoặc vừa restart, chạy lại cell **Bootstrap** đầu notebook
+        (mount Drive, git clone/fetch và pip install) trước khi chạy cell này.
         Golden suite dùng 11 fixture synthetic offline để kiểm tra trước pilot. Team cần
         gán expected assertions cho 100–500 nguồn thật và replay ở notebook 03 trước Stage B1.
         Đây là bước bootstrap golden thực tế từ nguồn đã crawl, chưa hoàn tất golden set của plan.
         """),
         code("""
+        import importlib.util
+        if importlib.util.find_spec("vietmedbridge") is None:
+            raise RuntimeError(
+                "Chưa setup package trong runtime này. Chạy cell Bootstrap đầu notebook "
+                "để git clone/cập nhật VietMedBridge và cài package, rồi chạy lại cell này."
+            )
         from vietmedbridge.inventory import create_stage_a_sample
         from vietmedbridge.golden import run_golden_suite
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer

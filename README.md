@@ -19,7 +19,9 @@ Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuố
 
 Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
 
-Cell đầu mount Drive và cài thư viện từ repo. Giữ cùng DATA_ROOT trong cả bốn
+Trong **mỗi runtime Colab mới hoặc vừa restart**, chạy cell Bootstrap đầu notebook:
+nó mount Drive, clone/cập nhật repo rồi cài package. code_lock.json lưu commit,
+nhưng không giữ package đã cài trong runtime đã mất. Giữ cùng DATA_ROOT trong cả bốn
 notebook; mặc định là MyDrive/VietMedBridge/data. code_lock.json lưu commit đã
 chạy để các notebook sau dùng lại cùng mã nguồn. Tokenizer cũng được ghim revision.
 
