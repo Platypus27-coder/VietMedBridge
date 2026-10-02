@@ -2784,6 +2784,16 @@ trả HTTP 403 ở cả hai lần thử. Không có ứng viên mới; xem
 4 ứng viên 01c là `valid_article_coverage` trước human review và không scale
 10k dựa trên tỷ lệ này.
 
+Kết quả 01d là lỗi truy cập của HTTP từ Colab, chưa phải kết luận không crawl
+được domain. 01d dùng `impersonate=None`, browser chưa được chạy và nội dung
+403 chưa được lưu. Kiểm thử local ngày 2026-10-03 tải được cả 11 URL bằng HTTP
+Chrome TLS; browser Scrapling/Chromium tải và render được URL mẫu. Kết quả
+local chưa chứng minh Colab truy cập được và chưa được nhập vào corpus.
+Notebook 01e kiểm một URL trước, lưu response kể cả 403, DOM, screenshot,
+headers đã lọc, hashes và checkpoint riêng. Guard CDP được cài trước navigation
+và kiểm redirect. Chỉ tăng lên 11 sau khi kiểm bài mẫu; xem báo cáo
+`reports/stage-a-v2-browser-probe.md`.
+
 Thử nghiệm 01d tách riêng nhằm sửa hai thiếu sót của 01c: request Scrapling
 chưa pacing theo `Crawl-delay`/`Request-rate`, và redirect chưa được recheck
 robots trước mỗi hop. Browser của 01c tạm dừng vì `page_setup` trong Scrapling

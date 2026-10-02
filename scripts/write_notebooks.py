@@ -994,6 +994,9 @@ def main():
         """),
     ])
 
+    from browser_probe_cells import browser_cells
+    save("01e_colab_browser_diagnosis.ipynb", browser_cells(BOOTSTRAP, md, code))
+
     save("02_colab_extract_and_chunk.ipynb", [
         md("""
         # VietMedBridge — 02: Trích văn bản và chia đoạn có provenance

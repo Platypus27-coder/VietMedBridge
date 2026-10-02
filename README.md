@@ -18,9 +18,11 @@ Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuố
    đọc báo cáo sau retry, phân loại robots và thử phục hồi có checkpoint riêng trên các URL được phép; không đổi `stage-a-v2`.
 5. [01d — Thử lại có robots guard và pacing](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01d_colab_guarded_recovery.ipynb):
    chỉ xử lý những URL chưa thành article candidate từ experiment 01c đã khóa hash; kiểm robots trước từng request/redirect/retry và xuất báo cáo riêng.
-6. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
+6. [01e — Chẩn đoán 403 bằng Chromium](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01e_colab_browser_diagnosis.ipynb):
+   thử một URL Long Châu bằng HTTP Chrome TLS và browser JavaScript; lưu cả trang lỗi, DOM, screenshot và hashes; có checkpoint riêng. Sau khi kiểm bài mẫu, tăng `N_URLS` lên 11 để thử các URL còn lại.
+7. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
    trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
-7. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
+8. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
    kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
 
 Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
@@ -45,8 +47,8 @@ những nguồn lớn trước khi triển khai toàn corpus.
 Nếu Stage A có URL lỗi, chạy notebook 01b với `code_lock.json` của run hiện tại.
 Notebook kiểm đủ official ID/URL của mẫu, retry một lượt, rồi ghi danh sách URL
 chưa tải được và số URL của từng domain bị ảnh hưởng trong inventory toàn corpus
-vào `reports/crawl_recovery/stage-a-v2/`. Retry không vượt robots.txt hoặc HTTP 403;
-các nguồn này cần quyền truy cập hoặc API/bulk được phép. Giữ cùng code lock khi
+vào `reports/crawl_recovery/stage-a-v2/`. Retry giữ robots guard; HTTP 403 cần
+chẩn đoán riêng bằng 01c–01e, chưa chứng minh URL không thể tải. Giữ cùng code lock khi
 chạy notebook 02–03 trên checkpoint Stage A này.
 
 Notebook 01c dùng runtime CPU mới và `recovery_code_lock.json` riêng để tải mã
@@ -55,7 +57,13 @@ mới mà không làm đổi code hash của checkpoint Stage A. Nó đối chi�
 nghiệm lên Drive. Browser hiện tạm dừng vì Scrapling 0.4.15 có thể tiếp tục
 điều hướng khi callback cài route guard lỗi. Notebook 01d dùng code lock riêng,
 chỉ thử lại các URL chưa thành ứng viên bằng HTTP có kiểm robots và pacing ở
-từng bước; không cần chạy lại 01c. `article_candidate` chỉ là ứng viên cần người
+từng bước; không cần chạy lại 01c. Notebook 01e dùng `browser_probe_code_lock.json`,
+Chromium với profile mới và guard CDP cài trước điều hướng, bao gồm redirect.
+Runtime cần CPU; không cần GPU. `N_URLS=1` là mặc định. Nếu cần thử lại một
+checkpoint lỗi, đổi `PROBE_LABEL` để giữ bằng chứng của lượt trước.
+Kết quả kiểm thử local 2026-10-03 tải được cả 11 URL bằng HTTP; browser tải
+được URL mẫu. Colab có môi trường mạng khác và cần kiểm riêng — xem
+[báo cáo](reports/stage-a-v2-browser-probe.md). `article_candidate` chỉ là ứng viên cần người
 kiểm nội dung, chưa được nhập vào canonical corpus. Muốn tiếp
 tục notebook 02 trên raw `stage-a-v2`, dùng lại `code_lock.json` cũ trong một
 runtime mới; thay package code giữa runtime đang import sẽ bị chặn.
