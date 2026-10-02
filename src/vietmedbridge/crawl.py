@@ -13,8 +13,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
-from urllib.robotparser import RobotFileParser
+from urllib.parse import urljoin
 
 import httpx
 import pyarrow.parquet as pq
@@ -25,6 +24,7 @@ from .artifacts import (
     runtime_versions, sha256_file, utc_now, verify_file,
 )
 from .dataset import iter_link_shards, url_host
+from .robots import RobotsDecision, RobotsResolver
 
 
 @dataclass(frozen=True)
@@ -49,8 +49,9 @@ class CrawlConfig:
 
 
 class SourceFailure(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, metadata: dict | None = None):
         self.code = code
+        self.metadata = metadata or {}
         super().__init__(code)
 
 
@@ -66,90 +67,76 @@ class Fetcher:
         )
         self.host_locks: dict[str, asyncio.Lock] = {}
         self.host_times: dict[str, float] = {}
-        self.robot_locks: dict[str, asyncio.Lock] = {}
-        self.robots: dict[str, RobotFileParser | bool] = {}
+        self.robots = RobotsResolver(self.client, self.pace, user_agent=config.user_agent)
 
-    async def pace(self, url: str) -> None:
+    async def pace(self, url: str, minimum_delay: float = 0.0) -> None:
         host = url_host(url)
         lock = self.host_locks.setdefault(host, asyncio.Lock())
         async with lock:
             delay = self.host_times.get(host, 0.0) - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
-            self.host_times[host] = time.monotonic() + self.config.per_host_delay
+            self.host_times[host] = time.monotonic() + max(self.config.per_host_delay, minimum_delay)
+
+    async def robots_decision(self, url: str) -> RobotsDecision:
+        if not self.config.respect_robots:
+            return RobotsDecision("ROBOTS_DISABLED", True, "", utc_now())
+        return await self.robots.decision(url)
 
     async def allowed(self, url: str) -> bool:
-        if not self.config.respect_robots:
-            return True
-        parts = urlsplit(url)
-        origin = f"{parts.scheme}://{parts.netloc}"
-        lock = self.robot_locks.setdefault(origin, asyncio.Lock())
-        async with lock:
-            if origin not in self.robots:
-                robots_url = origin + "/robots.txt"
-                for redirect in range(9):
-                    url_host(robots_url)
-                    await self.pace(robots_url)
-                    async with self.client.stream("GET", robots_url) as response:
-                        if response.status_code in (301, 302, 303, 307, 308):
-                            location = response.headers.get("location")
-                            if not location:
-                                raise SourceFailure("robots_unavailable")
-                            robots_url = urljoin(robots_url, location)
-                            continue
-                        if response.status_code in (404, 410):
-                            self.robots[origin] = True
-                        elif response.status_code in (401, 403):
-                            self.robots[origin] = False
-                        elif response.status_code != 200:
-                            raise SourceFailure("robots_unavailable")
-                        else:
-                            body = bytearray()
-                            async for chunk in response.aiter_bytes():
-                                body.extend(chunk)
-                                if len(body) > 512 * 1024:
-                                    raise SourceFailure("robots_too_large")
-                            parser = RobotFileParser(robots_url)
-                            parser.parse(body.decode("utf-8", errors="replace").splitlines())
-                            self.robots[origin] = parser
-                        break
-                else:
-                    raise SourceFailure("robots_too_many_redirects")
-        policy = self.robots[origin]
-        return policy if isinstance(policy, bool) else policy.can_fetch("VietMedBridge", url)
+        return (await self.robots_decision(url)).allowed
 
     async def request(self, url: str) -> tuple[dict, bytes]:
         current = url
+        robots_checks = []
         for _ in range(9):
             url_host(current)
-            if not await self.allowed(current):
-                raise SourceFailure("robots_blocked")
-            await self.pace(current)
+            decision = await self.robots_decision(current)
+            robots_checks.append(decision.record())
+            if not decision.allowed:
+                error = ("robots_blocked" if decision.state == "ROBOTS_OK_DISALLOWED"
+                         else decision.state.lower())
+                raise SourceFailure(error, {**decision.record(), "robots_checks": robots_checks})
+            await self.pace(current, max(
+                decision.crawl_delay_seconds or 0.0,
+                decision.request_rate_gap_seconds or 0.0,
+            ))
             async with self.client.stream("GET", current) as response:
                 if response.status_code in (301, 302, 303, 307, 308):
                     location = response.headers.get("location")
                     if not location:
-                        raise SourceFailure("redirect_without_location")
+                        raise SourceFailure("redirect_without_location", {
+                            **decision.record(), "robots_checks": robots_checks,
+                        })
                     current = urljoin(current, location)
                     continue
                 if response.status_code != 200:
-                    raise httpx.HTTPStatusError(
+                    error = httpx.HTTPStatusError(
                         f"HTTP {response.status_code}", request=response.request, response=response,
                     )
+                    error.robots_metadata = {**decision.record(), "robots_checks": robots_checks}
+                    raise error
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > self.config.max_bytes:
-                        raise SourceFailure("body_too_large")
+                        raise SourceFailure("body_too_large", {
+                            **decision.record(), "robots_checks": robots_checks,
+                        })
                 if not body:
-                    raise SourceFailure("empty_body")
+                    raise SourceFailure("empty_body", {
+                        **decision.record(), "robots_checks": robots_checks,
+                    })
                 return {
                     "final_url": str(response.url),
                     "http_status": response.status_code,
                     "content_type": response.headers.get("content-type", ""),
                     "encoding": response.encoding,
+                    "capture_kind": "http_entity",
+                    **decision.record(),
+                    "robots_checks": robots_checks,
                 }, bytes(body)
-        raise SourceFailure("too_many_redirects")
+        raise SourceFailure("too_many_redirects", {"robots_checks": robots_checks})
 
     async def fetch(self, row: dict) -> dict:
         started = time.monotonic()
@@ -168,6 +155,7 @@ class Fetcher:
             except httpx.HTTPStatusError as exc:
                 code = exc.response.status_code
                 result.update(error=f"http_{code}", http_status=code)
+                result.update(getattr(exc, "robots_metadata", {}))
                 if code != 429 and code < 500:
                     break
                 retry_after = exc.response.headers.get("retry-after", "")
@@ -186,10 +174,8 @@ class Fetcher:
                     await asyncio.sleep(wait)
             except SourceFailure as exc:
                 result["error"] = exc.code
-                if exc.code != "robots_unavailable":
-                    break
-                if attempt + 1 < self.config.attempts:
-                    await asyncio.sleep(2.0 ** attempt)
+                result.update(exc.metadata)
+                break  # A new crawl window can re-probe after the robots cache expires.
             except (httpx.RequestError, ValueError) as exc:
                 result["error"] = type(exc).__name__
                 if attempt + 1 < self.config.attempts:

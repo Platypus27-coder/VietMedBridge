@@ -14,16 +14,18 @@ Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuố
    crawl Stage A, lưu bytes nguồn/hash và outcome cho từng ID, resume/retry từng shard.
 3. [01b — Phục hồi URL lỗi Stage A](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01b_colab_recover_failed_urls.ipynb):
    kiểm đủ ID/URL của mẫu, retry một lượt trong cùng checkpoint và xuất ledger lỗi theo domain.
-4. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
+4. [01c — Chẩn đoán robots và thử Scrapling](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01c_colab_robots_and_scrapling_pilot.ipynb):
+   đọc báo cáo sau retry, phân loại robots và thử phục hồi có checkpoint riêng trên các URL được phép; không đổi `stage-a-v2`.
+5. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
    trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
-5. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
+6. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
    kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
 
 Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
 
 Trong **mỗi runtime Colab mới hoặc vừa restart**, chạy cell Bootstrap đầu notebook:
 nó mount Drive, clone/cập nhật repo rồi cài package. code_lock.json lưu commit,
-nhưng không giữ package đã cài trong runtime đã mất. Giữ cùng DATA_ROOT trong cả bốn
+nhưng không giữ package đã cài trong runtime đã mất. Giữ cùng DATA_ROOT trong mọi
 notebook; mặc định là MyDrive/VietMedBridge/data. code_lock.json lưu commit đã
 chạy để các notebook sau dùng lại cùng mã nguồn. Tokenizer cũng được ghim revision.
 
@@ -44,6 +46,15 @@ chưa tải được và số URL của từng domain bị ảnh hưởng trong 
 vào `reports/crawl_recovery/stage-a-v2/`. Retry không vượt robots.txt hoặc HTTP 403;
 các nguồn này cần quyền truy cập hoặc API/bulk được phép. Giữ cùng code lock khi
 chạy notebook 02–03 trên checkpoint Stage A này.
+
+Notebook 01c dùng runtime CPU mới và `recovery_code_lock.json` riêng để tải mã
+mới mà không làm đổi code hash của checkpoint Stage A. Nó đối chiếu
+`failures_after_retry.csv` với official corpus, ghi từng robots probe/HTTP thử
+nghiệm lên Drive, và mặc định **chưa bật** browser. Sau khi xem `robots.csv`,
+bật browser cho tối đa 5 URL được phép nếu cần. `article_candidate` chỉ là ứng
+viên cần người kiểm nội dung, chưa được nhập vào canonical corpus. Muốn tiếp
+tục notebook 02 trên raw `stage-a-v2`, dùng lại `code_lock.json` cũ trong một
+runtime mới; thay package code giữa runtime đang import sẽ bị chặn.
 
 Stage A dùng 11 fixture synthetic để bootstrap. Notebook 03 xuất 100 nguồn để
 team gán expected snippets và replay thành golden nguồn thật. Scale-up cần bộ
