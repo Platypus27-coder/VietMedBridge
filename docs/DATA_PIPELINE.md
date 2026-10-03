@@ -77,6 +77,14 @@ versions và code hash. Shard giới hạn cả số record và byte JSONL trư�
 base64/metadata. Vượt budget làm attempt fail; chọn shard nhỏ hơn trong run mới,
 không tự truncate nguồn. Các thư mục bucket tránh một folder chứa toàn bộ shard.
 
+Workflow hiện dùng HTTPx cho fetch mới. Stage A đã hoàn tất chọn `stage-a-v2`
+để xử lý tiếp, với build mới `stage-a-data-v2-restored`. `read_completed_crawl`
+đọc raw cũ sau khi kiểm input/snapshot hashes, requested range, ID/URL pairs,
+done pointers và raw checksums. Nó không gửi request, không thay metadata gốc
+và không ghi code fingerprint mới lên run đã thu thập bằng code cũ. Resume fetch
+vẫn yêu cầu cùng signature; checkpoint chưa hoàn tất không được coi là cache hoàn chỉnh.
+Robots trả HTML vẫn được giữ để review trong các lượt fetch mới.
+
 Temporary files và DuckDB spill nằm ở /content/vmb_work. Publish từng file hoàn
 chỉnh, kiểm checksum; marker .done.json ghi cuối cùng mới xác nhận shard commit.
 Rename của một file không có nghĩa nhiều file đã commit cùng lúc. Temp names

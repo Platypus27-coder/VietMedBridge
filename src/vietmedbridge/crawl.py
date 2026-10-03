@@ -245,6 +245,56 @@ def range_complete(run: dict, parts: list[dict]) -> bool:
     return cursor == requested["stop"]
 
 
+def read_completed_crawl(crawl_dir: str | Path, *, links_path: str | Path,
+                         origin_corpus_sha256: str, start: int = 0,
+                         stop: int | None = None) -> dict:
+    """Verify and reuse a complete raw capture without resuming its old code.
+
+    Code/runtime fingerprints remain on the original run. They may differ from
+    the current extractor; this function only reads and verifies saved artifacts.
+    """
+    crawl_dir, links_path = Path(crawl_dir), Path(links_path)
+    run = read_json(crawl_dir / "run.json")
+    rows = pq.ParquetFile(links_path).metadata.num_rows
+    if start < 0 or (stop is not None and stop < start):
+        raise ValueError("Invalid requested row range.")
+    effective_stop = min(rows, rows if stop is None else stop)
+    if effective_stop <= start:
+        raise ValueError("Requested row range is empty.")
+    if run.get("links_sha256") != sha256_file(links_path):
+        raise ValueError("Cached crawl belongs to another input file.")
+    if run.get("origin_corpus_sha256") != origin_corpus_sha256:
+        raise ValueError("Cached crawl belongs to another official corpus snapshot.")
+    if (run.get("requested_range") != {"start": start, "stop": effective_stop}
+            or run.get("requested_input_records") != effective_stop - start):
+        raise ValueError("Cached crawl does not cover the requested range.")
+    parts = completed_parts(crawl_dir)
+    if not range_complete(run, parts):
+        raise ValueError("Cached crawl is incomplete. Resume with its original pinned code or use a new run_name.")
+    expected = iter_link_shards(
+        links_path, start=start, stop=stop, shard_size=run["config"]["shard_size"],
+    )
+    counts, captures = Counter(), Counter()
+    for part, (first, inputs) in zip(sorted(parts, key=lambda p: p["first_input_row"]), expected, strict=True):
+        if (part["first_input_row"] != first or part["records"] != len(inputs)
+                or part["input_sha256"] != digest_json(inputs)
+                or part["input_pairs_sha256"] != digest_json(sorted(inputs, key=lambda r: r["id"]))):
+            raise ValueError("Cached shard does not match the requested official ID/URL pairs.")
+        if sum(part["statuses"].values()) != part["records"]:
+            raise ValueError("Cached shard status counts do not match its records.")
+        counts.update(part["statuses"])
+        captures.update(part.get("capture_kinds", {}))
+    return {
+        "run_name": crawl_dir.name, "run_signature": run["signature"],
+        "complete_shards": len(parts), "recorded_documents": sum(p["records"] for p in parts),
+        "requested_input_records": run["requested_input_records"], "range_complete": True,
+        "statuses": dict(counts), "capture_kinds": dict(captures),
+        "reused_existing_run": True,
+        "call": {"written_shards": 0, "requested_this_call": 0, "ok_this_call": 0,
+                 "skipped_shards": len(parts)},
+    }
+
+
 async def crawl_links(
     links_path: str | Path, output_root: str | Path, *, run_name: str = "smoke-v1",
     config: CrawlConfig | None = None, start: int = 0, stop: int | None = None,
@@ -276,7 +326,11 @@ async def crawl_links(
         "row_range": {"start": start, "stop": stop},
         "requested_range": {"start": start, "stop": effective_stop},
         "requested_input_records": effective_stop - start,
-        "config": asdict(config), "crawler_version": "hybrid-shards-v3",
+        "config": asdict(config), "crawler_version": (
+            "hybrid-shards-v3" if enhancer is not None
+            or getattr(transport, "engine_name", "httpx-async") != "httpx-async"
+            else "http-shards-v3"
+        ),
         "fetch_engine": getattr(transport, "engine_name", "httpx-async"),
         "enhancer": enhancer.identity if enhancer is not None else None,
         "code_sha256": code_fingerprint(),

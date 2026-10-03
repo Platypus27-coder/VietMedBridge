@@ -12,9 +12,9 @@
     "respect_robots": true
   },
   "fetch_engines": {
-    "primary": "scrapling-http",
+    "primary": "httpx",
     "crawl4ai": {
-      "enabled": true,
+      "enabled": false,
       "max_render_pages_per_call": 24,
       "render_wait_seconds": 2.0,
       "min_rendered_chars": 300,

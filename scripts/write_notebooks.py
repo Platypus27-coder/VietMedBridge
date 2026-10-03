@@ -93,24 +93,24 @@ print("Package source:", Path(vietmedbridge.__file__).resolve())
 print("Dữ liệu/checkpoint:", DATA_ROOT)
 '''
 
-# Upgrade a pre-engine code lock once, then keep all data notebooks on that exact commit.
-CRAWL_BOOTSTRAP = (
+# Upgrade active notebook locks once for the restored HTTPx baseline.
+# Archived recovery notebooks keep their existing bootstrap and code locks.
+BASELINE_BOOTSTRAP = (
     BOOTSTRAP
     .replace(
         'reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        '''CRAWL_ENGINE_API = "scrapling-crawl4ai-v1"
-if lock and lock.get("crawl_engine_api") != CRAWL_ENGINE_API and not CODE_REVISION:
+        '''BASELINE_WORKFLOW_API = "httpx-baseline-cache-v1"
+if lock and lock.get("workflow_api") != BASELINE_WORKFLOW_API and not CODE_REVISION:
     reference = "main"
 else:
     reference = CODE_REVISION or lock.get("git_commit") or "main"''',
     )
     .replace(
         'if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
-        'if not lock or CODE_REVISION or lock.get("crawl_engine_api") != CRAWL_ENGINE_API:\n'
+        'if not lock or CODE_REVISION or lock.get("workflow_api") != BASELINE_WORKFLOW_API:\n'
         '    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, '
-        '"pipeline_api": PIPELINE_API_VERSION, "crawl_engine_api": CRAWL_ENGINE_API})',
+        '"pipeline_api": PIPELINE_API_VERSION, "workflow_api": BASELINE_WORKFLOW_API})',
     )
-    .replace('"-e", ".[notebook]"', '"-e", ".[notebook,crawl_engines]"')
 )
 
 # Recovery experiments use new code without changing the pinned baseline checkpoint.
@@ -164,7 +164,7 @@ def main():
         trên Hub; query hiện chỉ chứa id/query, chưa có nhãn reference để tính F2.
         Giữ nguyên ID chính thức, kể cả khi ID không liên tục hoặc URL trùng nhau.
         """),
-        code(BOOTSTRAP),
+        code(BASELINE_BOOTSTRAP),
         md("## 1. Tải snapshot gắn revision và kiểm tra SHA-256"),
         code("""
         from vietmedbridge.dataset import DATASET_REVISION, snapshot_dataset, audit_dataset
@@ -278,58 +278,24 @@ def main():
         Lần đầu nâng code sau notebook 00, nếu Bootstrap báo package cũ đã được import,
         restart Colab một lần rồi chạy lại Bootstrap; `code_lock.json` sẽ ghim commit mới.
 
-        Scrapling FetcherSession là HTTP engine cho mỗi URL (TLS impersonation Chrome,
-        không bật stealth headers); redirects vẫn do crawler xử lý từng hop sau khi
-        kiểm robots. Crawl4AI chỉ render tối đa 24 trang/cell khi HTTP 200 trả về
-        JavaScript shell mỏng có marker rõ ràng. 403, CAPTCHA, robots hold và rate-limit
-        không đi qua browser. Không cần ACTION hay GPU.
+        Luồng chính dùng HTTPx. Stage A đọc lại checkpoint `stage-a-v2` đã hoàn tất
+        (917 capture trong kết quả đã kiểm tra), xác minh input/snapshot và hash raw;
+        không gửi request mới cho run này. Scrapling/Crawl4AI vẫn được giữ trong code
+        thí nghiệm để xem lại sau; baseline không cần cài browser.
+        Lượt crawl mới vẫn kiểm robots ở từng redirect; robots trả HTML được giữ
+        để review. Không cần ACTION hay GPU.
 
         Dữ liệu có hàng triệu URL. Cần xem domain audit và chất lượng sample trước
         khi chọn phạm vi lớn; các nguồn như PubMed/PMC có thể cần bulk/API adapter
-        để thu thập hiệu quả. Các engine không hứa vượt chính sách nguồn hay chặn truy cập.
+        để thu thập hiệu quả. Capture HTTP còn cần bước extract/quality ở notebook 02–03.
         """),
-        code(CRAWL_BOOTSTRAP),
-        md("## Tự động cài engine HTTP và browser runtime"),
-        code("""
-        import importlib.metadata
-        import os
-
-        ENGINE_CONFIG = PIPELINE_CONFIG["fetch_engines"]
-        if ENGINE_CONFIG.get("primary") != "scrapling-http":
-            raise ValueError("Notebook 01 hiện yêu cầu primary engine là scrapling-http.")
-        os.environ["CRAWL4_AI_BASE_DIRECTORY"] = str(WORK_DIR / "crawl4ai")
-        RENDER_CONFIG = dict(ENGINE_CONFIG["crawl4ai"])
-        CRAWL4AI_ENABLED = RENDER_CONFIG.pop("enabled", True)
-        if CRAWL4AI_ENABLED:
-            # Colab already runs an asyncio loop, so do not enter Playwright's
-            # synchronous API here. Its install command is idempotent: it checks
-            # the browser cache and downloads Chromium only when it is missing.
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                check=True,
-            )
-        from vietmedbridge.crawl4ai_enhancer import Crawl4AIEnhancer
-        from vietmedbridge.scrapling_transport import ScraplingTransport
-        from vietmedbridge.crawl import CrawlConfig
-
-        CONFIG = CrawlConfig(**PIPELINE_CONFIG["crawler"])
-        SCRAPLING_TRANSPORT = ScraplingTransport(
-            user_agent=CONFIG.user_agent, timeout_seconds=CONFIG.timeout_seconds,
-        )
-        CRAWL4AI_ENHANCER = Crawl4AIEnhancer(**RENDER_CONFIG) if CRAWL4AI_ENABLED else None
-        ENGINE_VERSIONS = {
-            name: importlib.metadata.version(name)
-            for name in ("scrapling", "crawl4ai", "curl_cffi", "playwright", "patchright")
-        }
-        print("Crawl engines:", ENGINE_VERSIONS)
-        print("Primary: Scrapling HTTP | selective Crawl4AI rendering:", CRAWL4AI_ENABLED)
-        print("GPU: not required; Crawl4AI is bounded to", RENDER_CONFIG["max_render_pages_per_call"],
-              "JavaScript shells per cell run.")
-        """),
+        code(BASELINE_BOOTSTRAP),
         md("## 1. Chọn input và phạm vi theo vị trí dòng Parquet"),
         code("""
         from vietmedbridge.dataset import load_snapshot, parquet_path, validate_link_subset
-        from vietmedbridge.crawl import CrawlConfig, crawl_links, completed_parts
+        from vietmedbridge.crawl import (
+            CrawlConfig, crawl_links, completed_parts, read_completed_crawl, range_complete,
+        )
         from vietmedbridge.artifacts import read_json, verify_file, sha256_file, atomic_json, code_fingerprint
         from vietmedbridge.gates import authorize_scale
         import pyarrow.parquet as pq
@@ -350,7 +316,7 @@ def main():
             INPUT_LINKS = DATA_ROOT / pilot["files"]["stage_a_links"]["path"]
             verify_file(INPUT_LINKS, pilot["files"]["stage_a_links"]["sha256"])
             validate_link_subset(INPUT_LINKS, OFFICIAL_LINKS, work_dir=WORK_DIR)
-            RUN_NAME, START, STOP = "stage-a-v3", 0, None
+            RUN_NAME, START, STOP = "stage-a-v2", 0, None
         elif MODE == "smoke":
             audit = read_json(DATA_ROOT / "reports/dataset_audit.json")
             if audit["corpus_sha256"] != SNAPSHOT["files"]["links_corpus.parquet"]["sha256"]:
@@ -358,11 +324,11 @@ def main():
             INPUT_LINKS = DATA_ROOT / audit["sample"]["path"]
             verify_file(INPUT_LINKS, audit["sample"]["sha256"])
             validate_link_subset(INPUT_LINKS, OFFICIAL_LINKS, work_dir=WORK_DIR)
-            RUN_NAME = "smoke-v3"
+            RUN_NAME = "smoke-httpx-v1"
             START, STOP = 0, None
         elif MODE == "range":
             INPUT_LINKS = OFFICIAL_LINKS
-            RUN_NAME = "stage-b1-v3"
+            RUN_NAME = "stage-b1-httpx-v1"
             START, STOP = START_ROW, STOP_ROW
         else:
             raise ValueError("MODE phải là stage_a, smoke hoặc range.")
@@ -405,18 +371,32 @@ def main():
         Giữ cùng shard_size, range và cấu hình khi resume. Đổi range, cấu hình hoặc input phải
         dùng RUN_NAME mới. Mỗi host có giới hạn tốc độ; 429/5xx được retry có backoff.
         Robots bị chặn, lỗi tải, file quá lớn và các lỗi khác được lưu vào ledger.
-        Scrapling xử lý HTTP; Crawl4AI chỉ là fallback render có giới hạn cho shell JS.
-        Summary phân biệt `scrapling_http_entity` với `crawl4ai_rendered_dom`.
+        HTTPx xử lý HTTP cho run mới. Stage A đã hoàn tất được đọc từ checkpoint
+        và kiểm hash; không resume run cũ bằng code/runtime mới.
         Một shard ghi đủ trạng thái cho mọi ID mới được coi là hoàn thành.
         """),
         code("""
-        SUMMARY = await crawl_links(
-            INPUT_LINKS, DATA_ROOT / "crawl", run_name=RUN_NAME, config=CONFIG,
-            start=START, stop=STOP, worker_index=WORKER_INDEX, worker_count=WORKER_COUNT,
-            retry_failed=False, max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR,
-            origin_corpus_sha256=SNAPSHOT["files"]["links_corpus.parquet"]["sha256"],
-            transport=SCRAPLING_TRANSPORT, enhancer=CRAWL4AI_ENHANCER,
+        if PIPELINE_CONFIG["fetch_engines"]["primary"] != "httpx":
+            raise ValueError("Notebook baseline yêu cầu primary engine là httpx; chạy Bootstrap bản mới.")
+        RUN_DIR = DATA_ROOT / "crawl" / RUN_NAME
+        reuse_complete_stage_a = (
+            MODE == "stage_a" and (RUN_DIR / "run.json").exists()
+            and range_complete(read_json(RUN_DIR / "run.json"), completed_parts(RUN_DIR, verify=False))
         )
+        if reuse_complete_stage_a:
+            SUMMARY = read_completed_crawl(
+                RUN_DIR, links_path=INPUT_LINKS, start=START, stop=STOP,
+                origin_corpus_sha256=SNAPSHOT["files"]["links_corpus.parquet"]["sha256"],
+            )
+            print("Đọc lại Stage A đã hoàn tất; không crawl lại URL đã ghi nhận.")
+        else:
+            CONFIG = CrawlConfig(**PIPELINE_CONFIG["crawler"])
+            SUMMARY = await crawl_links(
+                INPUT_LINKS, DATA_ROOT / "crawl", run_name=RUN_NAME, config=CONFIG,
+                start=START, stop=STOP, worker_index=WORKER_INDEX, worker_count=WORKER_COUNT,
+                retry_failed=False, max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR,
+                origin_corpus_sha256=SNAPSHOT["files"]["links_corpus.parquet"]["sha256"],
+            )
         print(json.dumps(SUMMARY, ensure_ascii=False, indent=2))
         """),
         md("""
@@ -1112,18 +1092,31 @@ def main():
         retrieval_text được chuẩn hóa riêng. Tham số 180/40/512 là cấu hình khởi đầu
         để thử nghiệm, chưa phải cấu hình đã tối ưu Chunk F2.
         """),
-        code(BOOTSTRAP),
+        code(BASELINE_BOOTSTRAP),
         md("## 1. Chọn crawl run và ghim revision tokenizer"),
         code("""
         from vietmedbridge.artifacts import read_json, atomic_json
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
         from vietmedbridge.build import build_corpus
-        from vietmedbridge.crawl import completed_parts
+        from vietmedbridge.crawl import completed_parts, read_completed_crawl
+        from vietmedbridge.dataset import load_snapshot
 
-        CRAWL_RUN = "stage-a-v3"
-        BUILD_RUN = "stage-a-data-v3"
+        CRAWL_RUN = "stage-a-v2"
+        BUILD_RUN = "stage-a-data-v2-restored"
         MAX_NEW_SHARDS = None
         TOKENIZER_REVISION = None
+        if CRAWL_RUN == "stage-a-v2":
+            snapshot = load_snapshot(DATA_ROOT)
+            pilot = read_json(DATA_ROOT / "reports/inventory/stage_a.json")
+            if pilot["corpus_sha256"] != snapshot["files"]["links_corpus.parquet"]["sha256"]:
+                raise ValueError("Stage A inventory không thuộc snapshot hiện tại.")
+            CACHED_CRAWL = read_completed_crawl(
+                DATA_ROOT / "crawl" / CRAWL_RUN,
+                links_path=DATA_ROOT / pilot["files"]["stage_a_links"]["path"],
+                origin_corpus_sha256=snapshot["files"]["links_corpus.parquet"]["sha256"],
+            )
+            print("Cached Stage A:", CACHED_CRAWL["recorded_documents"],
+                  "| HTTP captures:", CACHED_CRAWL["statuses"].get("ok", 0))
         tokenizer_lock_path = DATA_ROOT / "tokenizer_lock.json"
         tokenizer_lock = read_json(tokenizer_lock_path) if tokenizer_lock_path.exists() else {}
         requested_revision = TOKENIZER_REVISION or tokenizer_lock.get("revision")
@@ -1215,7 +1208,7 @@ def main():
         foreign keys, source hash, exact offsets và bảo toàn mọi input qua documents/failures.
         Dedup reducer đọc tất cả shard được manifest chọn; không xóa official IDs.
         """),
-        code(BOOTSTRAP),
+        code(BASELINE_BOOTSTRAP),
         md("## 1. Chọn build và chạy lại golden với tokenizer đã ghim"),
         code("""
         from vietmedbridge.artifacts import read_json, atomic_json
@@ -1224,8 +1217,8 @@ def main():
         from vietmedbridge.golden import run_golden_suite
         from vietmedbridge.health import health_report, freeze_candidate
 
-        CRAWL_RUN = "stage-a-v3"
-        BUILD_RUN = "stage-a-data-v3"
+        CRAWL_RUN = "stage-a-v2"
+        BUILD_RUN = "stage-a-data-v2-restored"
         BUILD_DIR = DATA_ROOT / "processed" / BUILD_RUN
         SNAPSHOT = load_snapshot(DATA_ROOT)
         OFFICIAL_LINKS = parquet_path(DATA_ROOT, "links_corpus.parquet")

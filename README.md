@@ -12,15 +12,16 @@ Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạ
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
    Tải snapshot cố định, xác minh ID/URL, tạo inventory, Stage A sample và golden fixtures.
 2. **01 — Crawl baseline:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
-   Scrapling FetcherSession xử lý HTTP với phiên Chrome TLS fingerprint; redirect do pipeline
-   tự kiểm từng chặng cùng robots guard. Crawl4AI chỉ mở browser cho một số ít trang HTTP 200
-   nhận diện rõ là JavaScript shell và thiếu nội dung; mỗi lượt giới hạn 24 trang. Raw lưu cả
-   response HTTP gốc và DOM được chọn, có hash, robots evidence, shard checkpoint và resume.
+   HTTPx xử lý HTTP với robots guard, giới hạn tốc độ, redirect từng chặng và shard checkpoint.
+   Stage A dùng lại `stage-a-v2` đã hoàn tất: 1.000 outcome, 917 capture HTTP trong kết quả
+   đã kiểm tra. Notebook xác minh input, official snapshot, cặp ID/URL và hash raw trước
+   khi đọc; không crawl lại hay đổi fingerprint của run cũ.
    Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"` với range
    và `RUN_NAME` riêng, ổn định cho từng milestone. `MAX_NEW_SHARDS` giới hạn mỗi
    phiên; không để hai runtime ghi cùng shard.
 3. **02 — Trích văn bản và chia đoạn:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb).
-   Chạy trên range đã hoàn tất, tạo tài liệu, section và parent/child chunks.
+   Mặc định đọc `stage-a-v2`, tạo build mới `stage-a-data-v2-restored` với tài liệu,
+   section và parent/child chunks; chất lượng của 917 capture còn cần kiểm tra.
 4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
    Kiểm coverage, integrity, golden và source audit; candidate chỉ được promote sau human review.
 
@@ -31,10 +32,15 @@ giai đoạn này. Các lỗi vẫn có outcome theo official ID trong ledger đ
 Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích và xử lý phần còn thiếu.
 
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
-03 validate/freeze. 01 tự cài các engine đã pin và Chromium trong Colab; không cần chọn
-ACTION. Crawl dùng CPU, không cần GPU. Scrapling impersonation chỉ điều chỉnh HTTP/TLS
-fingerprint; stealth headers không bật. Crawl4AI không xử lý robots hold, 403, CAPTCHA,
-rate-limit hay truy cập bị từ chối, và không cam kết vượt kiểm soát của nguồn.
+03 validate/freeze. Baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION; chạy
+CPU, không cần GPU. Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
+chứng sau. `stage-a-v3` được giữ làm kết quả thí nghiệm, không là input mặc định của build.
+
+Sếp đã hoàn tất `stage-a-v2` thì mở notebook 02 bản mới và chạy tiếp; không cần chạy
+lại 00 hay crawl lại 01. 02 và 03 cùng dùng `stage-a-data-v2-restored`. Bootstrap nâng
+code lock một lần sang workflow HTTPx rồi ghim commit; nếu runtime đã import code cũ,
+restart session một lần trước khi chạy Bootstrap. Báo cáo golden được chạy lại bằng
+code hiện tại, không tự duyệt milestone.
 
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
@@ -44,8 +50,9 @@ Hiện tại Sếp chỉ cần mở 00–03; nhóm notebook recovery sẽ đư�
 đạt khoảng 1 triệu URL.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
-`DATA_ROOT` trong mọi notebook. Đổi code/config cần run mới; không để một runtime đang chạy
-trộn package code giữa các stage.
+`DATA_ROOT` trong mọi notebook. Đổi code/config khi fetch tiếp cần run mới; checkpoint
+đã hoàn tất có thể được đọc để build lại sau khi xác minh provenance. Không để một
+runtime đang chạy trộn package code giữa các stage.
 
 Notebook 03 xuất golden candidates để team đánh expected snippets rồi replay. Corpus query
 chưa có relevance labels; không coi self-retrieval là nhãn. Stage B2/C cần retrieval
