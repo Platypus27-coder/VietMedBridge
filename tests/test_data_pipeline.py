@@ -153,3 +153,43 @@ def test_xml_source_extraction_and_challenge_quarantine():
     assert extracted["language"] == "zh"
     with pytest.raises(ValueError, match="challenge"):
         extract_source(b"<html><head><title>Just a moment...</title></head></html>", "text/html")
+
+
+def test_longchau_build_preserves_article_sections_and_chunk_offsets(tmp_path):
+    url = "https://nhathuoclongchau.com.vn/bai-viet/source.html"
+    body = f'''<html lang="vi"><head><title>Bài nguồn</title>
+    <link rel="canonical" href="{url}"></head><body><nav>Giỏ hàng</nav>
+    <div data-lcpr="prr-id-articles-content"><div><h1>Bài nguồn</h1>
+    <div><p>Đoạn dẫn tiếng Việt é và 中文, giữ đúng ký tự nguồn.</p></div>
+    <div data-theme-element="article"><h2>Phần điều trị</h2>
+    <p>Liều 1<span>.5</span>mg cần được kiểm tra trong đoạn văn bản nguồn.
+    Các đoạn truy hồi phải giữ đúng vị trí của bài và ID chính thức.</p></div>
+    <aside>Cookie Consent</aside></div></div></body></html>'''.encode()
+    links = parquet(tmp_path / "links.parquet", [{"id": 264425, "url": url}])
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        return httpx.Response(200, content=body, headers={"content-type": "text/html"})
+
+    asyncio.run(crawl_links(
+        links, tmp_path / "crawl", config=CrawlConfig(per_host_delay=0, attempts=1),
+        transport=httpx.MockTransport(handler), work_dir=tmp_path,
+    ))
+    built = build_corpus(
+        tmp_path / "crawl/smoke-v1", tmp_path / "processed", CharacterTokenizer(), TOKENIZER_SPEC,
+        config=ChunkConfig(child_tokens=40, overlap_tokens=10, parent_tokens=90), work_dir=tmp_path,
+    )
+    target = tmp_path / "processed/canonical-v1"
+    files = built["parts"][0]["files"]
+    rows = {kind: pq.read_table(target / files[kind]["path"]).to_pylist()
+            for kind in ("documents", "children", "parents", "sections")}
+    doc, = rows["documents"]
+    assert doc["doc_id"] == 264425 and doc["parser"] == "longchau-article-dom-v1"
+    assert doc["body_sha256"] == hashlib.sha256(body).hexdigest()
+    assert "1.5mg" in doc["source_text"] and "é" in doc["source_text"]
+    assert "Cookie Consent" not in doc["source_text"] and "Giỏ hàng" not in doc["source_text"]
+    assert [s["heading_text"] for s in rows["sections"]] == ["Bài nguồn", "Phần điều trị"]
+    assert doc["section_count"] == 2 and built["integrity"]["passed"]
+    assert rows["children"] and rows["parents"]
+    verify_spans(doc, rows["children"], rows["parents"])

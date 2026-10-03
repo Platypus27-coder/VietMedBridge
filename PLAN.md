@@ -2794,6 +2794,22 @@ headers đã lọc, hashes và checkpoint riêng. Guard CDP được cài trư�
 và kiểm redirect. Chỉ tăng lên 11 sau khi kiểm bài mẫu; xem báo cáo
 `reports/stage-a-v2-browser-probe.md`.
 
+ZIP Colab đầy đủ `browser-probe-4c49d3358aa818b7 (1).zip`, hoàn tất
+2026-10-03 09:20:43 Asia/Saigon, xác nhận 11 ID/22 method checkpoints và
+56 assets đúng SHA-256. `dynamic_browser` lấy bài thật cho cả 11 ID, không có
+guard error; `chrome_http` chỉ thành công ID mẫu, 10 ID mới trả trang Cloudflare
+challenge (`cf-mitigated: challenge`). Đây là bằng chứng cho controlled browser
+fallback ở 11 URL này, không phải coverage của toàn bộ 83 lỗi hoặc full corpus.
+
+Generic extraction ở probe bị lẫn tiểu sử/cookie/bài liên quan và mất heading.
+Adapter `longchau-article-dom-v1` kiểm canonical URL và vùng DOM đã audit, giữ
+title, đoạn dẫn, heading, paragraphs, lists, tables/captions trong bài. Layout
+đổi hoặc canonical lệch phải báo parse failure. Notebook 01f replay HTML gốc
+đã lưu, không gửi request mới, dùng code lock riêng và checkpoint theo official
+ID. 11 output đã qua hash/structure checks và chờ review extraction; chưa tự
+merge vào Stage A hoặc tính thành valid-article coverage. Xem
+`reports/stage-a-v2-colab-probe-4c49d3358aa818b7.md`.
+
 Thử nghiệm 01d tách riêng nhằm sửa hai thiếu sót của 01c: request Scrapling
 chưa pacing theo `Crawl-delay`/`Request-rate`, và redirect chưa được recheck
 robots trước mỗi hop. Browser của 01c tạm dừng vì `page_setup` trong Scrapling

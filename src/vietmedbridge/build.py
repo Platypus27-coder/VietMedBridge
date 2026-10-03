@@ -193,7 +193,8 @@ def build_corpus(
                     if len(body) != raw["body_bytes"] or hashlib.sha256(body).hexdigest() != raw["body_sha256"]:
                         raise ValueError("Raw source body checksum mismatch.")
                     try:
-                        extracted = extract_source(body, raw.get("content_type", ""))
+                        extracted = extract_source(body, raw.get("content_type", ""),
+                                                   source_url=raw.get("final_url", raw["url"]))
                     except EXPECTED_PARSE_ERRORS as exc:
                         _write(writers["failures"], [{**failure, "phase": "parse",
                                                      "reason": f"{type(exc).__name__}:{str(exc)[:300]}",

@@ -53,11 +53,36 @@ Token validation report được lưu trong artifacts/ và không commit. Không
 
 ## Giới hạn bằng chứng
 
-Crawl test dùng HTTP mock, documents giả và fixture synthetic. Chưa chạy Stage A
-trong runtime Colab của Sếp, chưa review 100–500 nguồn thật, chưa crawl toàn corpus.
+Crawl tests trong mục kiểm chứng ban đầu dùng HTTP mock, documents giả và
+fixture synthetic. Kết quả Stage A và recovery thực từ Colab được ghi riêng
+trong `reports/`; chưa review 100–500 nguồn thật hoặc crawl toàn corpus.
 Metadata dataset/query/corpus đã kiểm ở revision pinned trong lần setup trước;
 không coi metadata Hub là bằng chứng đã xử lý các URL.
 
 Chất lượng extraction theo domain, coverage thực, storage/GPU forecasts, OCR,
 official scorer compatibility, ANN recall và F2 cần artifact/labels/benchmark sau
 Colab. Các gates hiện giữ những evidence chưa có ở trạng thái pending.
+
+## Bổ sung ngày 03/10/2026: browser recovery và extraction
+
+- **53 pytest tests passed**, gồm hai CDP tests chạy trên Edge với trang mô
+  phỏng: chặn redirect trước request và lưu body HTTP 403 có kiểm robots.
+- Adapter Long Châu được kiểm cho article boundaries, heading/paragraph order,
+  nested lists, table/caption, inline dosage và combining Unicode. Canonical
+  URL lệch/layout đổi/error page không được fallback thành văn bản giao diện.
+- Mock integration đi qua crawl → domain adapter → sections → child/parent →
+  Parquet validation, giữ official ID, raw hash và exact source spans.
+- Recovery replay kiểm pinned CSV, marker/asset hashes, ID/URL, phát hiện
+  capture sửa đổi, ghi provenance `response_bytes`/`rendered_dom` rõ ràng và
+  resume output theo ID. Gói review chưa nhập vào canonical corpus.
+- **9 notebooks** qua nbformat, empty-output checks và Python syntax.
+- ZIP Colab đủ 11 ID có 22 method markers/56 assets đúng hash. Browser
+  lấy được bài thật cho 11/11; 10 HTTP mới là Cloudflare challenge.
+- Replay offline từ 11 browser response bodies giữ toàn bộ paragraph và
+  heading trong article body; structure/hash checks và resume cả 11 đều pass.
+  Không có table trong 11 body này; bảng/chú thích được kiểm bằng synthetic
+  fixtures, vẫn cần source audit khi gặp bảng thật.
+
+Xem `reports/stage-a-v2-colab-probe-4c49d3358aa818b7.md`. Coverage của các
+domain còn lại, human review, reviewed ingestion và full-corpus budget chưa
+được chứng minh bằng kết quả 11 URL này.

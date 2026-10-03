@@ -996,6 +996,8 @@ def main():
 
     from browser_probe_cells import browser_cells
     save("01e_colab_browser_diagnosis.ipynb", browser_cells(BOOTSTRAP, md, code))
+    from recovery_review_cells import review_cells
+    save("01f_colab_review_recovered_articles.ipynb", review_cells(BOOTSTRAP, md, code))
 
     save("02_colab_extract_and_chunk.ipynb", [
         md("""

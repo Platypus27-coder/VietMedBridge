@@ -15,6 +15,7 @@ from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
 from .quality import error_page_reason
+from .domain_text import longchau_article
 
 DetectorFactory.seed = 0
 EXPECTED_PARSE_ERRORS = (ValueError, etree.LxmlError, PyPdfError)
@@ -41,7 +42,7 @@ def language_hint(text: str, declared: str = "") -> tuple[str, str]:
     return "unknown", "uncertain"
 
 
-def extract_source(body: bytes, content_type: str = "") -> dict:
+def extract_source(body: bytes, content_type: str = "", *, source_url: str | None = None) -> dict:
     media = content_type.lower().split(";")[0].strip()
     prefix = body[:4096].lstrip().lower()
     title, declared, headings, raw_has_table = "", "", [], False
@@ -102,12 +103,17 @@ def extract_source(body: bytes, content_type: str = "") -> dict:
         raw_has_table = soup.find("table") is not None
         if error_page_reason(title, ""):
             raise ValueError("blocked_or_challenge_page:" + (error_page_reason(title, "") or "UNKNOWN"))
-        source = trafilatura.extract(
-            str(soup), output_format="txt", include_tables=True,
-            include_comments=False, favor_recall=True, deduplicate=False,
-        ) or ""
-        source = source.strip()
-        parser = "trafilatura-text-v1"
+        adapted = longchau_article(soup, source_url) if source_url else None
+        if adapted is not None:
+            source, title = adapted["source_text"], adapted["title"]
+            headings, raw_has_table, parser = adapted["heading_hints"], adapted["raw_has_table"], adapted["parser"]
+        else:
+            source = trafilatura.extract(
+                str(soup), output_format="txt", include_tables=True,
+                include_comments=False, favor_recall=True, deduplicate=False,
+            ) or ""
+            source = source.strip()
+            parser = "trafilatura-text-v1"
         if not source:
             for node in soup.select("script, style, nav, header, footer, aside, form"):
                 node.decompose()
