@@ -122,10 +122,13 @@ def save(name, cells):
             "language_info": {"name": "python"},
         },
     }
-    path = ROOT / "notebooks" / name
+    if Path(name).parts[0] == "experiments":
+        path = ROOT / "archive" / "notebooks" / "stage-a-1000-recovery" / Path(name).name
+    else:
+        path = ROOT / "notebooks" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    print(path.relative_to(ROOT / "notebooks"))
+    print(path.relative_to(ROOT))
 
 
 def main():
@@ -238,8 +241,129 @@ def main():
         Nguồn: [ViBioMIR](https://huggingface.co/datasets/AIGuruTinix/ViBioMIR).
         """),
     ])
-    from unified_notebook_cells import notebook_01_cells
-    save("01_colab_crawl_sources.ipynb", notebook_01_cells(BOOTSTRAP, md, code))
+    save("01_colab_crawl_sources.ipynb", [
+        md("""
+        # VietMedBridge — 01: Crawl nguồn có checkpoint
+
+        Chạy sau notebook 00. Notebook này chỉ chạy baseline crawl, mặc định là
+        mẫu Stage A phân tầng ~1.000 URL. Không cần chọn `ACTION` hay pha retry.
+        File raw chứa bytes HTTP đã giải nén content-encoding, hash, URL gốc,
+        URL sau redirect và trạng thái cho từng ID. Mỗi shard hoàn thành được lưu
+        vào Drive; khi Colab ngắt, chạy lại cell để tiếp tục từ checkpoint.
+
+        Các URL fetch lỗi vẫn được ghi outcome vào ledger. Chưa chạy notebook
+        recovery trong giai đoạn baseline; quay lại phần URL còn thiếu sau mốc
+        khoảng 1 triệu URL.
+
+        Dữ liệu có hàng triệu URL. Cần xem domain audit và chất lượng sample trước
+        khi chọn phạm vi lớn; các nguồn như PubMed/PMC có thể cần bulk/API adapter
+        để thu thập hiệu quả. Crawler HTTP ở đây là nền tảng khởi đầu.
+        """),
+        code(BOOTSTRAP),
+        md("## 1. Chọn input và phạm vi theo vị trí dòng Parquet"),
+        code("""
+        from vietmedbridge.dataset import load_snapshot, parquet_path, validate_link_subset
+        from vietmedbridge.crawl import CrawlConfig, crawl_links, completed_parts
+        from vietmedbridge.artifacts import read_json, verify_file, sha256_file
+        from vietmedbridge.gates import authorize_scale
+        import pyarrow.parquet as pq
+
+        SNAPSHOT = load_snapshot(DATA_ROOT)
+        OFFICIAL_LINKS = parquet_path(DATA_ROOT, "links_corpus.parquet")
+        MODE = "stage_a"     # "stage_a", "smoke" hoặc "range"
+        START_ROW = 0        # vị trí dòng, KHÔNG phải official doc_id
+        STOP_ROW = 10000    # chỉ dùng ở mode range; None = hết file (full gate bắt buộc)
+        WORKER_INDEX = 0
+        WORKER_COUNT = 1     # workers phải có cùng range và xử lý shard khác nhau
+        MAX_NEW_SHARDS = 10  # số shard mới mỗi lần chạy; None = hết range
+
+        if MODE == "stage_a":
+            pilot = read_json(DATA_ROOT / "reports/inventory/stage_a.json")
+            if pilot["corpus_sha256"] != SNAPSHOT["files"]["links_corpus.parquet"]["sha256"]:
+                raise ValueError("Stage A sample không thuộc snapshot hiện tại.")
+            INPUT_LINKS = DATA_ROOT / pilot["files"]["stage_a_links"]["path"]
+            verify_file(INPUT_LINKS, pilot["files"]["stage_a_links"]["sha256"])
+            validate_link_subset(INPUT_LINKS, OFFICIAL_LINKS, work_dir=WORK_DIR)
+            RUN_NAME, START, STOP = "stage-a-v2", 0, None
+        elif MODE == "smoke":
+            audit = read_json(DATA_ROOT / "reports/dataset_audit.json")
+            if audit["corpus_sha256"] != SNAPSHOT["files"]["links_corpus.parquet"]["sha256"]:
+                raise ValueError("Audit/sample không thuộc snapshot đang dùng; chạy lại notebook 00.")
+            INPUT_LINKS = DATA_ROOT / audit["sample"]["path"]
+            verify_file(INPUT_LINKS, audit["sample"]["sha256"])
+            validate_link_subset(INPUT_LINKS, OFFICIAL_LINKS, work_dir=WORK_DIR)
+            RUN_NAME = "smoke-v2"
+            START, STOP = 0, None
+        elif MODE == "range":
+            INPUT_LINKS = OFFICIAL_LINKS
+            RUN_NAME = "stage-b1-v2"
+            START, STOP = START_ROW, STOP_ROW
+        else:
+            raise ValueError("MODE phải là stage_a, smoke hoặc range.")
+
+        GOLDEN = read_json(DATA_ROOT / "reports/golden_latest.json")
+        if GOLDEN["fixture_sha256"] != sha256_file(CHECKOUT / "tests/golden/cases.json"):
+            raise ValueError("Golden fixtures đổi; chạy lại notebook 00.")
+        input_rows = pq.ParquetFile(INPUT_LINKS).metadata.num_rows
+        requested_rows = max(0, min(STOP if STOP is not None else input_rows, input_rows) - START)
+        STAGE = authorize_scale(DATA_ROOT, rows=requested_rows,
+                                corpus_sha256=SNAPSHOT["files"]["links_corpus.parquet"]["sha256"],
+                                golden_report=GOLDEN, chunking=PIPELINE_CONFIG["chunking"])
+
+        print("Run:", RUN_NAME, "| input:", INPUT_LINKS.name, "| row range:", START, STOP)
+        """),
+        md("""
+        ## 2. Crawl theo shard
+
+        Giữ cùng shard_size, range và cấu hình khi resume. Đổi range, cấu hình hoặc input phải
+        dùng RUN_NAME mới. Mỗi host có giới hạn tốc độ; 429/5xx được retry có backoff.
+        Robots bị chặn, lỗi tải, file quá lớn và các lỗi khác được lưu vào ledger.
+        Một shard ghi đủ trạng thái cho mọi ID mới được coi là hoàn thành.
+        """),
+        code("""
+        CONFIG = CrawlConfig(**PIPELINE_CONFIG["crawler"])
+        SUMMARY = await crawl_links(
+            INPUT_LINKS, DATA_ROOT / "crawl", run_name=RUN_NAME, config=CONFIG,
+            start=START, stop=STOP, worker_index=WORKER_INDEX, worker_count=WORKER_COUNT,
+            retry_failed=False, max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR,
+            origin_corpus_sha256=SNAPSHOT["files"]["links_corpus.parquet"]["sha256"],
+        )
+        print(json.dumps(SUMMARY, ensure_ascii=False, indent=2))
+        """),
+        md("""
+        ## 3. Kiểm tra coverage và các ID lỗi
+
+        Số recorded_documents bên dưới chỉ là phần đã crawl trong run.
+        Sample thành công không có nghĩa đã thu thập đủ corpus chính thức.
+        """),
+        code("""
+        import pandas as pd
+        PARTS = completed_parts(DATA_ROOT / "crawl" / RUN_NAME)
+        from itertools import islice
+        failed_count = sum(len(part["failed_ids"]) for part in PARTS)
+        failed_preview = list(islice(
+            ({"part": part["part"], "doc_id": doc_id}
+             for part in PARTS for doc_id in part["failed_ids"]), 100,
+        ))
+        print("Official corpus rows:", SNAPSHOT["files"]["links_corpus.parquet"]["rows"])
+        print("Recorded:", SUMMARY["recorded_documents"], "| errors:", failed_count)
+        display(pd.DataFrame([{"status": key, "count": value} for key, value in SUMMARY["statuses"].items()]))
+        if failed_preview:
+            display(pd.DataFrame(failed_preview))
+        """),
+        md("""
+        ## Resume baseline
+
+        Chạy lại cell 2 để tiếp tục các shard chưa hoàn tất; checkpoint đã có sẽ được bỏ qua.
+        Mỗi official ID vẫn có outcome trong ledger, kể cả khi fetch lỗi. Notebook này
+        không retry các lỗi đã ghi nhận; xử lý URL chưa crawl đủ sẽ quay lại sau khi
+        baseline đạt quy mô khoảng 1 triệu URL.
+        Không chạy hai runtime ghi cùng shard; dùng WORKER_INDEX/WORKER_COUNT để chia việc.
+        Chạy notebook 02–03 để kiểm tra, tạo health report và review milestone.
+        Stage B/C cần evidence gate của giai đoạn trước. Không đặt STOP_ROW=None
+        khi chưa có benchmark retrieval và budget đã đo.
+        """),
+    ])
     save("experiments/stage-a-1000/01b_colab_recover_failed_urls.ipynb", [
         md("""
         # VietMedBridge — 01b: Phục hồi và phân loại URL lỗi Stage A

@@ -100,7 +100,7 @@ def browser_cells(bootstrap, md, code):
             "policy": "single-article-browser-probe-v1",
             "probe_label": PROBE_LABEL,
             "notebook_sha256": sha256_file(
-                CHECKOUT / "notebooks/experiments/stage-a-1000/01e_colab_browser_diagnosis.ipynb"
+        CHECKOUT / "archive/notebooks/stage-a-1000-recovery/01e_colab_browser_diagnosis.ipynb"
             ),
         }
         # Selection count is excluded so increasing 1 -> 11 resumes the same config.

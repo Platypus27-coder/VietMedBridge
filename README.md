@@ -7,43 +7,35 @@ trong Google Drive.
 ## Quy trình Colab đã chốt
 
 Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạy các notebook
-01b–01g; các pha đều nằm trong Notebook 01.
+01b–01g trong lượt crawl baseline quy mô lớn.
 
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
    Tải snapshot cố định, xác minh ID/URL, tạo inventory, Stage A sample và golden fixtures.
-2. **01 — Crawl và recovery trong một notebook:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
-   `ACTION="baseline"` ghi raw response/hash và kết quả theo từng ID, với robots guard,
-   shard checkpoint và resume. `ACTION="retry_http"` thử lại riêng các ID lỗi. Sau khi
-   baseline range hoàn tất, `ACTION="advanced_recovery"` xác minh đủ ID–URL rồi xử lý
-   failure ledger theo lô bằng Crawl4AI + Scrapling, có checkpoint từng ID/batch.
-   Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"`, một `RANGE_RUN_NAME`
-   riêng ổn định cho milestone, và chỉ đổi `ACTION` khi chuyển pha. `MAX_NEW_SHARDS`
-   giới hạn mỗi phiên baseline; recovery có giới hạn batch mỗi phiên. Không để hai
-   runtime ghi cùng shard/recovery run.
+2. **01 — Crawl baseline:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
+   Ghi raw response/hash và kết quả cho từng ID, có robots guard, shard checkpoint và resume.
+   Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"` với range
+   và `RUN_NAME` riêng, ổn định cho từng milestone. `MAX_NEW_SHARDS` giới hạn mỗi
+   phiên; không để hai runtime ghi cùng shard.
 3. **02 — Trích văn bản và chia đoạn:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb).
    Chạy trên range đã hoàn tất, tạo tài liệu, section và parent/child chunks.
 4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
    Kiểm coverage, integrity, golden và source audit; candidate chỉ được promote sau human review.
 
-**Đích khoảng 1 triệu URL là hợp lý như một baseline lớn, nhưng cần đi qua gate theo giai đoạn:**
+Đích hiện tại là xây baseline crawl đến khoảng 1 triệu URL qua các gate đã chốt:
 Stage A 1.000 → Stage B1 10.000 → Stage B2 100.000 → Stage C 1.000.000.
-Mỗi milestone cần hoàn tất range, review 100–500 golden nguồn thật và các gate retrieval
-áp dụng cho stage đó. Không nhảy thẳng từ Stage A lên 1 triệu; code sẽ chặn nếu thiếu
-milestone/evidence. Trước full run lớn hơn, cần đo storage, thời hạn và budget theo gate.
+Notebook 01 chỉ chạy baseline và resume; không retry lỗi hoặc chạy recovery trong
+giai đoạn này. Các lỗi vẫn có outcome theo official ID trong ledger để không mất dấu.
+Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích và xử lý phần còn thiếu.
 
-Sau khi baseline range mục tiêu hoàn tất, đổi `ACTION` trong chính Notebook 01 để xử lý
-failures theo batch; notebook đối chiếu từng ID/URL với đúng input Parquet trước khi gửi
-request. `01` giữ lỗi trong raw ledger nên không URL nào biến mất khi fetch thất bại.
-Robots Disallow hoặc policy chưa xác minh vẫn ở trạng thái hold. Crawl/recovery chạy CPU;
-GPU không cần cho các bước này.
+Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
+03 validate/freeze. Crawl dùng CPU, không cần GPU.
 
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
-Các notebook cũ đã được chuyển vào
-[`notebooks/experiments/stage-a-1000/`](notebooks/experiments/stage-a-1000/).
-`01b–01g` được giữ làm hồ sơ các thử nghiệm và quyết định kỹ thuật Stage A; Sếp không
-cần mở hoặc chạy chuỗi notebook này. Luồng người dùng đã nằm trong một Notebook 01 duy
-nhất, nhận checkpoint baseline và recovery theo đúng range đã xác minh.
+Các notebook `01b–01g` phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
+notebook đang dùng sang [`archive/notebooks/stage-a-1000-recovery/`](archive/notebooks/stage-a-1000-recovery/).
+Hiện tại Sếp chỉ cần mở 00–03; nhóm notebook recovery sẽ được xem lại sau khi baseline
+đạt khoảng 1 triệu URL.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
 `DATA_ROOT` trong mọi notebook. Đổi code/config cần run mới; không để một runtime đang chạy

@@ -1,6 +1,6 @@
 # Thu tiếp Stage A bằng Crawl4AI
 
-Notebook pilot `notebooks/experiments/stage-a-1000/01g_colab_recover_remaining_stage_a.ipynb` chạy trên Colab CPU mới,
+Notebook pilot `archive/notebooks/stage-a-1000-recovery/01g_colab_recover_remaining_stage_a.ipynb` chạy trên Colab CPU mới,
 cùng `DATA_ROOT` của các bước trước. Bootstrap clone repo, cài package và khóa
 commit riêng trong `advanced_recovery_code_lock.json`. Không đổi code lock của
 raw Stage A. Notebook tự làm bước replay 01f; không cần chạy lại 01e/01f trước.
