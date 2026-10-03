@@ -50,7 +50,7 @@ with status 200. See [the Colab review](stage-a-v2-colab-probe-4c49d3358aa818b7.
 The one-URL diagnostic can expand to 11 while preserving its checkpoints;
 generic extraction still needs article-boundary cleanup before ingestion.
 
-Run `01e_colab_browser_diagnosis.ipynb` in a fresh CPU runtime, using the same
+Run `notebooks/experiments/stage-a-1000/01e_colab_browser_diagnosis.ipynb` in a fresh CPU runtime, using the same
 Drive data root and the existing 01d outputs. It has a separate
 `browser_probe_code_lock.json` and does not change Stage A's code lock.
 

@@ -113,10 +113,11 @@ def code(source):
 def save(name, cells):
     for index, cell in enumerate(cells):
         cell["id"] = hashlib.sha256(f"{name}:{index}".encode()).hexdigest()[:12]
+    display_name = Path(name).name
     notebook = {
         "nbformat": 4, "nbformat_minor": 5, "cells": cells,
         "metadata": {
-            "colab": {"name": name, "provenance": []},
+            "colab": {"name": display_name, "provenance": []},
             "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
             "language_info": {"name": "python"},
         },
@@ -124,7 +125,7 @@ def save(name, cells):
     path = ROOT / "notebooks" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    print(path.name)
+    print(path.relative_to(ROOT / "notebooks"))
 
 
 def main():
@@ -355,7 +356,7 @@ def main():
         khi chưa có benchmark retrieval và budget đã đo.
         """),
     ])
-    save("01b_colab_recover_failed_urls.ipynb", [
+    save("experiments/stage-a-1000/01b_colab_recover_failed_urls.ipynb", [
         md("""
         # VietMedBridge — 01b: Phục hồi và phân loại URL lỗi Stage A
 
@@ -566,7 +567,7 @@ def main():
         không coi `range_complete` là 100% tải được nội dung.
         """),
     ])
-    save("01c_colab_robots_and_scrapling_pilot.ipynb", [
+    save("experiments/stage-a-1000/01c_colab_robots_and_scrapling_pilot.ipynb", [
         md("""
         # VietMedBridge — 01c: Chẩn đoán robots và thử Scrapling có kiểm soát
 
@@ -817,7 +818,7 @@ def main():
         """),
     ])
 
-    save("01d_colab_guarded_recovery.ipynb", [
+    save("experiments/stage-a-1000/01d_colab_guarded_recovery.ipynb", [
         md("""
         # VietMedBridge — 01d: Thử lại có robots guard và pacing
 
@@ -995,11 +996,11 @@ def main():
     ])
 
     from browser_probe_cells import browser_cells
-    save("01e_colab_browser_diagnosis.ipynb", browser_cells(BOOTSTRAP, md, code))
+    save("experiments/stage-a-1000/01e_colab_browser_diagnosis.ipynb", browser_cells(BOOTSTRAP, md, code))
     from recovery_review_cells import review_cells
-    save("01f_colab_review_recovered_articles.ipynb", review_cells(BOOTSTRAP, md, code))
+    save("experiments/stage-a-1000/01f_colab_review_recovered_articles.ipynb", review_cells(BOOTSTRAP, md, code))
     from remaining_recovery_cells import remaining_cells
-    save("01g_colab_recover_remaining_stage_a.ipynb", remaining_cells(BOOTSTRAP, md, code))
+    save("experiments/stage-a-1000/01g_colab_recover_remaining_stage_a.ipynb", remaining_cells(BOOTSTRAP, md, code))
 
     save("02_colab_extract_and_chunk.ipynb", [
         md("""

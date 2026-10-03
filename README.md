@@ -4,114 +4,51 @@ Chuẩn bị dữ liệu cho truy hồi y sinh đa ngôn ngữ ViBioMIR. Phần 
 thập dữ liệu chạy trên Google Colab; snapshot, checkpoint và Parquet đầu ra lưu
 trong Google Drive.
 
-## Chạy trên Google Colab
+## Quy trình Colab đã chốt
 
-Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuống:
+Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạy các notebook
+01b–01g trong lượt crawl baseline quy mô lớn.
 
-1. [00 — Tải và audit dataset](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb):
-   tải snapshot cố định, kiểm tra schema/ID, inventory URL, mẫu Stage A ~1.000 URL phân tầng và golden regression.
-2. [01 — Crawl nguồn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb):
-   crawl Stage A, lưu bytes nguồn/hash và outcome cho từng ID, resume/retry từng shard.
-3. [01b — Phục hồi URL lỗi Stage A](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01b_colab_recover_failed_urls.ipynb):
-   kiểm đủ ID/URL của mẫu, retry một lượt trong cùng checkpoint và xuất ledger lỗi theo domain.
-4. [01c — Chẩn đoán robots và thử Scrapling](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01c_colab_robots_and_scrapling_pilot.ipynb):
-   đọc báo cáo sau retry, phân loại robots và thử phục hồi có checkpoint riêng trên các URL được phép; không đổi `stage-a-v2`.
-5. [01d — Thử lại có robots guard và pacing](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01d_colab_guarded_recovery.ipynb):
-   chỉ xử lý những URL chưa thành article candidate từ experiment 01c đã khóa hash; kiểm robots trước từng request/redirect/retry và xuất báo cáo riêng.
-6. [01e — Chẩn đoán 403 bằng Chromium](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01e_colab_browser_diagnosis.ipynb):
-   thử một URL Long Châu bằng HTTP Chrome TLS và browser JavaScript; lưu cả trang lỗi, DOM, screenshot và hashes; có checkpoint riêng. Sau khi kiểm bài mẫu, tăng `N_URLS` lên 11 để thử các URL còn lại.
-7. [01f — Trích lại bài đã phục hồi](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01f_colab_review_recovered_articles.ipynb):
-   đọc 11 capture Long Châu đã lưu bởi 01e, kiểm hashes, giữ heading/đoạn dẫn/nội dung bài và xuất text cùng structure để review; không crawl lại.
-8. [01g — Thu tiếp nhóm Stage A còn thiếu](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01g_colab_recover_remaining_stage_a.ipynb):
-   đối chiếu đủ 1.000 ID với checkpoint sau retry, tự thực hiện replay của 01f, giữ 4 ứng viên 01c và thử tiếp 68 ID bằng HTTP Chrome TLS rồi Crawl4AI có robots guard; checkpoint từng ID và xuất ZIP bằng chứng.
-9. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
-   trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
-10. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
-   kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
+1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
+   Tải snapshot cố định, xác minh ID/URL, tạo inventory, Stage A sample và golden fixtures.
+2. **01 — Crawl baseline:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
+   Ghi raw response/hash và kết quả cho từng ID, có robots guard, shard checkpoint và resume.
+   Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"` với range
+   và `RUN_NAME` riêng, ổn định cho từng milestone. `MAX_NEW_SHARDS` giới hạn mỗi
+   phiên; không để hai runtime ghi cùng shard.
+3. **02 — Trích văn bản và chia đoạn:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb).
+   Chạy trên range đã hoàn tất, tạo tài liệu, section và parent/child chunks.
+4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
+   Kiểm coverage, integrity, golden và source audit; candidate chỉ được promote sau human review.
 
-Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
+**Đích khoảng 1 triệu URL là hợp lý như một baseline lớn, nhưng cần đi qua gate theo giai đoạn:**
+Stage A 1.000 → Stage B1 10.000 → Stage B2 100.000 → Stage C 1.000.000.
+Mỗi milestone cần hoàn tất range, review 100–500 golden nguồn thật và các gate retrieval
+áp dụng cho stage đó. Không nhảy thẳng từ Stage A lên 1 triệu; code sẽ chặn nếu thiếu
+milestone/evidence. Trước full run lớn hơn, cần đo storage, thời hạn và budget theo gate.
 
-Trong **mỗi runtime Colab mới hoặc vừa restart**, chạy cell Bootstrap đầu notebook:
-nó mount Drive, clone/cập nhật repo rồi cài package. code_lock.json lưu commit,
-nhưng không giữ package đã cài trong runtime đã mất. Giữ cùng DATA_ROOT trong mọi
-notebook; mặc định là MyDrive/VietMedBridge/data. code_lock.json lưu commit đã
-chạy để các notebook sau dùng lại cùng mã nguồn. Tokenizer cũng được ghim revision.
+Sau khi baseline mục tiêu hoàn tất, xử lý failures từ ledger theo domain/state trong **một
+recovery workflow thống nhất**. Không retry rải rác trong các notebook thí nghiệm giữa lúc
+đang crawl baseline. `01` vốn lưu outcome/checkpoint từng ID nên lỗi vẫn được giữ để recovery
+sau; robots Disallow hoặc policy chưa xác minh vẫn phải giữ hold. Crawl/recovery chạy CPU;
+GPU không cần cho các bước này.
 
-Nếu Drive đang khóa code cũ API v1, đặt CODE_REVISION="main" trong bootstrap một
-lần để cập nhật sang API v2; restart session nếu runtime đã import package cũ.
-Dùng tên run mới stage-a-v2/stage-a-data-v2; các artifact cũ được giữ để rollback.
+## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
-Notebook 01 mặc định chạy Stage A phân tầng; MODE="smoke" vẫn dùng được. Để xử lý phạm vi lớn,
-chọn MODE="range", đặt START_ROW/STOP_ROW và giữ range/cấu hình ổn định khi resume.
-MAX_NEW_SHARDS giới hạn lượng công việc trong một phiên Colab. Đổi range hoặc cấu
-hình cần tên run mới. Các runtime đồng thời phải dùng worker index khác nhau.
-Với hàng triệu URL, cần kiểm tra lỗi theo domain và bổ sung bulk/API adapter cho
-những nguồn lớn trước khi triển khai toàn corpus.
+Các notebook cũ đã được chuyển vào
+[`notebooks/experiments/stage-a-1000/`](notebooks/experiments/stage-a-1000/).
+`01b–01f` là retry/chẩn đoán/review từng phần; `01g` là recovery nâng cao chỉ dành cho
+đúng mẫu Stage A 1.000 URL và các artifact đã ghim hash. Chúng là bằng chứng/kinh nghiệm
+để xây workflow recovery tổng thể sau baseline, không phải chuỗi notebook Sếp cần chạy
+cho corpus lớn.
 
-Nếu Stage A có URL lỗi, chạy notebook 01b với `code_lock.json` của run hiện tại.
-Notebook kiểm đủ official ID/URL của mẫu, retry một lượt, rồi ghi danh sách URL
-chưa tải được và số URL của từng domain bị ảnh hưởng trong inventory toàn corpus
-vào `reports/crawl_recovery/stage-a-v2/`. Retry giữ robots guard; HTTP 403 cần
-chẩn đoán riêng bằng 01c–01e, chưa chứng minh URL không thể tải. Giữ cùng code lock khi
-chạy notebook 02–03 trên checkpoint Stage A này.
+Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
+`DATA_ROOT` trong mọi notebook. Đổi code/config cần run mới; không để một runtime đang chạy
+trộn package code giữa các stage.
 
-Notebook 01c dùng runtime CPU mới và `recovery_code_lock.json` riêng để tải mã
-mới mà không làm đổi code hash của checkpoint Stage A. Nó đối chiếu
-`failures_after_retry.csv` với official corpus, ghi từng robots probe/HTTP thử
-nghiệm lên Drive. Browser hiện tạm dừng vì Scrapling 0.4.15 có thể tiếp tục
-điều hướng khi callback cài route guard lỗi. Notebook 01d dùng code lock riêng,
-chỉ thử lại các URL chưa thành ứng viên bằng HTTP có kiểm robots và pacing ở
-từng bước; không cần chạy lại 01c. Notebook 01e dùng `browser_probe_code_lock.json`,
-Chromium với profile mới và guard CDP cài trước điều hướng, bao gồm redirect.
-Runtime cần CPU; không cần GPU. `N_URLS=1` là mặc định. Nếu cần thử lại một
-checkpoint lỗi, đổi `PROBE_LABEL` để giữ bằng chứng của lượt trước.
-Kết quả kiểm thử local 2026-10-03 tải được cả 11 URL bằng HTTP; browser tải
-được URL mẫu. Colab có môi trường mạng khác và cần kiểm riêng — xem
-[báo cáo](reports/stage-a-v2-browser-probe.md). `article_candidate` chỉ là ứng viên cần người
-kiểm nội dung, chưa được nhập vào canonical corpus. Muốn tiếp
-tục notebook 02 trên raw `stage-a-v2`, dùng lại `code_lock.json` cũ trong một
-runtime mới; thay package code giữa runtime đang import sẽ bị chặn.
-
-ZIP Colab đủ 11 URL ngày 2026-10-03 xác nhận browser nhận được bài thật cho
-**11/11 ID**; HTTP mới bị Cloudflare challenge ở 10 ID. Bộ trích generic đã
-lẫn giao diện và mất heading. 01f trích lại capture trên runtime CPU mới,
-giữ cùng `DATA_ROOT`; không cần chạy lại 01e. 01f dùng
-`recovery_extract_code_lock.json` riêng, ghim hash của `attempts.csv` đủ 11 ID,
-kiểm mọi capture và checkpoint trước khi đọc. Kết quả tách vào
-`reports/crawl_recovery/stage-a-v2/extraction_review/`, có text, structure,
-provenance, HTML review và ZIP tải về. Các ứng viên này vẫn chưa được gộp vào
-raw/canonical Stage A. Xem [audit Colab](reports/stage-a-v2-colab-probe-4c49d3358aa818b7.md).
-
-**Bước tiếp theo hiện tại là 01g trên runtime CPU mới**, giữ cùng `DATA_ROOT`.
-Không cần chạy 01f trước: 01g tự kiểm và trích lại 11 capture đã lưu. Nó kiểm
-raw shards, official ID/URL, các CSV và asset hashes trước khi chọn nhóm còn
-thiếu. Ledger luôn chứa đủ 1.000 ID, phân biệt 917 HTTP captures gốc, 11 browser
-captures, 4 ứng viên cũ và trạng thái từng ID trong nhóm 68. Đây là số ID được
-ghi nhận, chưa phải 1.000 bài hợp lệ.
-
-01g nâng cấp dùng `advanced_recovery_code_lock.json` riêng và
-`RECOVERY_LABEL="advanced-v1"`. Mở bản notebook mới trong runtime CPU mới để
-không bị giữ ở code lock của 01g cũ. HTTP Chrome TLS dùng session cho robots và
-bài viết; lỗi robots 403/HTML challenge/mạng/5xx được thử bằng browser để lấy
-response robots thật. Nhánh bài viết dùng **Crawl4AI stealth → Scrapling stealth**,
-tự ưu tiên engine đã thành công trên cùng domain, giữ cookies và giới hạn số
-browser. Có chờ selector/nội dung, cuộn có giới hạn, tài nguyên CDN, bộ lọc
-quảng cáo Scrapling và challenge handling có timeout. Status/bytes lấy qua CDP
-được lưu riêng với DOM, kể cả engine chưa lấy được bài. Disallow đã xác nhận
-và robots vẫn chưa truy cập được có trạng thái hold. Chạy lại cùng cấu hình để resume từng ID;
-đổi `RECOVERY_LABEL` khi cần một lượt thử mới. Cuối notebook tải
-`remaining-stage-a-<experiment>.zip`, gồm ledger đủ 1.000 ID, danh sách 83 URL,
-captures mới, `unresolved_urls.csv`, thống kê domain và bằng chứng kiểm hash.
-Browser profiles/cookies chỉ lưu trong ổ local Colab, không vào ZIP.
-Kết quả thật của 68 ID cần chạy trên
-Colab; chưa tự nhập ứng viên vào corpus. Xem
-[thiết kế và kiểm chứng Crawl4AI](docs/CRAWL4AI_RECOVERY.md).
-
-Stage A dùng 11 fixture synthetic để bootstrap. Notebook 03 xuất 100 nguồn để
-team gán expected snippets và replay thành golden nguồn thật. Scale-up cần bộ
-100–500 nguồn này pass, human review và toàn bộ range đã có outcome. Stage B2/C
-cần retrieval regression có nhãn; full run cần budget đo thực tế. Các gate không
-tự coi sample audit, query hoặc self-retrieval là nhãn relevance.
+Notebook 03 xuất golden candidates để team đánh expected snippets rồi replay. Corpus query
+chưa có relevance labels; không coi self-retrieval là nhãn. Stage B2/C cần retrieval
+regression có nhãn; full run cần budget thực đo và human audit theo gate.
 
 ## Dataset
 

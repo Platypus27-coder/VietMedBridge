@@ -99,7 +99,9 @@ def browser_cells(bootstrap, md, code):
             "browser_config": asdict(BROWSER_CONFIG), "http_config": asdict(HTTP_CONFIG),
             "policy": "single-article-browser-probe-v1",
             "probe_label": PROBE_LABEL,
-            "notebook_sha256": sha256_file(CHECKOUT / "notebooks/01e_colab_browser_diagnosis.ipynb"),
+            "notebook_sha256": sha256_file(
+                CHECKOUT / "notebooks/experiments/stage-a-1000/01e_colab_browser_diagnosis.ipynb"
+            ),
         }
         # Selection count is excluded so increasing 1 -> 11 resumes the same config.
         PROBE_KEY = digest_json(MANIFEST)[:16]
