@@ -301,14 +301,13 @@ def main():
         RENDER_CONFIG = dict(ENGINE_CONFIG["crawl4ai"])
         CRAWL4AI_ENABLED = RENDER_CONFIG.pop("enabled", True)
         if CRAWL4AI_ENABLED:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as playwright:
-                chromium_installed = Path(playwright.chromium.executable_path).is_file()
-            if not chromium_installed:
-                subprocess.run(
-                    [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
-                    check=True,
-                )
+            # Colab already runs an asyncio loop, so do not enter Playwright's
+            # synchronous API here. Its install command is idempotent: it checks
+            # the browser cache and downloads Chromium only when it is missing.
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+            )
         from vietmedbridge.crawl4ai_enhancer import Crawl4AIEnhancer
         from vietmedbridge.scrapling_transport import ScraplingTransport
         from vietmedbridge.crawl import CrawlConfig
