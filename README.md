@@ -7,15 +7,19 @@ trong Google Drive.
 ## Quy trình Colab đã chốt
 
 Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạy các notebook
-01b–01g trong lượt crawl baseline quy mô lớn.
+01b–01g; các pha đều nằm trong Notebook 01.
 
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
    Tải snapshot cố định, xác minh ID/URL, tạo inventory, Stage A sample và golden fixtures.
-2. **01 — Crawl baseline:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
-   Ghi raw response/hash và kết quả cho từng ID, có robots guard, shard checkpoint và resume.
-   Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"` với range
-   và `RUN_NAME` riêng, ổn định cho từng milestone. `MAX_NEW_SHARDS` giới hạn mỗi
-   phiên; không để hai runtime ghi cùng shard.
+2. **01 — Crawl và recovery trong một notebook:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
+   `ACTION="baseline"` ghi raw response/hash và kết quả theo từng ID, với robots guard,
+   shard checkpoint và resume. `ACTION="retry_http"` thử lại riêng các ID lỗi. Sau khi
+   baseline range hoàn tất, `ACTION="advanced_recovery"` xác minh đủ ID–URL rồi xử lý
+   failure ledger theo lô bằng Crawl4AI + Scrapling, có checkpoint từng ID/batch.
+   Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"`, một `RANGE_RUN_NAME`
+   riêng ổn định cho milestone, và chỉ đổi `ACTION` khi chuyển pha. `MAX_NEW_SHARDS`
+   giới hạn mỗi phiên baseline; recovery có giới hạn batch mỗi phiên. Không để hai
+   runtime ghi cùng shard/recovery run.
 3. **02 — Trích văn bản và chia đoạn:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb).
    Chạy trên range đã hoàn tất, tạo tài liệu, section và parent/child chunks.
 4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
@@ -27,20 +31,19 @@ Mỗi milestone cần hoàn tất range, review 100–500 golden nguồn thật 
 áp dụng cho stage đó. Không nhảy thẳng từ Stage A lên 1 triệu; code sẽ chặn nếu thiếu
 milestone/evidence. Trước full run lớn hơn, cần đo storage, thời hạn và budget theo gate.
 
-Sau khi baseline mục tiêu hoàn tất, xử lý failures từ ledger theo domain/state trong **một
-recovery workflow thống nhất**. Không retry rải rác trong các notebook thí nghiệm giữa lúc
-đang crawl baseline. `01` vốn lưu outcome/checkpoint từng ID nên lỗi vẫn được giữ để recovery
-sau; robots Disallow hoặc policy chưa xác minh vẫn phải giữ hold. Crawl/recovery chạy CPU;
+Sau khi baseline range mục tiêu hoàn tất, đổi `ACTION` trong chính Notebook 01 để xử lý
+failures theo batch; notebook đối chiếu từng ID/URL với đúng input Parquet trước khi gửi
+request. `01` giữ lỗi trong raw ledger nên không URL nào biến mất khi fetch thất bại.
+Robots Disallow hoặc policy chưa xác minh vẫn ở trạng thái hold. Crawl/recovery chạy CPU;
 GPU không cần cho các bước này.
 
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
 Các notebook cũ đã được chuyển vào
 [`notebooks/experiments/stage-a-1000/`](notebooks/experiments/stage-a-1000/).
-`01b–01f` là retry/chẩn đoán/review từng phần; `01g` là recovery nâng cao chỉ dành cho
-đúng mẫu Stage A 1.000 URL và các artifact đã ghim hash. Chúng là bằng chứng/kinh nghiệm
-để xây workflow recovery tổng thể sau baseline, không phải chuỗi notebook Sếp cần chạy
-cho corpus lớn.
+`01b–01g` được giữ làm hồ sơ các thử nghiệm và quyết định kỹ thuật Stage A; Sếp không
+cần mở hoặc chạy chuỗi notebook này. Luồng người dùng đã nằm trong một Notebook 01 duy
+nhất, nhận checkpoint baseline và recovery theo đúng range đã xác minh.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
 `DATA_ROOT` trong mọi notebook. Đổi code/config cần run mới; không để một runtime đang chạy

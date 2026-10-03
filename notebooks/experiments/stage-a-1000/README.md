@@ -5,7 +5,6 @@ These notebooks preserve the recovery and browser diagnostics for the fixed
 sequence. For the baseline crawl, use the four root notebooks in order:
 `00 → 01 → 02 → 03`.
 
-Notebook 01g validates an exact 1,000-ID input and is not a general recovery
-workflow for a million-URL run. After the approved baseline ranges finish, build
-one recovery pass from the complete per-ID failure ledger and review those
-results by domain and failure state.
+Notebook 01g validates an exact 1,000-ID input and is retained as historical
+evidence. The current range-wide recovery workflow lives in the root Notebook 01
+under `ACTION="advanced_recovery"`; users do not need to run the archived chain.
