@@ -123,6 +123,10 @@ Crawl4AI stealth và Scrapling/Patchright thật trên Edge headless, dùng resp
 mô phỏng: JS từ CDN tải nội dung muộn, cookies tồn tại giữa hai URL cùng domain,
 và robots response bytes được giữ nguyên. Các kiểm thử còn chứng minh:
 
+Cell cài đặt notebook ghim Crawl4AI 0.9.4 trên PyPI, Scrapling 0.4.15 và các
+phiên bản browser đã kiểm thử; pip không còn bị chạy ở chế độ im lặng để lỗi
+dependency nếu có sẽ hiện ngay trong output Colab.
+
 - HTTP robots 403 có thể chuyển sang raw robots 200 bằng browser, nhưng
   Disallow thực vẫn chặn bài; DOM/HTML error/plain-text error không thành allow-all.
 - Auth/rate limit/Retry-After dài không bị bỏ qua để chạy browser tiếp.

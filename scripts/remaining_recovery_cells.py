@@ -24,11 +24,10 @@ def remaining_cells(bootstrap, md, code):
         import importlib.metadata
         import subprocess
 
-        CRAWL4AI_COMMIT = "e5d2e786d1a101225f3f6a3e6fd344d76eeb13af"
-        CRAWL4AI_URL = f"https://github.com/unclecode/crawl4ai/archive/{CRAWL4AI_COMMIT}.zip"
+        CRAWL4AI_VERSION = "0.9.4"
         os.environ["CRAWL4_AI_BASE_DIRECTORY"] = str(WORK_DIR / "crawl4ai")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-            f"crawl4ai @ {CRAWL4AI_URL}", "scrapling[fetchers]==0.4.15",
+        subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+            f"crawl4ai=={CRAWL4AI_VERSION}", "scrapling[fetchers]==0.4.15",
             "playwright==1.63.0", "patchright==1.63.0", "playwright-stealth==2.0.3",
             "curl_cffi==0.16.3"], check=True)
         subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"], check=True)
@@ -39,7 +38,7 @@ def remaining_cells(bootstrap, md, code):
         VERSIONS = {p: importlib.metadata.version(p) for p in (
             "crawl4ai", "scrapling", "playwright", "curl_cffi", "patchright", "playwright-stealth",
         )}
-        VERSIONS["crawl4ai_source_commit"] = CRAWL4AI_COMMIT
+        VERSIONS["crawl4ai_release"] = CRAWL4AI_VERSION
         print(VERSIONS)
         """),
         md("## 2. Xác minh toàn bộ Stage A và chọn đúng nhóm còn thiếu"),
