@@ -22,9 +22,11 @@ Mở lần lượt các notebook, chọn runtime CPU và chạy từ trên xuố
    thử một URL Long Châu bằng HTTP Chrome TLS và browser JavaScript; lưu cả trang lỗi, DOM, screenshot và hashes; có checkpoint riêng. Sau khi kiểm bài mẫu, tăng `N_URLS` lên 11 để thử các URL còn lại.
 7. [01f — Trích lại bài đã phục hồi](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01f_colab_review_recovered_articles.ipynb):
    đọc 11 capture Long Châu đã lưu bởi 01e, kiểm hashes, giữ heading/đoạn dẫn/nội dung bài và xuất text cùng structure để review; không crawl lại.
-8. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
+8. [01g — Thu tiếp nhóm Stage A còn thiếu](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01g_colab_recover_remaining_stage_a.ipynb):
+   đối chiếu đủ 1.000 ID với checkpoint sau retry, tự thực hiện replay của 01f, giữ 4 ứng viên 01c và thử tiếp 68 ID bằng HTTP Chrome TLS rồi Crawl4AI có robots guard; checkpoint từng ID và xuất ZIP bằng chứng.
+9. [02 — Trích văn bản và chia đoạn](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb):
    trích HTML/XML/JATS/PDF, đánh dấu chất lượng, tạo section và child/parent bằng tokenizer BGE-M3.
-9. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
+10. [03 — Validate, audit và freeze](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb):
    kiểm toàn snapshot, dedup xuyên shard có alias, xuất health report/HTML audit và freeze candidate.
 
 Package cho phép Python 3.11–3.13; notebook kiểm tra phiên bản trước khi cài thư viện.
@@ -72,13 +74,31 @@ runtime mới; thay package code giữa runtime đang import sẽ bị chặn.
 
 ZIP Colab đủ 11 URL ngày 2026-10-03 xác nhận browser nhận được bài thật cho
 **11/11 ID**; HTTP mới bị Cloudflare challenge ở 10 ID. Bộ trích generic đã
-lẫn giao diện và mất heading, nên bước tiếp theo là **01f trên runtime CPU mới**,
+lẫn giao diện và mất heading. 01f trích lại capture trên runtime CPU mới,
 giữ cùng `DATA_ROOT`; không cần chạy lại 01e. 01f dùng
 `recovery_extract_code_lock.json` riêng, ghim hash của `attempts.csv` đủ 11 ID,
 kiểm mọi capture và checkpoint trước khi đọc. Kết quả tách vào
 `reports/crawl_recovery/stage-a-v2/extraction_review/`, có text, structure,
 provenance, HTML review và ZIP tải về. Các ứng viên này vẫn chưa được gộp vào
 raw/canonical Stage A. Xem [audit Colab](reports/stage-a-v2-colab-probe-4c49d3358aa818b7.md).
+
+**Bước tiếp theo hiện tại là 01g trên runtime CPU mới**, giữ cùng `DATA_ROOT`.
+Không cần chạy 01f trước: 01g tự kiểm và trích lại 11 capture đã lưu. Nó kiểm
+raw shards, official ID/URL, các CSV và asset hashes trước khi chọn nhóm còn
+thiếu. Ledger luôn chứa đủ 1.000 ID, phân biệt 917 HTTP captures gốc, 11 browser
+captures, 4 ứng viên cũ và trạng thái từng ID trong nhóm 68. Đây là số ID được
+ghi nhận, chưa phải 1.000 bài hợp lệ.
+
+01g dùng `remaining_recovery_code_lock.json` riêng. HTTP Chrome TLS được dùng
+cho cả robots và bài viết; lỗi mạng/5xx được retry có giới hạn. Khi đủ điều kiện,
+Crawl4AI chạy browser với guard trước từng request/redirect, giữ response bytes
+và rendered DOM riêng. Disallow đã xác nhận và robots chưa truy cập được vẫn
+có trạng thái hold trong ledger. Chạy lại cùng cấu hình để resume từng ID;
+đổi `RECOVERY_LABEL` khi cần một lượt thử mới. Cuối notebook tải
+`remaining-stage-a-<experiment>.zip`, gồm ledger đủ 1.000 ID, danh sách 83 URL,
+captures mới và bằng chứng kiểm hash. Kết quả thật của 68 ID cần chạy trên
+Colab; chưa tự nhập ứng viên vào corpus. Xem
+[thiết kế và kiểm chứng Crawl4AI](docs/CRAWL4AI_RECOVERY.md).
 
 Stage A dùng 11 fixture synthetic để bootstrap. Notebook 03 xuất 100 nguồn để
 team gán expected snippets và replay thành golden nguồn thật. Scale-up cần bộ

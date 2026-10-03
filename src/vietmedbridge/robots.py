@@ -156,9 +156,13 @@ class RobotsResolver:
                                 break
                         else:
                             digest = hashlib.sha256(body).hexdigest()
-                            parser = RobotFileParser(robots_url)
-                            parser.parse(body.decode("utf-8", errors="replace").splitlines())
-                            state = "ROBOTS_OK"
+                            prefix = bytes(body[:8192]).lower()
+                            if any(tag in prefix for tag in (b"<html", b"<!doctype html", b"<head", b"<body")):
+                                state = "ROBOTS_INVALID_CONTENT"
+                            else:
+                                parser = RobotFileParser(robots_url)
+                                parser.parse(body.decode("utf-8-sig", errors="replace").splitlines())
+                                state = "ROBOTS_OK"
                     elif status in (404, 410):
                         state = f"ROBOTS_{status}"
                     elif status == 429:

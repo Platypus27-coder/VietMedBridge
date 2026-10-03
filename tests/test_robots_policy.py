@@ -151,3 +151,12 @@ def test_page_403_preserves_robots_evidence():
     assert result["robots_state"] == "ROBOTS_OK_ALLOWED"
     assert result["robots_http_status"] == 200
     assert len(result["robots_checks"]) == 1
+
+
+def test_robots_http_200_html_error_is_not_parsed_as_empty_allow_all():
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="<html><title>Just a moment...</title></html>")
+        pytest.fail("Invalid robots HTML must not release article requests")
+    result = fetch_one(handler)
+    assert result["robots_state"] == "ROBOTS_INVALID_CONTENT" and result["status"] == "error"

@@ -2816,6 +2816,24 @@ robots trước mỗi hop. Browser của 01c tạm dừng vì `page_setup` trong
 0.4.15 có thể nuốt exception của route guard. 01d chỉ thử lại 11 URL chưa thành
 ứng viên và không tự động merge vào Stage A.
 
+Notebook 01g bổ sung Crawl4AI 0.9.4 tại source commit
+`e5d2e786d1a101225f3f6a3e6fd344d76eeb13af`, sau khi đọc implementation của
+hooks, browser manager và robots parser. Upstream mặc định không kiểm robots;
+helper của thư viện còn cho phép khi robots fetch lỗi. Vì vậy adapter dùng
+resolver VietMedBridge và CDP guard riêng trước từng request/redirect, không
+dựa vào `success=True` của engine để xác nhận bài. Response HTTP bytes và DOM
+render được lưu riêng, có source hashes và checkpoint theo official ID.
+
+01g đối chiếu cả 1.000 ID với raw shards sau retry: 917 HTTP captures được giữ,
+11 browser captures được replay như 01f, 4 ứng viên 01c chờ review, 68 ID còn
+lại được probe robots bằng HTTP Chrome TLS trước khi thử bài. Lỗi mạng/5xx có
+bounded retry; Disallow đã xác nhận và robots không đọc được vẫn giữ hold.
+Gián đoạn sau khi lưu asset nhưng trước marker không làm hỏng resume; mỗi
+attempt có đường dẫn riêng. Ledger không bỏ ID nào và các ứng viên mới không
+tự merge vào Stage A. Kiểm thử local đã chứng minh guard và recovery/resume;
+coverage thực của 68 ID còn lại cần kết quả Colab. Xem
+`docs/CRAWL4AI_RECOVERY.md`.
+
 | Initial pilot failure (trước retry) | Immediate action | Scrapling? | Final state if unresolved |
 |---|---|---|---|
 | 54 robots blocked | verify parser, respect Disallow | No bypass | `POLICY_ROBOTS_DISALLOWED` |

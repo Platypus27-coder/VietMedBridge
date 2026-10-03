@@ -86,3 +86,31 @@ Colab. Các gates hiện giữ những evidence chưa có ở trạng thái pend
 Xem `reports/stage-a-v2-colab-probe-4c49d3358aa818b7.md`. Coverage của các
 domain còn lại, human review, reviewed ingestion và full-corpus budget chưa
 được chứng minh bằng kết quả 11 URL này.
+
+## Bổ sung ngày 03/10/2026: thu tiếp bằng Crawl4AI
+
+- **68 pytest tests passed** trong runtime riêng dùng Python 3.11 và Crawl4AI
+  0.9.4 từ commit `e5d2e786d1a101225f3f6a3e6fd344d76eeb13af`. Bao gồm
+  bốn browser integration tests trên Edge headless: hai Scrapling tests cũ và
+  hai Crawl4AI tests mới dùng response mô phỏng. Không sửa Conda env gốc để
+  thêm dependency Crawl4AI.
+- Crawl4AI redirect guard chặn đường dẫn bị robots cấm trước request; khi
+  redirect được phép tới HTTP 403, status, actual response bytes và DOM đều
+  được giữ. Setup/hook thiếu không biến `success=True` thành article capture.
+- Loader của 01g được kiểm bằng workflow crawl thật với HTTP mock, Parquet,
+  raw shard, triage, legacy assets và browser replay. Nó chọn đúng ID chưa
+  tải, dùng lại capture và từ chối URL lệch mapping dù CSV hash đã cập nhật.
+- Chrome robots transport kiểm retry 5xx/Retry-After và decoded bodies;
+  robots 200 trả HTML challenge bị giữ. Robots 403/429/5xx hoặc Disallow đã
+  xác nhận không được chuyển sang tải bài/browser.
+- Recovery kiểm ledger đủ official IDs, resume không fetch lại ID hoàn tất,
+  phát hiện checksum corruption, giữ riêng HTTP shell/raw browser/DOM và
+  tiếp tục được khi ngắt sau asset nhưng trước marker, dù response mới đổi.
+- **10 notebooks** qua nbformat, empty-output checks và Python syntax;
+  notebook 01g có 10 cells, bootstrap/Drive/code lock và ZIP export riêng.
+
+Chưa chạy 68 URL còn lại trong môi trường mạng Colab của người dùng. Các
+kiểm thử mới chứng minh input/recovery/checkpoint/guard, chưa chứng minh
+1.000 bài đã tải đủ hoặc toàn corpus có thể crawl. 917 HTTP captures,
+11 browser captures và 4 legacy candidates vẫn cần extraction/content review
+trước khi được tính vào valid-article coverage hoặc nhập canonical corpus.
