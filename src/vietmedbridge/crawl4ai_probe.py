@@ -17,11 +17,12 @@ from .robots import RobotsResolver
 
 class Crawl4AIProbe:
     """Install on one fresh crawler instance/context, never shared profiles."""
-    def __init__(self, guard, settings: BrowserProbeConfig):
+    def __init__(self, guard, settings: BrowserProbeConfig, *, gate_factory=_RequestGate):
         settings.validate()
         if not guard.config.respect_robots:
             raise ValueError("Crawl4AI probe requires robots enforcement.")
         self.guard, self.settings = guard, settings
+        self.gate_factory = gate_factory
         self.page = self.cdp = self.gate = None
         self.installed = False
         self.responses, self.assets = [], {}
@@ -46,7 +47,7 @@ class Crawl4AIProbe:
         frame_id = (await self.cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
         agent = await page.evaluate("navigator.userAgent")
         browser_robots = RobotsResolver(self.guard.client, self.guard.pace, user_agent=agent)
-        self.gate = _RequestGate(self.cdp, self.guard, browser_robots, frame_id, self.settings)
+        self.gate = self.gate_factory(self.cdp, self.guard, browser_robots, frame_id, self.settings)
         self.cdp.on("Fetch.requestPaused", self.gate.paused)
         await self.cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
         async def deny_socket(socket):

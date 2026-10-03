@@ -9,15 +9,40 @@ def remaining_cells(bootstrap, md, code):
         Dùng **runtime CPU mới**, cùng Drive DATA_ROOT. Notebook tự đọc đủ
         1.000 ID, kiểm raw checkpoint và ledger sau retry, trích lại 11 browser
         captures sẵn có (bao gồm công việc của 01f), giữ 4 ứng viên 01c để review,
-        rồi xử lý 68 ID còn lại bằng HTTP Chrome TLS → Crawl4AI browser.
+        rồi xử lý 68 ID còn lại bằng HTTP Chrome TLS → Crawl4AI stealth →
+        Scrapling stealth. Robots HTTP lỗi được thử đọc bằng browser riêng;
+        chỉ response robots thật mới được dùng để quyết định tải bài.
 
         Có checkpoint từng ID; không tải lại 917 nguồn gốc hoặc 11 captures.
         Đọc robots bằng Chrome TLS, retry lỗi mạng/5xx có giới hạn. Giữ policy
         hold cho Disallow đã xác nhận, 401/403/429 hoặc robots chưa đọc được.
         Đầu ra là ứng viên review; notebook chưa gộp/sửa corpus Stage A.
         """),
-        code(bootstrap.replace("code_lock.json", "remaining_recovery_code_lock.json")),
-        md("## 1. Xác minh toàn bộ Stage A và chọn đúng nhóm còn thiếu"),
+        code(bootstrap.replace("code_lock.json", "advanced_recovery_code_lock.json")),
+        md("## 1. Cài bộ HTTP/browser — CPU, không dùng LLM"),
+        code("""
+        import importlib.metadata
+        import subprocess
+
+        CRAWL4AI_COMMIT = "e5d2e786d1a101225f3f6a3e6fd344d76eeb13af"
+        CRAWL4AI_URL = f"https://github.com/unclecode/crawl4ai/archive/{CRAWL4AI_COMMIT}.zip"
+        os.environ["CRAWL4_AI_BASE_DIRECTORY"] = str(WORK_DIR / "crawl4ai")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+            f"crawl4ai @ {CRAWL4AI_URL}", "scrapling[fetchers]==0.4.15",
+            "playwright==1.63.0", "patchright==1.63.0", "playwright-stealth==2.0.3",
+            "curl_cffi==0.16.3"], check=True)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"], check=True)
+        subprocess.run([sys.executable, "-m", "patchright", "install", "chromium"], check=True)
+        from vietmedbridge.advanced_recovery import AdvancedRecoveryRuntime
+        from vietmedbridge.stage_a_recovery import recover_remaining
+
+        VERSIONS = {p: importlib.metadata.version(p) for p in (
+            "crawl4ai", "scrapling", "playwright", "curl_cffi", "patchright", "playwright-stealth",
+        )}
+        VERSIONS["crawl4ai_source_commit"] = CRAWL4AI_COMMIT
+        print(VERSIONS)
+        """),
+        md("## 2. Xác minh toàn bộ Stage A và chọn đúng nhóm còn thiếu"),
         code("""
         from vietmedbridge.stage_a_recovery import load_remaining_plan
         from vietmedbridge.artifacts import atomic_json, publish_file, sha256_file
@@ -30,28 +55,6 @@ def remaining_cells(bootstrap, md, code):
         print("Các ID sau retry:", PLAN["failed_ids"], "| cần thử tiếp:", PLAN["remaining_ids"])
         print("11 bài đã có được trích lại tự động; không cần chạy 01f trước.")
         """),
-        md("## 2. Cài bộ HTTP/browser — CPU, không dùng LLM"),
-        code("""
-        import importlib.metadata
-        import subprocess
-
-        CRAWL4AI_COMMIT = "e5d2e786d1a101225f3f6a3e6fd344d76eeb13af"
-        CRAWL4AI_URL = f"https://github.com/unclecode/crawl4ai/archive/{CRAWL4AI_COMMIT}.zip"
-        os.environ["CRAWL4_AI_BASE_DIRECTORY"] = str(WORK_DIR / "crawl4ai")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-            f"crawl4ai @ {CRAWL4AI_URL}", "scrapling[fetchers]==0.4.15",
-            "playwright==1.63.0", "curl_cffi==0.16.3"], check=True)
-        subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"], check=True)
-        from scrapling.fetchers import Fetcher as ScraplingFetcher
-        from vietmedbridge.crawl4ai_probe import crawl4ai_browser_probe
-        from vietmedbridge.stage_a_recovery import recover_remaining
-
-        VERSIONS = {p: importlib.metadata.version(p) for p in (
-            "crawl4ai", "scrapling", "playwright", "curl_cffi", "patchright",
-        )}
-        VERSIONS["crawl4ai_source_commit"] = CRAWL4AI_COMMIT
-        print(VERSIONS)
-        """),
         md("""
         ## 3. Thu tiếp nhóm còn thiếu và lưu từng ID
 
@@ -61,14 +64,17 @@ def remaining_cells(bootstrap, md, code):
         lượt retry mới khi cần thử lại lỗi tạm thời; giữ lượt cũ làm bằng chứng.
         """),
         code("""
-        RECOVERY_LABEL = "remaining-v1"
+        RECOVERY_LABEL = "advanced-v1"
         MAX_NEW_IDS = None  # None = xử lý đủ nhóm còn thiếu; có thể đặt 10 cho mỗi phiên.
+        DOMAIN_PROFILES = {}  # Tùy chỉnh selector/resource_hosts theo bằng chứng của từng domain.
         REPORT_DIR = DATA_ROOT / "reports/crawl_recovery/stage-a-v2"
-        RESULT = await recover_remaining(
-            PLAN, REPORT_DIR / "remaining", ScraplingFetcher.get,
-            browser_probe=crawl4ai_browser_probe, provenance=PROVENANCE,
-            versions=VERSIONS, label=RECOVERY_LABEL, max_new_ids=MAX_NEW_IDS,
-        )
+        async with AdvancedRecoveryRuntime(WORK_DIR / "recovery_browser", profiles=DOMAIN_PROFILES) as engines:
+            RESULT = await recover_remaining(
+                PLAN, REPORT_DIR / "remaining", engines.get,
+                browser_probe=engines.browser_probe, advanced_runtime=engines,
+                provenance=PROVENANCE, versions=VERSIONS,
+                label=RECOVERY_LABEL, max_new_ids=MAX_NEW_IDS,
+            )
         RESULT_DIR = Path(RESULT["output_dir"])
         print(json.dumps({k: RESULT[k] for k in (
             "official_ids", "baseline_http_captures", "remaining_input_ids",
@@ -79,6 +85,7 @@ def remaining_cells(bootstrap, md, code):
         code("""
         import shutil
         import pandas as pd
+        from urllib.parse import urlsplit
         from google.colab import files
 
         for name, source in SOURCE_FILES.items():
@@ -88,6 +95,14 @@ def remaining_cells(bootstrap, md, code):
             RESULT_DIR / "coverage_1000.csv", index=False, encoding="utf-8-sig")
         pd.DataFrame(RESULT["records"]).to_csv(
             RESULT_DIR / "recovery_results.csv", index=False, encoding="utf-8-sig")
+        overview = pd.DataFrame(RESULT["coverage_ledger"])
+        overview["domain"] = overview["url"].map(lambda value: urlsplit(value).hostname)
+        overview.groupby(["domain", "state"]).size().rename("ids").reset_index().to_csv(
+            RESULT_DIR / "coverage_by_domain.csv", index=False, encoding="utf-8-sig")
+        captured_states = {"BASELINE_HTTP_CAPTURE", "CACHED_BROWSER_REVIEW",
+                           "LEGACY_CANDIDATE_REVIEW", "ARTICLE_CANDIDATE_REVIEW"}
+        overview[~overview["state"].isin(captured_states)].to_csv(
+            RESULT_DIR / "unresolved_urls.csv", index=False, encoding="utf-8-sig")
         artifacts = {p.relative_to(RESULT_DIR).as_posix(): sha256_file(p)
                      for p in RESULT_DIR.rglob("*") if p.is_file() and p.name != "export_hashes.json"}
         atomic_json(RESULT_DIR / "export_hashes.json", artifacts)

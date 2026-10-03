@@ -23,6 +23,20 @@ from .artifacts import utc_now
 from .dataset import url_host
 
 
+def is_robots_html(body: bytes) -> bool:
+    prefix = bytes(body[:8192]).lower()
+    return any(tag in prefix for tag in (b"<html", b"<!doctype html", b"<head", b"<body"))
+
+
+def valid_robots_bytes(body: bytes | None) -> bool:
+    """Require recognizable robots text before accepting a browser recovery."""
+    if body is None or len(body) > 512 * 1024 or is_robots_html(body):
+        return False
+    lines = [line.strip() for line in body.decode("utf-8-sig", errors="replace").splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    return not lines or any(line.lower().startswith(("user-agent:", "sitemap:")) for line in lines)
+
+
 @dataclass(frozen=True)
 class RobotsDecision:
     state: str
@@ -156,8 +170,7 @@ class RobotsResolver:
                                 break
                         else:
                             digest = hashlib.sha256(body).hexdigest()
-                            prefix = bytes(body[:8192]).lower()
-                            if any(tag in prefix for tag in (b"<html", b"<!doctype html", b"<head", b"<body")):
+                            if is_robots_html(body):
                                 state = "ROBOTS_INVALID_CONTENT"
                             else:
                                 parser = RobotFileParser(robots_url)

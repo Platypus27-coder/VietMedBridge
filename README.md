@@ -89,14 +89,21 @@ thiếu. Ledger luôn chứa đủ 1.000 ID, phân biệt 917 HTTP captures gố
 captures, 4 ứng viên cũ và trạng thái từng ID trong nhóm 68. Đây là số ID được
 ghi nhận, chưa phải 1.000 bài hợp lệ.
 
-01g dùng `remaining_recovery_code_lock.json` riêng. HTTP Chrome TLS được dùng
-cho cả robots và bài viết; lỗi mạng/5xx được retry có giới hạn. Khi đủ điều kiện,
-Crawl4AI chạy browser với guard trước từng request/redirect, giữ response bytes
-và rendered DOM riêng. Disallow đã xác nhận và robots chưa truy cập được vẫn
-có trạng thái hold trong ledger. Chạy lại cùng cấu hình để resume từng ID;
+01g nâng cấp dùng `advanced_recovery_code_lock.json` riêng và
+`RECOVERY_LABEL="advanced-v1"`. Mở bản notebook mới trong runtime CPU mới để
+không bị giữ ở code lock của 01g cũ. HTTP Chrome TLS dùng session cho robots và
+bài viết; lỗi robots 403/HTML challenge/mạng/5xx được thử bằng browser để lấy
+response robots thật. Nhánh bài viết dùng **Crawl4AI stealth → Scrapling stealth**,
+tự ưu tiên engine đã thành công trên cùng domain, giữ cookies và giới hạn số
+browser. Có chờ selector/nội dung, cuộn có giới hạn, tài nguyên CDN, bộ lọc
+quảng cáo Scrapling và challenge handling có timeout. Status/bytes lấy qua CDP
+được lưu riêng với DOM, kể cả engine chưa lấy được bài. Disallow đã xác nhận
+và robots vẫn chưa truy cập được có trạng thái hold. Chạy lại cùng cấu hình để resume từng ID;
 đổi `RECOVERY_LABEL` khi cần một lượt thử mới. Cuối notebook tải
 `remaining-stage-a-<experiment>.zip`, gồm ledger đủ 1.000 ID, danh sách 83 URL,
-captures mới và bằng chứng kiểm hash. Kết quả thật của 68 ID cần chạy trên
+captures mới, `unresolved_urls.csv`, thống kê domain và bằng chứng kiểm hash.
+Browser profiles/cookies chỉ lưu trong ổ local Colab, không vào ZIP.
+Kết quả thật của 68 ID cần chạy trên
 Colab; chưa tự nhập ứng viên vào corpus. Xem
 [thiết kế và kiểm chứng Crawl4AI](docs/CRAWL4AI_RECOVERY.md).
 

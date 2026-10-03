@@ -2834,6 +2834,16 @@ tự merge vào Stage A. Kiểm thử local đã chứng minh guard và recovery
 coverage thực của 68 ID còn lại cần kết quả Colab. Xem
 `docs/CRAWL4AI_RECOVERY.md`.
 
+Bản 01g `advanced-v1` tiếp tục khai thác hai engine: browser bootstrap cho
+robots HTTP lỗi, HTTP session, Crawl4AI stealth và Scrapling/Patchright stealth,
+cookies theo domain, chờ nội dung/scroll, CDN có kiểm tra, bộ lọc ad domains
+Scrapling và adaptive rate limiter Crawl4AI. Nếu engine đã lấy được policy/bài,
+lượt tiếp theo trên domain ưu tiên engine đó. Raw response CDP, DOM và lỗi của
+cả hai engine đều được lưu; browser profiles không xuất vào bundle. Pool nhỏ
+và robots bootstrap tuần tự giữ tài nguyên phù hợp Colab CPU. `Disallow` đọc
+được vẫn là policy hold; HTTP lỗi khi đọc robots được chẩn đoán thêm trước khi
+giữ lại URL. Coverage phải lấy từ kết quả thật của 01g, không từ số test pass.
+
 | Initial pilot failure (trước retry) | Immediate action | Scrapling? | Final state if unresolved |
 |---|---|---|---|
 | 54 robots blocked | verify parser, respect Disallow | No bypass | `POLICY_ROBOTS_DISALLOWED` |

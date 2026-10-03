@@ -102,7 +102,8 @@ def _extract(record, body, content_type, target, asset, *, capture_kind, method)
 
 
 async def recover_remaining(plan, output_root, get, *, browser_probe=None, provenance=None,
-                            versions=None, label="remaining-v1", max_new_ids=None, sleep=None):
+                            versions=None, label="remaining-v1", max_new_ids=None, sleep=None,
+                            advanced_runtime=None):
     """Run bounded HTTP then Crawl4AI for eligible HTML failures, with ID checkpoints.
 
     Successful HTTP captures and existing candidates are never refetched. Raw
@@ -115,6 +116,8 @@ async def recover_remaining(plan, output_root, get, *, browser_probe=None, prove
     identity = {"plan_sha256": digest_json(plan), "provenance": provenance or {},
                 "code_sha256": code_fingerprint(), "versions": versions or {},
                 "label": label, "http": asdict(http_config), "policy": "remaining-stage-a-v1"}
+    if advanced_runtime is not None:
+        identity["advanced_recovery"] = advanced_runtime.identity
     key = digest_json(identity)[:16]
     target = Path(output_root) / key
     target.mkdir(parents=True, exist_ok=True)
@@ -130,8 +133,12 @@ async def recover_remaining(plan, output_root, get, *, browser_probe=None, prove
             event["asset"] = _write_asset(target, relative, body)
         robot_events.append(event)
     transport_kwargs = {"sleep": sleep} if sleep else {}
+    if advanced_runtime is not None:
+        transport_kwargs["browser_read"] = advanced_runtime.read_robots
     transport = ChromeRobotsTransport(get, observer=robots_observer, **transport_kwargs)
     guard = Fetcher(CrawlConfig(concurrency=1, attempts=1, per_host_delay=3), transport=transport)
+    if advanced_runtime is not None:
+        advanced_runtime.configure_guard(guard)
     if sleep:
         async def no_pace(*_args):
             pass
@@ -195,6 +202,10 @@ async def recover_remaining(plan, output_root, get, *, browser_probe=None, prove
                 eligible = result.get("http_status") == 403 or (
                     result.get("http_status") == 200 and not ready and
                     "pdf" not in result.get("content_type", "").lower())
+                if advanced_runtime is not None:
+                    eligible = eligible or result.get("outcome") == "fetch_error" or (
+                        result.get("http_status") in {404, 408, 500, 502, 503, 504} and
+                        urlsplit(browser_url).hostname not in held_hosts)
                 if eligible and browser_probe and urlsplit(browser_url).scheme == "https":
                     settings = BrowserProbeConfig(allowed_hosts=(urlsplit(browser_url).hostname,),
                         document_path_prefix="/", render_wait_seconds=5)
@@ -210,7 +221,8 @@ async def recover_remaining(plan, output_root, get, *, browser_probe=None, prove
                         record["final_url"] = observed["final_url"]
                         for name, kind in (("response.html", "response_bytes"), ("rendered.html", "rendered_dom")):
                             if name in assets and _extract(record, assets[name], "text/html", target,
-                                    record["assets"][name], capture_kind=kind, method="crawl4ai_browser"):
+                                    record["assets"][name], capture_kind=kind,
+                                    method=observed.get("method", "crawl4ai_browser")):
                                 break
                     elif not ready and record["state"] != "SHORT_OR_UNTITLED_REVIEW":
                         record["state"] = "BROWSER_FETCH_FAILED"

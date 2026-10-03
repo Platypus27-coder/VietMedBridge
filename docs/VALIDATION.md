@@ -114,3 +114,35 @@ kiểm thử mới chứng minh input/recovery/checkpoint/guard, chưa chứng m
 1.000 bài đã tải đủ hoặc toàn corpus có thể crawl. 917 HTTP captures,
 11 browser captures và 4 legacy candidates vẫn cần extraction/content review
 trước khi được tính vào valid-article coverage hoặc nhập canonical corpus.
+
+## Bổ sung ngày 03/10/2026: hai engine recovery và robots bootstrap
+
+Full regression đã chạy **84 tests pass**; sau khi bổ sung kiểm tra concurrency,
+nhóm advanced recovery chạy lại **16/16 pass**. Bốn integration cases mới chạy
+Crawl4AI stealth và Scrapling/Patchright thật trên Edge headless, dùng response
+mô phỏng: JS từ CDN tải nội dung muộn, cookies tồn tại giữa hai URL cùng domain,
+và robots response bytes được giữ nguyên. Các kiểm thử còn chứng minh:
+
+- HTTP robots 403 có thể chuyển sang raw robots 200 bằng browser, nhưng
+  Disallow thực vẫn chặn bài; DOM/HTML error/plain-text error không thành allow-all.
+- Auth/rate limit/Retry-After dài không bị bỏ qua để chạy browser tiếp.
+- HTTP connection error và HTTP 403 đi qua hai engine, giữ assets của cả hai,
+  không gán raw bytes cũ cho engine mới, resume không fetch lại ID hoàn tất.
+- Robots bootstrap không tự điều hướng vào bài, chặn private IP, và các bootstrap
+  từ nhiều CDN được xếp tuần tự/cache để giới hạn số browser.
+- Hủy browser không phát thêm các robots request đang xếp hàng; HTTP request
+  đang chạy được đợi hoàn tất trước khi đóng session.
+
+Thử ngoài thực tế tại URL Long Châu official ID **206172**, ngày 03/10/2026
+19:31–19:32 Asia/Saigon: cả hai engine HTTP 200, không guard error, trích đúng
+**5.934 ký tự** với cùng source-text SHA-256
+`bc7b09db548d689f6cb2932700ea2a2d214fb363132aa77d572d722bbda5fc27`.
+Raw response hashes khác nhau do bytes trả về giữa các lần truy cập khác nhau:
+
+- Crawl4AI: `8e3dd415d6041ec033a6ffbd1ec609ce8f727e8e70b2415b296c93faf2414835`.
+- Scrapling: `e1dab819e62a27efd126505af8dc784e66da4aacdd323ac73f83418658690b04`.
+
+Raw/DOM/log lưu local trong `data/advanced_live_final/`, không commit. Lượt này
+kiểm adapter mới trên một URL đã biết; không cộng thêm vào coverage nhóm 68.
+Notebook 01g được sinh lại và cả 10 notebook qua schema/syntax/empty-output checks.
+Kết quả 68 URL còn thiếu vẫn cần chạy trên Colab, cùng Drive của run Stage A.
