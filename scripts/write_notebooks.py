@@ -330,7 +330,7 @@ def main():
         code("""
         from vietmedbridge.dataset import load_snapshot, parquet_path, validate_link_subset
         from vietmedbridge.crawl import CrawlConfig, crawl_links, completed_parts
-        from vietmedbridge.artifacts import read_json, verify_file, sha256_file
+        from vietmedbridge.artifacts import read_json, verify_file, sha256_file, atomic_json, code_fingerprint
         from vietmedbridge.gates import authorize_scale
         import pyarrow.parquet as pq
 
@@ -367,9 +367,30 @@ def main():
         else:
             raise ValueError("MODE phải là stage_a, smoke hoặc range.")
 
-        GOLDEN = read_json(DATA_ROOT / "reports/golden_latest.json")
-        if GOLDEN["fixture_sha256"] != sha256_file(CHECKOUT / "tests/golden/cases.json"):
-            raise ValueError("Golden fixtures đổi; chạy lại notebook 00.")
+        GOLDEN_PATH = DATA_ROOT / "reports/golden_latest.json"
+        GOLDEN = read_json(GOLDEN_PATH)
+        GOLDEN_FIXTURES = CHECKOUT / "tests/golden/cases.json"
+        golden_is_stale = (
+            not GOLDEN.get("passed")
+            or GOLDEN.get("code_sha256") != code_fingerprint()
+            or GOLDEN.get("fixture_sha256") != sha256_file(GOLDEN_FIXTURES)
+            or GOLDEN.get("chunking") != PIPELINE_CONFIG["chunking"]
+        )
+        if golden_is_stale:
+            print("Golden report cũ hoặc khác policy; chạy lại synthetic regression với code hiện tại.")
+            from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
+            from vietmedbridge.golden import run_golden_suite
+
+            tokenizer_lock = read_json(DATA_ROOT / "tokenizer_lock.json")
+            TOKENIZER, TOKENIZER_SPEC = load_bge_tokenizer(tokenizer_lock.get("revision"))
+            GOLDEN = run_golden_suite(
+                GOLDEN_FIXTURES, TOKENIZER, TOKENIZER_SPEC,
+                ChunkConfig(**PIPELINE_CONFIG["chunking"]),
+            )
+            atomic_json(GOLDEN_PATH, GOLDEN)
+            print("Golden regression passed:", GOLDEN["passed"], "| code:", GOLDEN["code_sha256"])
+            if not GOLDEN["passed"]:
+                raise RuntimeError("Golden regression fail; chưa được crawl/scale.")
         input_rows = pq.ParquetFile(INPUT_LINKS).metadata.num_rows
         requested_rows = max(0, min(STOP if STOP is not None else input_rows, input_rows) - START)
         STAGE = authorize_scale(DATA_ROOT, rows=requested_rows,
