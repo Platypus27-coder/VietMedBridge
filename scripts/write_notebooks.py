@@ -93,7 +93,27 @@ print("Package source:", Path(vietmedbridge.__file__).resolve())
 print("Dữ liệu/checkpoint:", DATA_ROOT)
 '''
 
-# Recovery experiments use new code without changing the pinned stage-a-v2 code.
+# Upgrade a pre-engine code lock once, then keep all data notebooks on that exact commit.
+CRAWL_BOOTSTRAP = (
+    BOOTSTRAP
+    .replace(
+        'reference = CODE_REVISION or lock.get("git_commit") or "main"',
+        '''CRAWL_ENGINE_API = "scrapling-crawl4ai-v1"
+if lock and lock.get("crawl_engine_api") != CRAWL_ENGINE_API and not CODE_REVISION:
+    reference = "main"
+else:
+    reference = CODE_REVISION or lock.get("git_commit") or "main"''',
+    )
+    .replace(
+        'if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
+        'if not lock or CODE_REVISION or lock.get("crawl_engine_api") != CRAWL_ENGINE_API:\n'
+        '    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, '
+        '"pipeline_api": PIPELINE_API_VERSION, "crawl_engine_api": CRAWL_ENGINE_API})',
+    )
+    .replace('"-e", ".[notebook]"', '"-e", ".[notebook,crawl_engines]"')
+)
+
+# Recovery experiments use new code without changing the pinned baseline checkpoint.
 RECOVERY_BOOTSTRAP = BOOTSTRAP.replace("code_lock.json", "recovery_code_lock.json")
 GUARDED_RECOVERY_BOOTSTRAP = BOOTSTRAP.replace(
     "code_lock.json", "guarded_recovery_code_lock.json"
@@ -255,11 +275,58 @@ def main():
         recovery trong giai đoạn baseline; quay lại phần URL còn thiếu sau mốc
         khoảng 1 triệu URL.
 
+        Lần đầu nâng code sau notebook 00, nếu Bootstrap báo package cũ đã được import,
+        restart Colab một lần rồi chạy lại Bootstrap; `code_lock.json` sẽ ghim commit mới.
+
+        Scrapling FetcherSession là HTTP engine cho mỗi URL (TLS impersonation Chrome,
+        không bật stealth headers); redirects vẫn do crawler xử lý từng hop sau khi
+        kiểm robots. Crawl4AI chỉ render tối đa 24 trang/cell khi HTTP 200 trả về
+        JavaScript shell mỏng có marker rõ ràng. 403, CAPTCHA, robots hold và rate-limit
+        không đi qua browser. Không cần ACTION hay GPU.
+
         Dữ liệu có hàng triệu URL. Cần xem domain audit và chất lượng sample trước
         khi chọn phạm vi lớn; các nguồn như PubMed/PMC có thể cần bulk/API adapter
-        để thu thập hiệu quả. Crawler HTTP ở đây là nền tảng khởi đầu.
+        để thu thập hiệu quả. Các engine không hứa vượt chính sách nguồn hay chặn truy cập.
         """),
-        code(BOOTSTRAP),
+        code(CRAWL_BOOTSTRAP),
+        md("## Tự động cài engine HTTP và browser runtime"),
+        code("""
+        import importlib.metadata
+        import os
+
+        ENGINE_CONFIG = PIPELINE_CONFIG["fetch_engines"]
+        if ENGINE_CONFIG.get("primary") != "scrapling-http":
+            raise ValueError("Notebook 01 hiện yêu cầu primary engine là scrapling-http.")
+        os.environ["CRAWL4_AI_BASE_DIRECTORY"] = str(WORK_DIR / "crawl4ai")
+        RENDER_CONFIG = dict(ENGINE_CONFIG["crawl4ai"])
+        CRAWL4AI_ENABLED = RENDER_CONFIG.pop("enabled", True)
+        if CRAWL4AI_ENABLED:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as playwright:
+                chromium_installed = Path(playwright.chromium.executable_path).is_file()
+            if not chromium_installed:
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+                    check=True,
+                )
+        from vietmedbridge.crawl4ai_enhancer import Crawl4AIEnhancer
+        from vietmedbridge.scrapling_transport import ScraplingTransport
+        from vietmedbridge.crawl import CrawlConfig
+
+        CONFIG = CrawlConfig(**PIPELINE_CONFIG["crawler"])
+        SCRAPLING_TRANSPORT = ScraplingTransport(
+            user_agent=CONFIG.user_agent, timeout_seconds=CONFIG.timeout_seconds,
+        )
+        CRAWL4AI_ENHANCER = Crawl4AIEnhancer(**RENDER_CONFIG) if CRAWL4AI_ENABLED else None
+        ENGINE_VERSIONS = {
+            name: importlib.metadata.version(name)
+            for name in ("scrapling", "crawl4ai", "curl_cffi", "playwright", "patchright")
+        }
+        print("Crawl engines:", ENGINE_VERSIONS)
+        print("Primary: Scrapling HTTP | selective Crawl4AI rendering:", CRAWL4AI_ENABLED)
+        print("GPU: not required; Crawl4AI is bounded to", RENDER_CONFIG["max_render_pages_per_call"],
+              "JavaScript shells per cell run.")
+        """),
         md("## 1. Chọn input và phạm vi theo vị trí dòng Parquet"),
         code("""
         from vietmedbridge.dataset import load_snapshot, parquet_path, validate_link_subset
@@ -284,7 +351,7 @@ def main():
             INPUT_LINKS = DATA_ROOT / pilot["files"]["stage_a_links"]["path"]
             verify_file(INPUT_LINKS, pilot["files"]["stage_a_links"]["sha256"])
             validate_link_subset(INPUT_LINKS, OFFICIAL_LINKS, work_dir=WORK_DIR)
-            RUN_NAME, START, STOP = "stage-a-v2", 0, None
+            RUN_NAME, START, STOP = "stage-a-v3", 0, None
         elif MODE == "smoke":
             audit = read_json(DATA_ROOT / "reports/dataset_audit.json")
             if audit["corpus_sha256"] != SNAPSHOT["files"]["links_corpus.parquet"]["sha256"]:
@@ -292,11 +359,11 @@ def main():
             INPUT_LINKS = DATA_ROOT / audit["sample"]["path"]
             verify_file(INPUT_LINKS, audit["sample"]["sha256"])
             validate_link_subset(INPUT_LINKS, OFFICIAL_LINKS, work_dir=WORK_DIR)
-            RUN_NAME = "smoke-v2"
+            RUN_NAME = "smoke-v3"
             START, STOP = 0, None
         elif MODE == "range":
             INPUT_LINKS = OFFICIAL_LINKS
-            RUN_NAME = "stage-b1-v2"
+            RUN_NAME = "stage-b1-v3"
             START, STOP = START_ROW, STOP_ROW
         else:
             raise ValueError("MODE phải là stage_a, smoke hoặc range.")
@@ -318,15 +385,17 @@ def main():
         Giữ cùng shard_size, range và cấu hình khi resume. Đổi range, cấu hình hoặc input phải
         dùng RUN_NAME mới. Mỗi host có giới hạn tốc độ; 429/5xx được retry có backoff.
         Robots bị chặn, lỗi tải, file quá lớn và các lỗi khác được lưu vào ledger.
+        Scrapling xử lý HTTP; Crawl4AI chỉ là fallback render có giới hạn cho shell JS.
+        Summary phân biệt `scrapling_http_entity` với `crawl4ai_rendered_dom`.
         Một shard ghi đủ trạng thái cho mọi ID mới được coi là hoàn thành.
         """),
         code("""
-        CONFIG = CrawlConfig(**PIPELINE_CONFIG["crawler"])
         SUMMARY = await crawl_links(
             INPUT_LINKS, DATA_ROOT / "crawl", run_name=RUN_NAME, config=CONFIG,
             start=START, stop=STOP, worker_index=WORKER_INDEX, worker_count=WORKER_COUNT,
             retry_failed=False, max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR,
             origin_corpus_sha256=SNAPSHOT["files"]["links_corpus.parquet"]["sha256"],
+            transport=SCRAPLING_TRANSPORT, enhancer=CRAWL4AI_ENHANCER,
         )
         print(json.dumps(SUMMARY, ensure_ascii=False, indent=2))
         """),
@@ -1031,8 +1100,8 @@ def main():
         from vietmedbridge.build import build_corpus
         from vietmedbridge.crawl import completed_parts
 
-        CRAWL_RUN = "stage-a-v2"
-        BUILD_RUN = "stage-a-data-v2"
+        CRAWL_RUN = "stage-a-v3"
+        BUILD_RUN = "stage-a-data-v3"
         MAX_NEW_SHARDS = None
         TOKENIZER_REVISION = None
         tokenizer_lock_path = DATA_ROOT / "tokenizer_lock.json"
@@ -1135,8 +1204,8 @@ def main():
         from vietmedbridge.golden import run_golden_suite
         from vietmedbridge.health import health_report, freeze_candidate
 
-        CRAWL_RUN = "stage-a-v2"
-        BUILD_RUN = "stage-a-data-v2"
+        CRAWL_RUN = "stage-a-v3"
+        BUILD_RUN = "stage-a-data-v3"
         BUILD_DIR = DATA_ROOT / "processed" / BUILD_RUN
         SNAPSHOT = load_snapshot(DATA_ROOT)
         OFFICIAL_LINKS = parquet_path(DATA_ROOT, "links_corpus.parquet")

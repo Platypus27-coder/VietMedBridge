@@ -12,7 +12,10 @@ Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạ
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
    Tải snapshot cố định, xác minh ID/URL, tạo inventory, Stage A sample và golden fixtures.
 2. **01 — Crawl baseline:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/01_colab_crawl_sources.ipynb).
-   Ghi raw response/hash và kết quả cho từng ID, có robots guard, shard checkpoint và resume.
+   Scrapling FetcherSession xử lý HTTP với phiên Chrome TLS fingerprint; redirect do pipeline
+   tự kiểm từng chặng cùng robots guard. Crawl4AI chỉ mở browser cho một số ít trang HTTP 200
+   nhận diện rõ là JavaScript shell và thiếu nội dung; mỗi lượt giới hạn 24 trang. Raw lưu cả
+   response HTTP gốc và DOM được chọn, có hash, robots evidence, shard checkpoint và resume.
    Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"` với range
    và `RUN_NAME` riêng, ổn định cho từng milestone. `MAX_NEW_SHARDS` giới hạn mỗi
    phiên; không để hai runtime ghi cùng shard.
@@ -28,7 +31,10 @@ giai đoạn này. Các lỗi vẫn có outcome theo official ID trong ledger đ
 Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích và xử lý phần còn thiếu.
 
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
-03 validate/freeze. Crawl dùng CPU, không cần GPU.
+03 validate/freeze. 01 tự cài các engine đã pin và Chromium trong Colab; không cần chọn
+ACTION. Crawl dùng CPU, không cần GPU. Scrapling impersonation chỉ điều chỉnh HTTP/TLS
+fingerprint; stealth headers không bật. Crawl4AI không xử lý robots hold, 403, CAPTCHA,
+rate-limit hay truy cập bị từ chối, và không cam kết vượt kiểm soát của nguồn.
 
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 

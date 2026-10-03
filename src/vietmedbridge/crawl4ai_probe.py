@@ -106,14 +106,15 @@ class Crawl4AIProbe:
         return self.record, self.assets
 
 
-async def crawl4ai_browser_probe(url, guard, *, config=None, crawler_factory=None):
+async def crawl4ai_browser_probe(url, guard, *, config=None, crawler_factory=None, user_agent=None):
     settings = config or BrowserProbeConfig(allowed_hosts=(_public_url(url),), document_path_prefix="/")
     probe = Crawl4AIProbe(guard, settings)
     if crawler_factory is None:
         from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
         crawler = AsyncWebCrawler(config=BrowserConfig(headless=True, browser_mode="dedicated",
                                   use_persistent_context=False, accept_downloads=False,
-                                  enable_stealth=False, ignore_https_errors=False, verbose=False))
+                                  enable_stealth=False, ignore_https_errors=False, verbose=False,
+                                  user_agent=user_agent or guard.config.user_agent))
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, check_robots_txt=False,
             max_retries=0, fallback_fetch_function=None, page_timeout=settings.navigation_timeout_ms,
             wait_until="domcontentloaded", delay_before_return_html=settings.render_wait_seconds,

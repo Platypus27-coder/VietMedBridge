@@ -75,7 +75,8 @@ def runtime_versions() -> dict[str, str]:
     result = {}
     for name in ("vietmedbridge", "datasets", "huggingface-hub", "pyarrow", "duckdb",
                  "httpx", "trafilatura", "pypdf", "transformers", "tokenizers",
-                 "lxml", "beautifulsoup4", "langdetect"):
+                 "lxml", "beautifulsoup4", "langdetect", "scrapling", "crawl4ai",
+                 "playwright", "patchright", "playwright-stealth", "curl_cffi"):
         try:
             result[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

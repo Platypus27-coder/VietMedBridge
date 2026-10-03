@@ -56,9 +56,10 @@ class SourceFailure(Exception):
 
 
 class Fetcher:
-    def __init__(self, config: CrawlConfig, *, transport=None):
+    def __init__(self, config: CrawlConfig, *, transport=None, enhancer=None):
         config.validate()
         self.config = config
+        self.enhancer = enhancer
         self.client = httpx.AsyncClient(
             timeout=config.timeout_seconds, follow_redirects=False,
             headers={"User-Agent": config.user_agent},
@@ -127,12 +128,15 @@ class Fetcher:
                     raise SourceFailure("empty_body", {
                         **decision.record(), "robots_checks": robots_checks,
                     })
+                engine = getattr(self.client._transport, "engine_name", "httpx-async")
+                capture_kind = "scrapling_http_entity" if engine.startswith("scrapling") else "http_entity"
                 return {
                     "final_url": str(response.url),
                     "http_status": response.status_code,
                     "content_type": response.headers.get("content-type", ""),
                     "encoding": response.encoding,
-                    "capture_kind": "http_entity",
+                    "fetch_engine": engine,
+                    "capture_kind": capture_kind,
                     **decision.record(),
                     "robots_checks": robots_checks,
                 }, bytes(body)
@@ -145,10 +149,37 @@ class Fetcher:
         for attempt in range(self.config.attempts):
             try:
                 metadata, body = await self.request(row["url"])
+                if self.enhancer is not None:
+                    try:
+                        enhanced = await self.enhancer.enhance(
+                            row["url"], metadata, body, guard=self,
+                        )
+                    except Exception as exc:
+                        enhanced = {"body": None, "metadata": {"render_attempt": {
+                            "engine": "crawl4ai", "state": "enhancer_error",
+                            "error_type": type(exc).__name__, "error": str(exc)[:300],
+                        }}}
+                    if enhanced:
+                        metadata.update(enhanced.get("metadata") or {})
+                        selected_body = enhanced.get("body")
+                        if isinstance(selected_body, (bytes, bytearray)) and selected_body:
+                            selected_body = bytes(selected_body)
+                            if selected_body != body:
+                                metadata.update({
+                                    "http_response_sha256": hashlib.sha256(body).hexdigest(),
+                                    "http_response_bytes": len(body),
+                                    "http_response_encoding": "base64-decoded-http-entity",
+                                    "http_response_base64": base64.b64encode(body).decode("ascii"),
+                                })
+                                body = selected_body
                 return {
                     **result, **metadata, "status": "ok", "attempts": attempt + 1,
                     "body_sha256": hashlib.sha256(body).hexdigest(), "body_bytes": len(body),
-                    "body_encoding": "base64-decoded-http-entity",
+                    "body_encoding": (
+                        "base64-rendered-dom-utf8"
+                        if metadata.get("capture_kind") == "crawl4ai_rendered_dom"
+                        else "base64-decoded-http-entity"
+                    ),
                     "body_base64": base64.b64encode(body).decode("ascii"),
                     "elapsed_ms": round((time.monotonic() - started) * 1000),
                 }
@@ -219,7 +250,7 @@ async def crawl_links(
     config: CrawlConfig | None = None, start: int = 0, stop: int | None = None,
     worker_index: int = 0, worker_count: int = 1, retry_failed: bool = False,
     max_shards: int | None = None, work_dir: str | Path | None = None,
-    origin_corpus_sha256: str | None = None, transport=None,
+    origin_corpus_sha256: str | None = None, transport=None, enhancer=None,
 ) -> dict:
     """Resume complete shards; incomplete temporary files are never treated as results."""
     config = config or CrawlConfig()
@@ -245,7 +276,9 @@ async def crawl_links(
         "row_range": {"start": start, "stop": stop},
         "requested_range": {"start": start, "stop": effective_stop},
         "requested_input_records": effective_stop - start,
-        "config": asdict(config), "crawler_version": "http-shards-v2",
+        "config": asdict(config), "crawler_version": "hybrid-shards-v3",
+        "fetch_engine": getattr(transport, "engine_name", "httpx-async"),
+        "enhancer": enhancer.identity if enhancer is not None else None,
         "code_sha256": code_fingerprint(),
         "runtime": runtime_versions(),
     }
@@ -257,7 +290,7 @@ async def crawl_links(
         atomic_json(run_manifest, {**identity, "signature": signature,
                                    "created_at": utc_now(), "runtime": runtime_versions()})
     totals = Counter()
-    fetcher = Fetcher(config, transport=transport)
+    fetcher = Fetcher(config, transport=transport, enhancer=enhancer)
     try:
         shards = iter_link_shards(links_path, start=start, stop=stop, shard_size=config.shard_size)
         for index, (first, rows) in enumerate(tqdm(shards, desc="Crawl shards", unit="shard")):
@@ -281,7 +314,7 @@ async def crawl_links(
             pending_ids = set(old["failed_ids"]) if old else {int(row["id"]) for row in rows}
             pending = [row for row in rows if int(row["id"]) in pending_ids]
             filename = (bucket / f"{part_name}-a{attempt:03d}.raw.jsonl.gz").as_posix()
-            statuses, failed, count, successful_this_call = Counter(), [], 0, 0
+            statuses, capture_kinds, failed, count, successful_this_call = Counter(), Counter(), [], 0, 0
             with local_workspace(work_dir) as temporary:
                 local = Path(temporary) / Path(filename).name
                 shard_bytes = 0
@@ -301,6 +334,8 @@ async def crawl_links(
                             compressed.write(encoded)
                             statuses[record["status"] if record["status"] == "ok"
                                      else record.get("error", "unknown_error")] += 1
+                            if record["status"] == "ok":
+                                capture_kinds[record.get("capture_kind", "unknown_capture")] += 1
                             if record["status"] != "ok":
                                 failed.append(record["doc_id"])
                             count += 1
@@ -324,7 +359,8 @@ async def crawl_links(
                 "run_signature": signature, "input_sha256": input_sha,
                 "input_pairs_sha256": digest_json(sorted(rows, key=lambda row: row["id"])),
                 "shard_attempt": attempt, "raw_file": filename, "raw_sha256": checksum,
-                "failed_ids": sorted(failed), "statuses": dict(statuses), "completed_at": utc_now(),
+                "failed_ids": sorted(failed), "statuses": dict(statuses),
+                "capture_kinds": dict(capture_kinds), "completed_at": utc_now(),
             }
             # Attempt manifests remain immutable; only the latest-complete pointer changes.
             atomic_json(run_dir / bucket / f"{part_name}-a{attempt:03d}.manifest.json", manifest)
@@ -334,14 +370,17 @@ async def crawl_links(
             totals["ok_this_call"] += successful_this_call
         parts = completed_parts(run_dir, verify=False)
         counts = Counter()
+        capture_counts = Counter()
         for part in parts:
             counts.update(part["statuses"])
+            capture_counts.update(part.get("capture_kinds", {}))
         summary = {
             "run_name": run_name, "run_signature": signature, "complete_shards": len(parts),
             "recorded_documents": sum(item["records"] for item in parts),
             "requested_input_records": identity["requested_input_records"],
             "range_complete": range_complete({**identity, "signature": signature}, parts),
-            "statuses": dict(counts), "call": dict(totals), "updated_at": utc_now(),
+            "statuses": dict(counts), "capture_kinds": dict(capture_counts),
+            "call": dict(totals), "updated_at": utc_now(),
         }
         atomic_json(run_dir / "summary.json", summary)
         return summary

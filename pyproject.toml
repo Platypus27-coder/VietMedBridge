@@ -25,6 +25,14 @@ dependencies = [
 [project.optional-dependencies]
 notebook = ["ipykernel>=6.29,<8", "nbformat>=5.10,<6", "pandas>=2.2,<3"]
 dev = ["pytest>=8.3,<9", "nbformat>=5.10,<6"]
+crawl_engines = [
+  "scrapling[fetchers]==0.4.15",
+  "crawl4ai==0.9.4",
+  "playwright==1.63.0",
+  "patchright==1.63.0",
+  "playwright-stealth==2.0.3",
+  "curl_cffi==0.16.3",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
