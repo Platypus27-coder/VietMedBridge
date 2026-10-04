@@ -29,7 +29,8 @@ Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạ
 Stage A 1.000 → Stage B1 10.000 → Stage B2 100.000 → Stage C 1.000.000.
 Notebook 01 chỉ chạy baseline và resume; không retry lỗi hoặc chạy recovery trong
 giai đoạn này. Các lỗi vẫn có outcome theo official ID trong ledger để không mất dấu.
-Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích và xử lý phần còn thiếu.
+Nhóm lỗi còn lại được xử lý sau khi đo chất lượng; riêng 02b kiểm thử cách cứu
+trang cookie Lao Động trên Stage A mà không thay đổi lượt crawl baseline.
 
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
 03 validate/freeze. Baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION; chạy
@@ -42,12 +43,24 @@ code lock một lần sang workflow HTTPx rồi ghim commit; nếu runtime đã 
 restart session một lần trước khi chạy Bootstrap. Báo cáo golden được chạy lại bằng
 code hiện tại, không tự duyệt milestone.
 
+### Thử khôi phục trang Lao Động trong Stage A
+
+Trên branch `feature/laodong-extractor`, notebook [02b — recover Lao Động](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/feature/laodong-extractor/notebooks/02b_colab_recover_laodong.ipynb)
+đọc raw `stage-a-v2` đã lưu trên Drive. Nó chỉ lấy lại các bản ghi Lao Động có
+trang JavaScript đặt cookie `D1N`, kiểm tra ID bài và vùng nội dung, rồi tạo raw
+run `stage-a-laodong-recovered-v1` đủ 1.000 outcome. Sau đó notebook build
+`stage-a-data-v3-laodong` và in coverage mới. Bản raw và build cũ được giữ nguyên.
+Chạy CPU, trong runtime Colab mới. Kết quả thực tế phụ thuộc vào raw đã lưu và
+khả năng truy cập URL tại thời điểm chạy; không mặc định coi toàn bộ 123 ID Lao
+Động là đã cứu được. Muốn chạy notebook 03 cho build mới, đặt `CODE_REVISION`,
+`CRAWL_RUN` và `BUILD_RUN` theo hướng dẫn ở cuối notebook 02b.
+
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
 Các notebook `01b–01g` phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
 notebook đang dùng sang [`archive/notebooks/stage-a-1000-recovery/`](archive/notebooks/stage-a-1000-recovery/).
-Hiện tại Sếp chỉ cần mở 00–03; nhóm notebook recovery sẽ được xem lại sau khi baseline
-đạt khoảng 1 triệu URL.
+Luồng baseline vẫn là 00–03; 02b là thí nghiệm có chọn lọc cho nhóm Lao Động
+đã parse thất bại trong Stage A.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
 `DATA_ROOT` trong mọi notebook. Đổi code/config khi fetch tiếp cần run mới; checkpoint
