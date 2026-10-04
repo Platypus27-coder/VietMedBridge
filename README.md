@@ -55,6 +55,10 @@ khả năng truy cập URL tại thời điểm chạy; không mặc định coi
 Động là đã cứu được. Muốn chạy notebook 03 cho build mới, đặt `CODE_REVISION`,
 `CRAWL_RUN` và `BUILD_RUN` theo hướng dẫn ở cuối notebook 02b.
 
+Để áp dụng các bộ lọc chất lượng mới lên đúng raw 1.000 URL đã lưu mà không
+crawl lại, dùng [02c — rebuild quality](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/feature/laodong-extractor/notebooks/02c_colab_rebuild_quality.ipynb).
+Notebook này ghi `stage-a-data-v4-quality` riêng và so sánh với build v3.
+
 ### Ba người crawl độc lập rồi ghép
 
 Xem [hướng dẫn chia/gộp](docs/team_independent_crawl.md) và hai notebook
