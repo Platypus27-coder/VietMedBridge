@@ -106,3 +106,43 @@ def longchau_article(soup: BeautifulSoup, source_url: str) -> dict | None:
             "heading_hints": [title, *[_inline_text(h) for h in body.find_all(re.compile(r"^h[1-6]$"))]],
             "raw_has_table": body.find("table") is not None,
             "parser": "longchau-article-dom-v1"}
+
+
+def laodong_article(soup: BeautifulSoup, source_url: str) -> dict | None:
+    """Extract the observed Lao Động article layout, excluding related stories and UI."""
+    requested = urlsplit(source_url)
+    host = (requested.hostname or "").lower()
+    if host != "laodong.vn" and not host.endswith(".laodong.vn"):
+        return None
+    article_id = re.search(r"-(\d+)\.ldo$", requested.path)
+    if article_id is None:
+        return None
+    wrappers = soup.select('[itemprop="articleBody"][articleid]')
+    wrappers = [node for node in wrappers if str(node.get("articleid")) == article_id.group(1)]
+    if len(wrappers) != 1:
+        raise ValueError("laodong_article_id_or_layout_changed")
+    articles = wrappers[0].select("article.article-detail")
+    if len(articles) != 1:
+        raise ValueError("laodong_article_layout_changed")
+    article = articles[0]
+    headings = article.select("h1.title")
+    bodies = article.select(".art-body")
+    if len(headings) != 1 or len(bodies) != 1:
+        raise ValueError("laodong_article_layout_changed")
+    title, body = _inline_text(headings[0]), bodies[0]
+    if not title:
+        raise ValueError("laodong_empty_article_title")
+    intros = article.select(".chappeau")
+    if len(intros) > 1:
+        raise ValueError("laodong_article_layout_changed")
+    for node in list(body.select("script,style,svg,nav,aside,form,button,[hidden],[aria-hidden=true]")):
+        node.decompose()
+    body_parts = _blocks(body)
+    if not body_parts:
+        raise ValueError("laodong_empty_article_body")
+    intro = _inline_text(intros[0]) if intros else ""
+    source = "\n\n".join([title, *([intro] if intro else []), *body_parts])
+    return {"title": title, "source_text": source,
+            "heading_hints": [title, *[_inline_text(h) for h in body.find_all(re.compile(r"^h[1-6]$"))]],
+            "raw_has_table": body.find("table") is not None,
+            "parser": "laodong-article-dom-v1"}

@@ -21,6 +21,7 @@ import httpx
 
 from .artifacts import utc_now
 from .dataset import url_host
+from .source_challenges import laodong_cookie_challenge
 
 
 def is_robots_html(body: bytes) -> bool:
@@ -147,12 +148,14 @@ class RobotsResolver:
         digest = None
         retry_after = None
         state = "ROBOTS_REDIRECT_LIMIT"
+        challenge_cookie = None
         try:
             # RFC 9309 asks crawlers to follow at least five redirects.
             for _ in range(6):
                 url_host(robots_url)
                 await self.pace(robots_url)
-                async with self.client.stream("GET", robots_url) as response:
+                headers = {"Cookie": challenge_cookie} if challenge_cookie else None
+                async with self.client.stream("GET", robots_url, headers=headers) as response:
                     status = response.status_code
                     if status in (301, 302, 303, 307, 308):
                         location = response.headers.get("location")
@@ -160,6 +163,7 @@ class RobotsResolver:
                             state = "ROBOTS_REDIRECT_LIMIT"
                             break
                         robots_url = urljoin(robots_url, location)
+                        challenge_cookie = None
                         continue
                     if status == 200:
                         body = bytearray()
@@ -170,6 +174,10 @@ class RobotsResolver:
                                 break
                         else:
                             digest = hashlib.sha256(body).hexdigest()
+                            cookie = laodong_cookie_challenge(bytes(body), robots_url)
+                            if cookie and challenge_cookie is None:
+                                challenge_cookie = cookie
+                                continue
                             if is_robots_html(body):
                                 state = "ROBOTS_INVALID_CONTENT"
                             else:

@@ -15,7 +15,8 @@ from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
 from .quality import error_page_reason
-from .domain_text import longchau_article
+from .domain_text import laodong_article, longchau_article
+from .source_challenges import laodong_cookie_challenge
 
 DetectorFactory.seed = 0
 EXPECTED_PARSE_ERRORS = (ValueError, etree.LxmlError, PyPdfError)
@@ -96,6 +97,8 @@ def extract_source(body: bytes, content_type: str = "", *, source_url: str | Non
         declared = root.get("{http://www.w3.org/XML/1998/namespace}lang", "")
         parser = "xml-text-v2"
     elif "html" in media or b"<html" in prefix or b"<!doctype html" in prefix:
+        if source_url and laodong_cookie_challenge(body, source_url):
+            raise ValueError("laodong_cookie_challenge_requires_recrawl")
         soup = BeautifulSoup(body, "lxml")
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
         declared = str(soup.html.get("lang", "")) if soup.html else ""
@@ -103,7 +106,12 @@ def extract_source(body: bytes, content_type: str = "", *, source_url: str | Non
         raw_has_table = soup.find("table") is not None
         if error_page_reason(title, ""):
             raise ValueError("blocked_or_challenge_page:" + (error_page_reason(title, "") or "UNKNOWN"))
-        adapted = longchau_article(soup, source_url) if source_url else None
+        adapted = None
+        if source_url:
+            for adapter in (longchau_article, laodong_article):
+                adapted = adapter(soup, source_url)
+                if adapted is not None:
+                    break
         if adapted is not None:
             source, title = adapted["source_text"], adapted["title"]
             headings, raw_has_table, parser = adapted["heading_hints"], adapted["raw_has_table"], adapted["parser"]

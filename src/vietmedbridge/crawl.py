@@ -25,6 +25,7 @@ from .artifacts import (
 )
 from .dataset import iter_link_shards, url_host
 from .robots import RobotsDecision, RobotsResolver
+from .source_challenges import laodong_cookie_challenge
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,8 @@ class Fetcher:
     async def request(self, url: str) -> tuple[dict, bytes]:
         current = url
         robots_checks = []
+        challenge_cookie = None
+        challenge_response = None
         for _ in range(9):
             url_host(current)
             decision = await self.robots_decision(current)
@@ -102,7 +105,8 @@ class Fetcher:
                 decision.crawl_delay_seconds or 0.0,
                 decision.request_rate_gap_seconds or 0.0,
             ))
-            async with self.client.stream("GET", current) as response:
+            headers = {"Cookie": challenge_cookie} if challenge_cookie else None
+            async with self.client.stream("GET", current, headers=headers) as response:
                 if response.status_code in (301, 302, 303, 307, 308):
                     location = response.headers.get("location")
                     if not location:
@@ -110,6 +114,7 @@ class Fetcher:
                             **decision.record(), "robots_checks": robots_checks,
                         })
                     current = urljoin(current, location)
+                    challenge_cookie = None
                     continue
                 if response.status_code != 200:
                     error = httpx.HTTPStatusError(
@@ -128,6 +133,15 @@ class Fetcher:
                     raise SourceFailure("empty_body", {
                         **decision.record(), "robots_checks": robots_checks,
                     })
+                cookie = laodong_cookie_challenge(bytes(body), str(response.url))
+                if cookie is not None:
+                    if challenge_response is not None:
+                        raise SourceFailure("laodong_cookie_challenge_unresolved", {
+                            **decision.record(), "robots_checks": robots_checks,
+                        })
+                    challenge_response = bytes(body)
+                    challenge_cookie = cookie
+                    continue
                 engine = getattr(self.client._transport, "engine_name", "httpx-async")
                 capture_kind = "scrapling_http_entity" if engine.startswith("scrapling") else "http_entity"
                 return {
@@ -139,6 +153,11 @@ class Fetcher:
                     "capture_kind": capture_kind,
                     **decision.record(),
                     "robots_checks": robots_checks,
+                    **({"challenge_response_sha256": hashlib.sha256(challenge_response).hexdigest(),
+                        "challenge_response_bytes": len(challenge_response),
+                        "challenge_response_base64": base64.b64encode(challenge_response).decode("ascii"),
+                        "challenge_kind": "laodong-d1n-cookie-v1"}
+                       if challenge_response is not None else {}),
                 }, bytes(body)
         raise SourceFailure("too_many_redirects", {"robots_checks": robots_checks})
 
