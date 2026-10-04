@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-QUALITY_VERSION = "quality-rules-v2"
+QUALITY_VERSION = "quality-rules-v3"
 NORMALIZER_VERSION = "nfc-whitespace-v1"
 ERROR_TITLES = re.compile(
     r"^(?:just a moment|access denied|attention required|robot check|"
@@ -68,6 +68,8 @@ def document_quality(text: str, *, title: str = "", section_count: int = 0,
         reasons.append("LOW_ALPHABETIC_RATIO")
     if has_encoded_payload(text):
         reasons.append("ENCODED_PAYLOAD_SUSPECTED")
+    if "\ufffd" in text:
+        reasons.append("DECODE_REPLACEMENT_CHAR")
     # This is a warning, never proof of truncation or a reason to drop a document.
     if raw_bytes and raw_bytes > 100_000 and len(text) < 200:
         reasons.append("POSSIBLE_TRUNCATION")
@@ -79,7 +81,7 @@ def document_quality(text: str, *, title: str = "", section_count: int = 0,
         "TOO_SHORT", "HIGH_DUPLICATE_LINE_RATIO", "LOW_ALPHABETIC_RATIO",
         "ENCODED_PAYLOAD_SUSPECTED",
     ))
-    tier = "LOW" if low else ("HIGH" if len(text) >= 300 else "MEDIUM")
+    tier = "LOW" if low else ("HIGH" if len(text) >= 300 and "DECODE_REPLACEMENT_CHAR" not in reasons else "MEDIUM")
     return {
         "quality_tier": tier, "quality_flags": reasons,
         "quality_version": QUALITY_VERSION,

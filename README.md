@@ -59,6 +59,13 @@ khả năng truy cập URL tại thời điểm chạy; không mặc định coi
 crawl lại, dùng [02c — rebuild quality](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/feature/laodong-extractor/notebooks/02c_colab_rebuild_quality.ipynb).
 Notebook này ghi `stage-a-data-v4-quality` riêng và so sánh với build v3.
 
+Để cắt các phần phụ đã xác nhận ở Youlai, FamilyDoctor, Medlatec,
+Báo Phú Thọ, Pharmacity và Báo Nghệ An, dùng
+[02d — rebuild clean text](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/feature/laodong-extractor/notebooks/02d_colab_rebuild_clean_text.ipynb).
+Notebook chạy **CPU**, đọc lại cùng raw 1.000 URL (không crawl lại), ghi
+`stage-a-data-v5-clean-text` riêng, so sánh với V4 và đếm dấu hiệu còn sót
+trong document/chunk. Chỉ sau khi xem kết quả V5 mới nâng mốc crawl.
+
 ### Ba người crawl độc lập rồi ghép
 
 Xem [hướng dẫn chia/gộp](docs/team_independent_crawl.md) và hai notebook

@@ -17,6 +17,7 @@ from pypdf.errors import PyPdfError
 
 from .quality import error_page_reason, has_encoded_payload
 from .domain_text import laodong_article, longchau_article
+from .site_cleanup import clean_site_text
 from .source_challenges import laodong_cookie_challenge
 
 DetectorFactory.seed = 0
@@ -193,6 +194,10 @@ def extract_source(body: bytes, content_type: str = "", *, source_url: str | Non
         parser = "utf8-plain-v1"
     else:
         raise ValueError(f"unsupported_content_type:{media or 'unknown'}")
+    if not source:
+        raise ValueError("empty_extracted_text_or_scanned_pdf")
+    if ("html" in media or b"<html" in prefix or b"<!doctype html" in prefix) and source_url:
+        source = clean_site_text(source, source_url)
     if not source:
         raise ValueError("empty_extracted_text_or_scanned_pdf")
     if has_encoded_payload(source):
