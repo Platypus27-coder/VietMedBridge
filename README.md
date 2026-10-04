@@ -55,11 +55,21 @@ khả năng truy cập URL tại thời điểm chạy; không mặc định coi
 Động là đã cứu được. Muốn chạy notebook 03 cho build mới, đặt `CODE_REVISION`,
 `CRAWL_RUN` và `BUILD_RUN` theo hướng dẫn ở cuối notebook 02b.
 
+### Ba người crawl độc lập rồi ghép
+
+Xem [hướng dẫn chia/gộp](docs/team_independent_crawl.md) và hai notebook
+[01c — mỗi người một phần](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/feature/laodong-extractor/notebooks/01c_colab_team_worker.ipynb),
+[01d — kiểm và ghép](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/feature/laodong-extractor/notebooks/01d_colab_merge_team_crawls.ipynb).
+Mỗi thành viên có thể dùng Drive riêng; công cụ ghép kiểm toàn bộ khoảng dòng,
+snapshot, hash raw và cặp ID/URL trước khi công bố một crawl run cho notebook 02.
+Cổng mở rộng quy mô của repo vẫn áp dụng trước khi crawl.
+
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
-Các notebook `01b–01g` phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
+Các notebook `01b–01g` cũ phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
 notebook đang dùng sang [`archive/notebooks/stage-a-1000-recovery/`](archive/notebooks/stage-a-1000-recovery/).
-Luồng baseline vẫn là 00–03; 02b là thí nghiệm có chọn lọc cho nhóm Lao Động
+Luồng baseline vẫn là 00–03; 01c/01d mới chỉ phục vụ chia/gộp crawl độc lập,
+còn 02b là thí nghiệm có chọn lọc cho nhóm Lao Động
 đã parse thất bại trong Stage A.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
