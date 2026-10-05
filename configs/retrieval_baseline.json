@@ -1,0 +1,26 @@
+{
+  "retrieval_api": 1,
+  "dense": {
+    "model_id": "BAAI/bge-m3",
+    "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "max_length": 512
+  },
+  "reranker": {
+    "model_id": "BAAI/bge-reranker-v2-m3",
+    "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "max_length": 512
+  },
+  "embedding": {"part_size": 256, "batch_size": 16},
+  "retrieval": {
+    "dense_top_k": 100,
+    "sparse_top_k": 100,
+    "rrf_k": 60,
+    "rerank_top_k": 40,
+    "doc_top_k": 10,
+    "chunk_top_k": 8,
+    "max_chunks_per_doc": 2
+  },
+  "pilot_limits": {"max_documents": 2000, "max_children": 50000},
+  "expected_queries": 1200,
+  "scope": "pretrained pilot baseline; no fine-tuning or labeled F2 evaluation"
+}

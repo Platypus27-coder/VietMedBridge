@@ -6,7 +6,8 @@ trong Google Drive.
 
 ## Quy trình Colab đã chốt
 
-Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạy các notebook
+Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy retrieval baseline.
+Đã có candidate frozen thì mở thẳng 04. Không chạy các notebook
 01b–01g trong lượt crawl baseline quy mô lớn.
 
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
@@ -24,6 +25,16 @@ Luồng làm việc chính chỉ gồm **00 → 01 → 02 → 03**. Không chạ
    section và parent/child chunks; chất lượng của 917 capture còn cần kiểm tra.
 4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
    Kiểm coverage, integrity, golden và source audit; candidate chỉ được promote sau human review.
+5. **04 — Retrieval baseline và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
+   **Chọn GPU, chạy từ đầu.** Mặc định đọc `stage-a-data-v3-laodong`, candidate
+   `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
+   representations duy nhất. BGE-M3 → BM25 + FAISS → BGE reranker → parent chunks
+   → ZIP chứa một JSON cho đủ 1.200 query. Có checkpoint từng lô embedding và từng
+   query, code lock riêng; không cần crawl/chia chunk lại. Xem [hướng dẫn 04](docs/RETRIEVAL_BASELINE.md).
+
+Ưu tiên hiện tại là thử đường chạy retrieval/submission trên candidate này trước,
+rồi tích hợp bản crawl 100k. Submission tìm trên corpus pilot nhỏ; score BTC chưa
+có và chưa fine-tune model. Các URLs thiếu vẫn được lưu để xử lý sau.
 
 Đích hiện tại là xây baseline crawl đến khoảng 1 triệu URL qua các gate đã chốt:
 Stage A 1.000 → Stage B1 10.000 → Stage B2 100.000 → Stage C 1.000.000.
@@ -32,8 +43,9 @@ giai đoạn này. Các lỗi vẫn có outcome theo official ID trong ledger đ
 Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích và xử lý phần còn thiếu.
 
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
-03 validate/freeze. Baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION; chạy
-CPU, không cần GPU. Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
+03 validate/freeze, 04 retrieval/submission. 00–03 chạy CPU; 04 cần GPU cho embedding
+và reranker. Crawl baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION.
+Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
 chứng sau. `stage-a-v3` được giữ làm kết quả thí nghiệm, không là input mặc định của build.
 
 Sếp đã hoàn tất `stage-a-v2` thì mở notebook 02 bản mới và chạy tiếp; không cần chạy
@@ -46,7 +58,7 @@ code hiện tại, không tự duyệt milestone.
 
 Các notebook `01b–01g` phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
 notebook đang dùng sang [`archive/notebooks/stage-a-1000-recovery/`](archive/notebooks/stage-a-1000-recovery/).
-Hiện tại Sếp chỉ cần mở 00–03; nhóm notebook recovery sẽ được xem lại sau khi baseline
+Hiện tại Sếp dùng 00–04; nhóm notebook recovery sẽ được xem lại sau khi baseline
 đạt khoảng 1 triệu URL.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
@@ -78,6 +90,7 @@ Split tên train chưa cung cấp reference labels để tính F2.
 - processed/: documents, sections, children, parents, failures, input ledger và snapshot manifest.
 - processed/<run>/reports/: canonical/representation aliases, health JSON, HTML audit và golden candidates.
 - gates/: evidence của milestone do người review ghi nhận.
+- retrieval/<run>/: vector parts, FAISS index, query checkpoints và submission/evidence.
 
 Mỗi đoạn có doc_id, source_text_sha256, start_char/end_char và chunk_id ổn định.
 text là lát cắt source_text; retrieval_text được chuẩn hóa riêng. Offset tham
@@ -117,10 +130,15 @@ Sinh lại notebook sau khi sửa cell source:
 
     python scripts/write_notebooks.py
 
+Sinh riêng notebook retrieval, không thay đổi 00–03:
+
+    python scripts/write_retrieval_notebook.py
+
 ## Phạm vi hiện tại
 
-Giai đoạn này triển khai phần data của plan gốc và supplement đã chốt. Chưa tạo embedding/index,
-chưa huấn luyện reranker và chưa triển khai scorer F2 chính thức. Child 180,
+Đã có data pipeline và code baseline pretrained cho embedding/index/reranker/submission.
+GPU inference thực tế ở notebook 04 cần chạy trên Colab; chưa huấn luyện reranker
+và chưa triển khai scorer F2 chính thức. Child 180,
 overlap 40 và parent 512 token là các tham số khởi đầu cho thí nghiệm.
 Section parser dùng heading có thật trong nguồn và fallback body khi không tìm thấy.
 PDF scan/OCR và adapter đặc thù nguồn lớn cần bổ sung theo báo cáo sample. LOW quality

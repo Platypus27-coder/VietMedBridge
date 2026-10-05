@@ -1,5 +1,10 @@
 # Kiểm chứng data pipeline v2
 
+Kiểm chứng retrieval baseline ngày 05/10/2026 nằm trong
+[RETRIEVAL_BASELINE.md](RETRIEVAL_BASELINE.md): 21 tests liên quan pass, candidate
+thật được đọc bằng tokenizer pinned và notebook 04 được smoke test bằng model
+giả. GPU inference và official score vẫn cần chạy trên Colab/hệ thống BTC.
+
 Kiểm tra local trong Conda env `r2ai-stage3`, Python 3.11, ngày 02/10/2026.
 Package editable đã cập nhật 0.2.0; PYTHONNOUSERSITE=1.
 

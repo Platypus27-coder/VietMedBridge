@@ -25,6 +25,12 @@ dependencies = [
 [project.optional-dependencies]
 notebook = ["ipykernel>=6.29,<8", "nbformat>=5.10,<6", "pandas>=2.2,<3"]
 dev = ["pytest>=8.3,<9", "nbformat>=5.10,<6"]
+retrieval = [
+  "torch>=2.6,<3",
+  "numpy>=1.26,<3",
+  "faiss-cpu==1.12.0",
+  "rank-bm25==0.2.2",
+]
 crawl_engines = [
   "scrapling[fetchers]==0.4.15",
   "crawl4ai==0.9.4",

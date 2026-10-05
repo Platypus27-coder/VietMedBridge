@@ -23,7 +23,12 @@ hoàn tất toàn bộ supplement, retrieval benchmark hoặc full-corpus run.
   do người review nhập, replay pinned raw và kiểm source/span regression.
 - Freeze candidate và evidence records cho Stage A/B1/B2/C/full authorization;
   không tự ghi human approval, retrieval pass hoặc budget đã đo.
-- Bốn notebook Colab, code/tokenizer locks và hướng dẫn nâng API v1 → v2.
+- Bốn notebook data Colab, code/tokenizer locks và hướng dẫn nâng API v1 → v2.
+- Notebook 04: pretrained BGE-M3 dense embeddings có vector part checkpoints và
+  OOM batch backoff; BM25 + FAISS exact cosine, RRF và pretrained BGE reranker.
+  Giữ official aliases, parent source output và checkpoint mỗi query; validator
+  bao phủ 1.200 query rồi xuất ZIP một JSON. Code lock retrieval tách khỏi data.
+  Reader đã được kiểm với candidate thật; GPU inference cần chạy trên Colab.
 
 ## Những điều cần artifact thực tế từ Colab
 
@@ -36,9 +41,10 @@ hoàn tất toàn bộ supplement, retrieval benchmark hoặc full-corpus run.
 
 ## Các phần giữ cho bước retrieval
 
-BGE embedding sharded, GPU/OOM batching, model/encoding-aware vector reuse,
-full/selective policy, BM25/Lucene, FAISS/ANN, exact-vs-ANN recall, real qrels/span
-labels, canary retrieval, scorer tương thích và Chunk F2 ablation chưa triển khai.
+Baseline pilot đã có BGE embedding sharded, GPU/OOM batching, model/encoding-aware
+vector reuse, BM25 và FAISS exact search. Full/selective policy, Lucene/ANN,
+exact-vs-ANN recall, real qrels/span labels, canary relevance benchmark, scorer
+tương thích, fine-tune và Chunk F2 ablation chưa triển khai.
 Document relevance labels đơn thuần chưa đủ kiểm Chunk F2. Query-selective
 embedding cần sparse fallback và benchmark recall trước khi chọn.
 
