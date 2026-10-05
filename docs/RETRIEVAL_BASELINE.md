@@ -94,5 +94,59 @@ backlog riêng, không bị xóa hoặc thay bằng text do model sinh.
   nhất 350 tokens gồm special tokens. Smoke test chạy các cell 04 với candidate
   thật, query thật và FAISS/BM25 thật; inference dùng test doubles, chỉ chọn 3
   queries để kiểm parent output/ZIP/resume. Không dùng ZIP test để submit.
-- Năm notebook active qua nbformat, syntax và empty-output checks. GPU model
-  execution, OOM thực, tốc độ Colab, fine-tuning và official score chưa được đo.
+- Năm notebook active qua nbformat, syntax và empty-output checks. Các kiểm tra
+  local trên dùng test doubles; artifact GPU thực được kiểm riêng bên dưới.
+
+## Kiểm tra kết quả Colab thực ngày 05/10/2026
+
+Sếp đã chạy `stage-a-retrieval-v1` bằng commit `e95e3a1`. ZIP và manifests được
+đọc lại từ Drive; mọi phép kiểm dưới đây chạy CPU trên artifact đã tải, không
+chạy lại inference hoặc sửa dữ liệu/predictions trên Drive. Prediction signature
+`193d6cf647a1cec9fbc5b6fbe2a89acc39f0f5abf28c95af24190f70d627d272`.
+
+- ZIP chỉ chứa `results.json`, CRC và SHA-256 khớp manifest. Đủ 1.200 query
+  chính thức theo đúng thứ tự/text hash; 9.593 output chunks đều khớp parent và
+  exact source spans của frozen candidate. Không phát hiện lỗi kỹ thuật trong
+  các kiểm tra đã thực hiện.
+- Đã tải/kiểm toàn bộ 35 corpus vector parts và 5 query parts: lần lượt
+  8.760×1.024 và 1.200×1.024, float32 hữu hạn, L2-normalized. Checksum và input
+  order khớp; mọi vector reconstruct từ FAISS bằng chính xác corpus matrix.
+- Candidate, index, encoder, query vectors, reranker và selection/code hashes
+  cùng khớp prediction signature. Kiểm thêm 14 query checkpoints: self-hash,
+  prediction, provenance và child anchors đều đúng; tái lập BM25/dense/RRF trên
+  CPU cho các query này giữ anchors trong candidate pool 40 representations.
+  Chưa đọc self-hash riêng của tất cả 1.200 query checkpoint files.
+- Runtime evidence ghi Tesla T4, CUDA fp16 và hai model BGE đã pin, mỗi model
+  khoảng 568 triệu parameters; chưa fine-tune. `seconds_this_call` là lần gọi
+  cuối có thể dùng lại checkpoint, không phải throughput toàn bộ inference.
+
+**Chất lượng retrieval còn yếu trong mẫu đã xem; chưa đạt relevance/quality
+gate.** Đọc query, top document titles và phần đầu các chunks dẫn đầu của 30
+query mẫu, kiểm thêm các trường hợp lệch chủ đề. Có ví dụ query 2 hỏi về răng
+nhưng kết quả đứng đầu là bài sốt xuất huyết; query 3 hỏi Beta-HCG nhưng kết quả
+đứng đầu là bài HCY. Đây là ví dụ mismatch, không phải đánh giá y khoa hoặc
+ước lượng Precision/Recall/F2 của toàn bộ 1.200 query.
+
+- 147 chunk occurrences trong 39 query thuộc bốn official IDs mà raw capture
+  đã xác nhận redirect từ bài viết sang trang chủ. Source-span pass không xác
+  nhận trang chủ là nội dung của bài được yêu cầu.
+- 360 chunk occurrences trong 264 query chứa marker liên quan nội dung phụ;
+  10 occurrences trong 10 query có template placeholders. Marker là tín hiệu
+  audit, không có nghĩa toàn bộ mỗi parent chứa marker đều không liên quan.
+- 49 output parent occurrences dài tối đa 10 BGE tokens, ảnh hưởng 38 query.
+  1.195/1.200 query trả đủ 8 chunks; fixed top-k chưa được calibrate bằng nhãn.
+- Corpus vẫn chỉ có 864 documents. Kiểm literal anchors SCC, Yqh+, PDW và
+  CA19-9 không thấy chuỗi tương ứng; đây là diagnostic coverage, không chứng
+  minh không có tài liệu liên quan diễn đạt bằng ngôn ngữ hoặc ký hiệu khác.
+
+Giữ run này làm baseline kỹ thuật để so sánh. Ưu tiên tạo build sạch từ raw
+hiện có, nhập bản crawl 100k qua mapping official IDs và pipeline chuẩn, đồng
+thời bổ sung nhãn/scorer để đo candidate recall và tune cutoff. Corpus 100k
+cần sharded/ANN indexing thay cho giới hạn RAM của notebook 04 hiện tại.
+LLM translation hoặc reranker mạnh hơn là experiment cần benchmark trên cùng
+snapshot; chúng không tự sửa nguồn bị lấy nhầm hay thiếu coverage.
+Chưa có official score, chưa PROMOTED và chưa duyệt human QA bằng audit này.
+
+Evidence audit local nằm trong `artifacts/notebook04-quality-20261005/`:
+`audit_summary.json`, `review_examples.json`, `audit_submission.py`, vector
+parts, ZIP và 14 query checkpoints. Các artifact dữ liệu không được commit.
