@@ -6,6 +6,7 @@ import hashlib
 import io
 import re
 import unicodedata
+from urllib.parse import urlsplit
 
 import trafilatura
 from bs4 import BeautifulSoup
@@ -14,8 +15,10 @@ from lxml import etree
 from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
-from .quality import error_page_reason
-from .domain_text import longchau_article
+from .quality import error_page_reason, has_encoded_payload
+from .domain_text import laodong_article, longchau_article
+from .site_cleanup import clean_site_text
+from .source_challenges import laodong_cookie_challenge
 
 DetectorFactory.seed = 0
 EXPECTED_PARSE_ERRORS = (ValueError, etree.LxmlError, PyPdfError)
@@ -28,10 +31,22 @@ def normalize_for_retrieval(text: str) -> str:
 
 def language_hint(text: str, declared: str = "") -> tuple[str, str]:
     declared = declared.lower().split("-")[0].split("_")[0]
-    if declared in ("vi", "en", "zh"):
-        return declared, "source-declared"
     if len(text.strip()) < 80:
+        if declared in ("vi", "en", "zh"):
+            return declared, "source-declared-short-text"
         return "unknown", "too-short"
+    letters = [char for char in text[:12000] if char.isalpha()]
+    han = sum("\u3400" <= char <= "\u9fff" for char in letters)
+    if han >= 20 and han / max(1, len(letters)) >= 0.20:
+        return "zh", "content-han-script"
+    vietnamese_marks = sum(char in (
+        "ăâđêôơưĂÂĐÊÔƠƯáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệ"
+        "íìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ"
+        "ÁÀẢÃẠẤẦẨẪẬẮẰẲẴẶÉÈẺẼẸẾỀỂỄỆÍÌỈĨỊ"
+        "ÓÒỎÕỌỐỒỔỖỘỚỜỞỠỢÚÙỦŨỤỨỪỬỮỰÝỲỶỸỴ"
+    ) for char in letters)
+    if vietnamese_marks >= 4 and vietnamese_marks / max(1, len(letters)) >= 0.01:
+        return "vi", "content-vietnamese-script"
     try:
         prediction = detect_langs(text[:12000])[0]
         language = "zh" if prediction.lang.startswith("zh") else prediction.lang
@@ -39,10 +54,65 @@ def language_hint(text: str, declared: str = "") -> tuple[str, str]:
             return language, f"langdetect:{prediction.prob:.3f}"
     except LangDetectException:
         pass
+    if declared in ("vi", "en", "zh"):
+        return declared, "source-declared-fallback"
     return "unknown", "uncertain"
 
 
-def extract_source(body: bytes, content_type: str = "", *, source_url: str | None = None) -> dict:
+def _redirected_to_homepage(requested_url: str, final_url: str) -> bool:
+    requested, final = urlsplit(requested_url), urlsplit(final_url)
+    requested_path = requested.path.rstrip("/").lower()
+    final_path = final.path.rstrip("/").lower()
+    return (requested_path not in ("", "/", "/index.html", "/index.htm")
+            and final_path in ("", "/", "/index.html", "/index.htm")
+            and not final.query)
+
+
+_AUXILIARY_CLASS = re.compile(
+    r"(?:^|[-_])(?:related[-_](?:articles|stories|posts|news|links)|"
+    r"recommend(?:ed)?[-_](?:articles|stories|posts|news|links)|"
+    r"sidebar|latest[-_](?:news|stories|posts)|mostread|"
+    r"doctor-list|hospital-list|tin-lien-quan|bai-viet-lien-quan)(?:$|[-_])", re.I,
+)
+_AUXILIARY_TAIL = re.compile(
+    r"^[ \t]*(?:健康资讯推荐|推荐专家更多|推荐医院更多|热门问答更多|"
+    r"Bài viết liên quan|Tin liên quan|Tin mới nhất)[ \t]*[:：]?[ \t]*$",
+    re.I | re.M,
+)
+_ARTICLE_SECTION_CLASS = re.compile(
+    r"(?:^|[-_])(?:related[-_]work|recommended[-_]treatment)(?:$|[-_])", re.I,
+)
+
+
+def _remove_auxiliary_dom(soup: BeautifulSoup) -> None:
+    for node in list(soup.select("nav, aside, footer, [role=navigation], [role=complementary]")):
+        node.decompose()
+    for node in list(soup.find_all(True)):
+        if not node.parent or node.name in ("html", "body", "main", "article"):
+            continue
+        tokens = [str(node.get("id", "")), *[str(item) for item in node.get("class", [])]]
+        if any(_AUXILIARY_CLASS.search(token) for token in tokens) and not node.find("article"):
+            node.decompose()
+        elif node.find_parent("article") and node.name in ("div", "section"):
+            # Trafilatura also drops names containing "related". Protect known
+            # paper/treatment sections without changing any source wording.
+            if _ARTICLE_SECTION_CLASS.search(str(node.get("id", ""))):
+                del node["id"]
+            if node.has_attr("class"):
+                node["class"] = [token for token in node["class"] if not _ARTICLE_SECTION_CLASS.search(token)]
+
+
+def _trim_auxiliary_tail(source: str) -> str:
+    match = _AUXILIARY_TAIL.search(source)
+    if match and len(source[:match.start()].strip()) >= 300:
+        return source[:match.start()].strip()
+    return source
+
+
+def extract_source(body: bytes, content_type: str = "", *, source_url: str | None = None,
+                   requested_url: str | None = None) -> dict:
+    if source_url and requested_url and _redirected_to_homepage(requested_url, source_url):
+        raise ValueError("article_redirected_to_homepage")
     media = content_type.lower().split(";")[0].strip()
     prefix = body[:4096].lstrip().lower()
     title, declared, headings, raw_has_table = "", "", [], False
@@ -96,23 +166,34 @@ def extract_source(body: bytes, content_type: str = "", *, source_url: str | Non
         declared = root.get("{http://www.w3.org/XML/1998/namespace}lang", "")
         parser = "xml-text-v2"
     elif "html" in media or b"<html" in prefix or b"<!doctype html" in prefix:
+        if source_url and laodong_cookie_challenge(body, source_url):
+            raise ValueError("laodong_cookie_challenge_requires_recrawl")
         soup = BeautifulSoup(body, "lxml")
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
         declared = str(soup.html.get("lang", "")) if soup.html else ""
-        headings = [node.get_text(" ", strip=True) for node in soup.find_all(re.compile(r"^h[1-6]$"))]
+        canonical = soup.select_one('link[rel="canonical"][href]')
+        if canonical and source_url and _redirected_to_homepage(source_url, str(canonical.get("href"))):
+            raise ValueError("article_canonical_points_to_homepage")
         raw_has_table = soup.find("table") is not None
         if error_page_reason(title, ""):
             raise ValueError("blocked_or_challenge_page:" + (error_page_reason(title, "") or "UNKNOWN"))
-        adapted = longchau_article(soup, source_url) if source_url else None
+        adapted = None
+        if source_url:
+            for adapter in (longchau_article, laodong_article):
+                adapted = adapter(soup, source_url)
+                if adapted is not None:
+                    break
         if adapted is not None:
             source, title = adapted["source_text"], adapted["title"]
             headings, raw_has_table, parser = adapted["heading_hints"], adapted["raw_has_table"], adapted["parser"]
         else:
+            _remove_auxiliary_dom(soup)
+            headings = [node.get_text(" ", strip=True) for node in soup.find_all(re.compile(r"^h[1-6]$"))]
             source = trafilatura.extract(
                 str(soup), output_format="txt", include_tables=True,
                 include_comments=False, favor_recall=True, deduplicate=False,
             ) or ""
-            source = source.strip()
+            source = _trim_auxiliary_tail(source.strip())
             parser = "trafilatura-text-v1"
         if not source:
             for node in soup.select("script, style, nav, header, footer, aside, form"):
@@ -127,6 +208,12 @@ def extract_source(body: bytes, content_type: str = "", *, source_url: str | Non
         raise ValueError(f"unsupported_content_type:{media or 'unknown'}")
     if not source:
         raise ValueError("empty_extracted_text_or_scanned_pdf")
+    if ("html" in media or b"<html" in prefix or b"<!doctype html" in prefix) and source_url:
+        source = clean_site_text(source, source_url)
+    if not source:
+        raise ValueError("empty_extracted_text_or_scanned_pdf")
+    if has_encoded_payload(source):
+        raise ValueError("encoded_payload_in_extracted_text")
     error = error_page_reason(title, source)
     if error:
         raise ValueError("blocked_or_challenge_page:" + error)

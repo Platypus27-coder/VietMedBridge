@@ -54,12 +54,31 @@ code lock một lần sang workflow HTTPx rồi ghim commit; nếu runtime đã 
 restart session một lần trước khi chạy Bootstrap. Báo cáo golden được chạy lại bằng
 code hiện tại, không tự duyệt milestone.
 
+### Công cụ tùy chọn của team
+
+Branch `feature/laodong-extractor` bổ sung adapter Lao Động, nhận diện trang cookie
+D1N, kiểm trang chủ/mã hóa/language hint và cleanup theo site. Các thay đổi áp dụng
+khi crawl/build bằng code mới; candidate đã freeze vẫn được notebook 04 đọc nguyên trạng.
+
+Hai notebook [team worker](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/optional/01c_colab_team_worker.ipynb)
+và [merge team crawls](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/optional/01d_colab_merge_team_crawls.ipynb)
+nằm trong `notebooks/optional/`. Xem [hướng dẫn chia/gộp](docs/team_independent_crawl.md).
+Chúng giữ gate quy mô và kiểm input/range/raw/ID trước khi công bố một crawl run.
+Luồng chính 00–04 không yêu cầu chạy hai notebook này.
+
 ## Notebook thí nghiệm Stage A — không thuộc luồng chính
 
-Các notebook `01b–01g` phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
+Các notebook `01b–01g` cũ phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
 notebook đang dùng sang [`archive/notebooks/stage-a-1000-recovery/`](archive/notebooks/stage-a-1000-recovery/).
 Hiện tại Sếp dùng 00–04; nhóm notebook recovery sẽ được xem lại sau khi baseline
 đạt khoảng 1 triệu URL.
+
+Các notebook 02b/02c/02d của branch được giữ trong
+[`archive/notebooks/stage-a-quality/`](archive/notebooks/stage-a-quality/) để phục vụ
+recovery/rebuild sau. Chúng dùng code lock riêng, run names mới và đọc manifest;
+không thay raw/build/candidate hiện có. Khi cần rebuild chất lượng, dùng 02d với
+baseline v3; 02c giữ workflow so sánh cũ. Chạy notebook 03 với full CODE_COMMIT
+được in ở Bootstrap và đúng CRAWL_RUN/BUILD_RUN để freeze build mới.
 
 Trong mỗi runtime Colab mới, chạy Bootstrap để mount cùng Drive và nạp code lock. Giữ cùng
 `DATA_ROOT` trong mọi notebook. Đổi code/config khi fetch tiếp cần run mới; checkpoint

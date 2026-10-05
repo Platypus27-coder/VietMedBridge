@@ -5,6 +5,29 @@ Kiểm chứng retrieval baseline ngày 05/10/2026 nằm trong
 thật được đọc bằng tokenizer pinned và notebook 04 được smoke test bằng model
 giả. GPU inference và official score vẫn cần chạy trên Colab/hệ thống BTC.
 
+## Review và merge branch Lao Động ngày 05/10/2026
+
+Đã review đến commit `48a5479`: article adapter và cookie recovery Lao Động,
+language/homepage/encoded-payload guards, site cleanup và independent team crawl.
+Trong review đã tái hiện và sửa việc loại nhầm section `Related work`/recommended
+treatment, kể cả bộ lọc class của Trafilatura, và cắt đuôi bài khi một cụm UI
+tiếng Trung xuất hiện giữa câu. Tail marker nay phải là heading riêng một dòng.
+
+Report cells đọc file trong manifest đã kiểm hash, không glob các attempt cũ.
+Team merge kiểm thêm decoded body hash/length trước khi công bố run. Notebook
+tùy chọn dùng code lock/runtime riêng và tên build mới; main workflow giữ 00–04.
+
+- **117 tests pass, 9 tests tùy chọn skip** do thiếu browser/crawl4ai runtime.
+  Tests cover crawl/robots/recovery, giữ source evidence, team merge/resume,
+  response corruption và stale Parquet không được nhập vào report.
+- 7 notebooks active và 3 notebooks quality/recovery mới archive qua nbformat,
+  empty-output và syntax checks. Không chạy crawler tới website thật.
+- Reader mới vẫn xác minh 864 documents, 9.076 children, 6.906 parents và 8.760
+  representations trong candidate v3 hiện có. 04 smoke test và resume dùng real
+  data/queries/index, inference test doubles; chưa chạy GPU weights/official score.
+- Replay saved FamilyDoctor raw ID 2474168 giữ đủ nội dung clinical trong
+  `#viewContent`. Kết quả này chưa phải human audit cho toàn corpus.
+
 Kiểm tra local trong Conda env `r2ai-stage3`, Python 3.11, ngày 02/10/2026.
 Package editable đã cập nhật 0.2.0; PYTHONNOUSERSITE=1.
 

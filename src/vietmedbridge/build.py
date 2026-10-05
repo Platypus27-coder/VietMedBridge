@@ -194,7 +194,8 @@ def build_corpus(
                         raise ValueError("Raw source body checksum mismatch.")
                     try:
                         extracted = extract_source(body, raw.get("content_type", ""),
-                                                   source_url=raw.get("final_url", raw["url"]))
+                                                   source_url=raw.get("final_url", raw["url"]),
+                                                   requested_url=raw["url"])
                     except EXPECTED_PARSE_ERRORS as exc:
                         _write(writers["failures"], [{**failure, "phase": "parse",
                                                      "reason": f"{type(exc).__name__}:{str(exc)[:300]}",

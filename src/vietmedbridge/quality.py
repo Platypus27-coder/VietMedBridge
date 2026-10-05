@@ -5,13 +5,27 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-QUALITY_VERSION = "quality-rules-v1"
+QUALITY_VERSION = "quality-rules-v3"
 NORMALIZER_VERSION = "nfc-whitespace-v1"
 ERROR_TITLES = re.compile(
     r"^(?:just a moment|access denied|attention required|robot check|"
     r"403(?:\s+forbidden)?|404(?:\s+(?:not found|error))?|page not found|"
     r"sign in to continue|enable javascript)(?:\b|$)", re.I,
 )
+
+_BASE64_LIKE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{180,}={0,2}(?![A-Za-z0-9+/])")
+
+
+def has_encoded_payload(text: str) -> bool:
+    """Find long, mixed-alphabet encoded blobs without treating DNA as base64."""
+    for match in _BASE64_LIKE.finditer(text):
+        value = match.group().rstrip("=")
+        if (sum(char.islower() for char in value) >= 6
+                and sum(char.isupper() for char in value) >= 6
+                and sum(char.isdigit() for char in value) >= 4
+                and len(set(value)) >= 30):
+            return True
+    return False
 
 
 def error_page_reason(title: str, text: str) -> str | None:
@@ -52,6 +66,10 @@ def document_quality(text: str, *, title: str = "", section_count: int = 0,
         reasons.append("HIGH_DUPLICATE_LINE_RATIO")
     if alpha_ratio < 0.3:
         reasons.append("LOW_ALPHABETIC_RATIO")
+    if has_encoded_payload(text):
+        reasons.append("ENCODED_PAYLOAD_SUSPECTED")
+    if "\ufffd" in text:
+        reasons.append("DECODE_REPLACEMENT_CHAR")
     # This is a warning, never proof of truncation or a reason to drop a document.
     if raw_bytes and raw_bytes > 100_000 and len(text) < 200:
         reasons.append("POSSIBLE_TRUNCATION")
@@ -61,8 +79,9 @@ def document_quality(text: str, *, title: str = "", section_count: int = 0,
     ))
     low = any(reason in reasons for reason in (
         "TOO_SHORT", "HIGH_DUPLICATE_LINE_RATIO", "LOW_ALPHABETIC_RATIO",
+        "ENCODED_PAYLOAD_SUSPECTED",
     ))
-    tier = "LOW" if low else ("HIGH" if len(text) >= 300 else "MEDIUM")
+    tier = "LOW" if low else ("HIGH" if len(text) >= 300 and "DECODE_REPLACEMENT_CHAR" not in reasons else "MEDIUM")
     return {
         "quality_tier": tier, "quality_flags": reasons,
         "quality_version": QUALITY_VERSION,
