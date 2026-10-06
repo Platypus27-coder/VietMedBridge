@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +42,9 @@ def embed_units(units, encoder, output_dir, *, part_size=256, batch_size=16,
     if not config.exists():
         atomic_json(config, {**identity, "signature": signature})
     parts, written = [], 0
-    for start in tqdm(range(0, len(units), part_size), desc="Embedding checkpoint parts"):
+    started, encoding_seconds, cached_parts = time.perf_counter(), 0., 0
+    label = f"Embedding {encoder.identity.get('model_id', 'encoder')} | {len(units)} texts | batch {batch_size}"
+    for start in tqdm(range(0, len(units), part_size), desc=label):
         selected = units[start:start+part_size]
         stem = f"part-{start:010d}-{len(selected):05d}"
         marker = root / (stem + ".done.json")
@@ -52,10 +55,13 @@ def embed_units(units, encoder, output_dir, *, part_size=256, batch_size=16,
                 raise ValueError("Embedding checkpoint input mismatch.")
             verify_file(root / saved["path"], saved["sha256"])
             validate_vectors(np.load(root / saved["path"], allow_pickle=False), len(selected), encoder.dimension)
+            cached_parts += 1
         else:
             if max_new_parts is not None and written >= max_new_parts:
                 break
+            encoding_started = time.perf_counter()
             vectors = np.asarray(encoder.encode([u["text"] for u in selected], batch_size=batch_size), dtype=np.float32)
+            encoding_seconds += time.perf_counter() - encoding_started
             validate_vectors(vectors, len(selected), encoder.dimension)
             with local_workspace(work_dir) as temporary:
                 local = Path(temporary) / (stem + ".npy")
@@ -72,6 +78,10 @@ def embed_units(units, encoder, output_dir, *, part_size=256, batch_size=16,
                 "state": "COMPLETE" if complete else "IN_PROGRESS"}
     manifest["manifest_sha256"] = digest_json(manifest)
     atomic_json(root / "embeddings.json", manifest)
+    atomic_json(root / "runtime_profile.json", {"model": encoder.identity.get("model_id"),
+        "input_count": len(units), "batch_size_requested": batch_size, "part_size": part_size,
+        "new_parts": written, "cached_parts": cached_parts,
+        "encoding_seconds": round(encoding_seconds, 3), "seconds_this_call": round(time.perf_counter() - started, 3)})
     return manifest
 
 

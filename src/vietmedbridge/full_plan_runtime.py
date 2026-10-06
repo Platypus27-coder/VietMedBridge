@@ -9,20 +9,21 @@ import time
 from .artifacts import atomic_json, digest_json, read_json, sha256_file
 from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .dataset import parquet_path
-from .document_dense import prepare_document_vectors
+from .document_dense import prepare_document_vectors, document_units
 from .embeddings import embed_units, embedding_matrix
 from .medical_lexical import MedicalAnalyzer
 from .model_budget import model_budget_report
 from .query_expansion import cached_expansions, expand_queries
 from .query_translation import cached_translations, translate_queries
 from .qwen_models import TorchQwenEncoder, TorchQwenReranker, cached_qwen_embeddings, review_model_registry
-from .retrieval_cache import reuse_bge_cache
 from .retrieval_data import load_catalog, load_queries
 from .retrieval_diagnostics import diagnose
 from .retrieval_models import TorchDenseEncoder
 from .source_parents import derive_parents
 from .strong_retrieval import StrongConfig, StrongIndex, auxiliary_units, predict_strong
 from .translation_model import TorchQueryTranslator
+from .shared_embeddings import find_embeddings
+from .runtime_profile import RuntimeProfile, inference_batches
 
 
 def calibration_context(config, analyzer):
@@ -101,30 +102,54 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     contract = bind_pilot_run(run, plan_path=checkout / MASTER_PLAN, catalog=catalog,
         queries=queries, config=config, code_commit=code_commit)
     atomic_json(run / "model_parameter_budget.json", budget)
+    profile = RuntimeProfile(run / "runtime_profile.json")
+    batches = inference_batches()
+    atomic_json(run / "execution_policy.json", batches)
     print(f"Largest model: {budget['max_model_parameters']:,} / {budget['limit_parameters']:,}; total inventory: {budget['total_parameters']:,}")
     print("GPU:", torch.cuda.get_device_name(0), "| Run:", run)
     query_units = [{"id": q["id"], "text": q["query"]} for q in queries]
     cache = root / "retrieval" / embedding_cache_run
-    corpus_cache = reuse_bge_cache(cache / "corpus_embeddings", catalog.units, config["dense"], part_size=config["embedding"]["part_size"])
-    query_cache = reuse_bge_cache(cache / "query_embeddings", query_units, config["dense"], part_size=config["embedding"]["part_size"])
+    stage_started = time.perf_counter()
+    corpus_cache = find_embeddings(root, catalog.units, config["dense"], family="bge",
+        preferred=[cache / "corpus_embeddings", run / "corpus_embeddings"])
+    query_cache = find_embeddings(root, query_units, config["dense"], family="bge", role="query",
+        preferred=[cache / "query_embeddings", run / "query_embeddings"])
     if corpus_cache is not None and query_cache is not None:
-        corpus_vectors, cm = corpus_cache
-        query_vectors, qm = query_cache
+        corpus_vectors, cm = corpus_cache[:2]
+        query_vectors, qm = query_cache[:2]
         if cm["encoder"] != qm["encoder"]:
             raise ValueError("BGE corpus/query producer identities differ.")
-        atomic_json(run / "embedding_reuse.json", {"source_run": embedding_cache_run, "corpus": cm["manifest_sha256"], "queries": qm["manifest_sha256"]})
+        atomic_json(run / "embedding_reuse.json", {"corpus_producer": str(corpus_cache[2]), "corpus": cm["manifest_sha256"], "queries": qm["manifest_sha256"]})
     else:
         dense = TorchDenseEncoder(config["dense"])
         try:
-            cm = embed_units(catalog.units, dense, run / "corpus_embeddings", work_dir=work_dir,
-                max_new_parts=max_new_embedding_parts, **config["embedding"])
-            qm = embed_units(query_units, dense, run / "query_embeddings", work_dir=work_dir,
-                max_new_parts=max_new_embedding_parts, **config["embedding"])
+            if corpus_cache is None:
+                cm = embed_units(catalog.units, dense, run / "corpus_embeddings", work_dir=work_dir,
+                    max_new_parts=max_new_embedding_parts, **config["embedding"])
+                corpus_vectors = embedding_matrix(run / "corpus_embeddings", cm)
+            else:
+                corpus_vectors, cm = corpus_cache[:2]
+            if query_cache is None:
+                qm = embed_units(query_units, dense, run / "query_embeddings", work_dir=work_dir,
+                    max_new_parts=max_new_embedding_parts, **config["embedding"])
+                query_vectors = embedding_matrix(run / "query_embeddings", qm)
+            else:
+                query_vectors, qm = query_cache[:2]
         finally:
             dense.close()
-        corpus_vectors, query_vectors = embedding_matrix(run / "corpus_embeddings", cm), embedding_matrix(run / "query_embeddings", qm)
-    document_vectors, dm, doc_units = prepare_document_vectors(catalog, tokenizer, config["dense"],
-        base_run / "document_embeddings", TorchDenseEncoder, embedding=config["embedding"], work_dir=work_dir)
+        if cm["encoder"] != qm["encoder"]:
+            raise ValueError("BGE corpus/query producer runtimes differ; use compatible runtimes.")
+    doc_units = document_units(catalog, tokenizer, config["dense"]["max_length"])
+    doc_cache = find_embeddings(root, doc_units, config["dense"], family="bge", preferred=[base_run / "document_embeddings"])
+    if doc_cache is not None:
+        document_vectors, dm = doc_cache[:2]
+    else:
+        document_vectors, dm, doc_units = prepare_document_vectors(catalog, tokenizer, config["dense"],
+            base_run / "document_embeddings", TorchDenseEncoder, embedding=config["embedding"], work_dir=work_dir)
+    profile.record("bge_and_document_embeddings", stage_started,
+        corpus_reused_from=str(corpus_cache[2]) if corpus_cache else None,
+        document_reused_from=str(doc_cache[2]) if doc_cache else None)
+    stage_started = time.perf_counter()
     translation_root = run / "translations"
     cached = cached_translations(queries, config["translation"], translation_root)
     if cached is None:
@@ -148,36 +173,52 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
             atomic_json(run / "query_llm_runtime.json", {"model": translator.identity, "seconds_this_call": time.monotonic() - started})
         finally:
             translator.close()
+    profile.record("query_translation_expansion", stage_started)
+    stage_started = time.perf_counter()
     aux = auxiliary_units(queries, expansions)
     corpus_root, auxiliary_root = base_run / "qwen_corpus", base_run / "qwen_queries"
-    secondary_cache = cached_qwen_embeddings(corpus_root, catalog.units, config["second_dense"], "corpus")
+    secondary_cache = find_embeddings(root, catalog.units, config["second_dense"], family="qwen", preferred=[corpus_root])
     auxiliary_cache = cached_qwen_embeddings(auxiliary_root, aux, config["second_dense"], "query")
     if secondary_cache is None or auxiliary_cache is None:
         encoder = TorchQwenEncoder(config["second_dense"])
         started = time.monotonic()
         try:
-            sm = embed_units(catalog.units, encoder.for_role("corpus"), corpus_root, work_dir=work_dir,
-                max_new_parts=max_new_embedding_parts, **config["qwen_embedding"])
-            am = embed_units(aux, encoder.for_role("query"), auxiliary_root, work_dir=work_dir,
-                max_new_parts=max_new_embedding_parts, **config["qwen_embedding"])
+            options = {**config["qwen_embedding"], "batch_size": batches["embedding"]}
+            if secondary_cache is None:
+                sm = embed_units(catalog.units, encoder.for_role("corpus"), corpus_root, work_dir=work_dir,
+                    max_new_parts=max_new_embedding_parts, **options)
+                secondary_vectors = embedding_matrix(corpus_root, sm)
+            else:
+                secondary_vectors, sm = secondary_cache[:2]
+            if auxiliary_cache is None:
+                am = embed_units(aux, encoder.for_role("query"), auxiliary_root, work_dir=work_dir,
+                    max_new_parts=max_new_embedding_parts, **options)
+                auxiliary_vectors = embedding_matrix(auxiliary_root, am)
+            else:
+                auxiliary_vectors, am = auxiliary_cache
             atomic_json(run / "qwen_dense_runtime.json", {"model": encoder.identity,
                 "seconds_this_call": time.monotonic() - started, "oom_backoffs": encoder.oom_backoffs})
         finally:
             encoder.close()
-        secondary_vectors, auxiliary_vectors = embedding_matrix(corpus_root, sm), embedding_matrix(auxiliary_root, am)
     else:
-        secondary_vectors, sm = secondary_cache
+        secondary_vectors, sm = secondary_cache[:2]
         auxiliary_vectors, am = auxiliary_cache
+    profile.record("qwen_embeddings", stage_started,
+        corpus_reused_from=str(secondary_cache[2]) if secondary_cache else None)
+    stage_started = time.perf_counter()
     index = StrongIndex(catalog, corpus_vectors, cm, run / "index", tokenizer,
         secondary_vectors=secondary_vectors, secondary_manifest=sm, auxiliary_vectors=auxiliary_vectors,
         auxiliary_manifest=am, auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=analyzer, work_dir=work_dir,
         document_vectors=document_vectors, document_manifest=dm, document_inputs=doc_units)
-    reranker = TorchQwenReranker(config["reranker"], adapter_path=adapter_path)
+    profile.record("index", stage_started)
+    with profile.stage("reranker_loading"):
+        reranker = TorchQwenReranker(config["reranker"], adapter_path=adapter_path)
     started = time.monotonic()
     try:
-        records, report = predict_strong(index, queries, query_vectors, reranker, run / "queries",
-            query_embedding_manifest=qm, translations=translations, config=policy,
-            batch_size=config["reranker_batch_size"], max_new_queries=max_new_queries)
+        with profile.stage("competition_reranking"):
+            records, report = predict_strong(index, queries, query_vectors, reranker, run / "queries",
+                query_embedding_manifest=qm, translations=translations, config=policy,
+                batch_size=batches["reranker"], max_new_queries=max_new_queries)
         reranker_identity = dict(reranker.identity)
         atomic_json(run / "qwen_reranker_runtime.json", {"model": reranker_identity,
             "seconds_this_call": time.monotonic() - started, "oom_backoffs": reranker.oom_backoffs})
@@ -215,5 +256,6 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     if calibration is not None and heldout_state == "FROZEN_POLICY_HELD_OUT_EVALUATED_LOCAL_PROXY":
         status["fine_tuning"] = "DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY"
     atomic_json(run / "full_plan_status.json", status)
+    profile.finish(status["inference_scope"] if "inference_scope" in status else ready["state"])
     return {"ready": ready, "status": status, "diagnostics_path": str(run / "diagnostics.json"),
         "samples": [{"query": q, "prediction": r["prediction"]} for q, r in zip(queries[:3], records[:3], strict=True)]}

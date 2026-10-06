@@ -3,11 +3,62 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import re
 
 from .artifacts import atomic_json, digest_json, read_json
 from .reranker_training import CATEGORIES, validate_query_split
 from .retrieval_policy import lcs_length, score_tokens
 from .training_data import _check, _seal
+
+
+def install_ai_candidate_review(upload_path, data_root, *, run_name="stage-a-qlora-v3-per-model-15b"):
+    """Import a delegated AI review, preserving immutable candidates and team edits."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name):
+        raise ValueError("Unsafe candidate-review run name.")
+    base = Path(data_root) / "training" / run_name
+    pointer = read_json(base / "candidate_review_current.json")
+    directory = (base / pointer["directory"]).resolve()
+    if not directory.is_relative_to(base.resolve()):
+        raise ValueError("Candidate review pointer escapes its run.")
+    target = directory / "review.json"
+    existing, incoming = read_json(target), read_json(upload_path)
+    sources = _check(read_json(directory / "sources.json"))
+    if (incoming.get("review_mode") != "AI_ASSISTED_PILOT"
+        or incoming.get("review_authorization") != "USER_DELEGATED_TO_CODEX_2026_10_06"
+        or incoming.get("human_validated") is not False):
+        raise ValueError("Expected a delegated AI pilot candidate review.")
+    if (incoming.get("source_sha256") != sources["sha256"]
+        or existing.get("source_sha256") != sources["sha256"]
+        or pointer["source_sha256"] != sources["sha256"]):
+        raise ValueError("Uploaded candidate review belongs to another source snapshot.")
+    expected = {i["pair_id"]: i for i in sources["items"]}
+    before = {i["pair_id"]: i for i in existing["items"]}
+    if (len(incoming["items"]) != len(expected) or len(before) != len(expected)
+        or {i["pair_id"] for i in incoming["items"]} != set(expected) or set(before) != set(expected)):
+        raise ValueError("Uploaded candidate review coverage changed.")
+    merged, counts = deepcopy(incoming), {}
+    for item in merged["items"]:
+        source, old = expected[item["pair_id"]], before[item["pair_id"]]
+        if ({k: item.get(k) for k in source} != source
+            or {k: old.get(k) for k in source} != source):
+            raise ValueError("Uploaded review changed immutable candidate source fields.")
+        decision = item["review"]
+        judgment = decision.get("judgment")
+        if judgment not in ("PENDING", "POSITIVE", "NEGATIVE", "SKIP"):
+            raise ValueError("Unknown uploaded candidate judgment.")
+        if judgment != "PENDING" and (decision.get("reviewer_type") != "AI" or not decision.get("reviewer", "").strip()):
+            raise ValueError("AI candidate judgments require explicit reviewer provenance.")
+        if old["review"].get("judgment") != "PENDING":
+            if judgment != "PENDING" and old["review"] != decision:
+                raise ValueError("Uploaded review conflicts with existing team decisions.")
+            item["review"] = old["review"]
+        counts[item["review"]["judgment"]] = counts.get(item["review"]["judgment"], 0) + 1
+    backup = target.with_name("review.before-ai-" + digest_json(existing)[:12] + ".json")
+    if not backup.exists():
+        atomic_json(backup, existing)
+    atomic_json(target, merged)
+    return {"review_path": str(target), "backup_path": str(backup), "judgments": counts,
+            "review_mode": "AI_ASSISTED_PILOT", "human_validated": False}
 
 
 def export_candidate_review(run_dir, records, train_doc, dev_doc, catalog, *, top_k=100):

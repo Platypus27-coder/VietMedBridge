@@ -134,7 +134,8 @@ notebook/ACTION:
    vào QLoRA, dev NDCG/MRR và finalist F2 selection. Doc/chunk margins được sweep
    độc lập. Namespace tách theo label version. Không đưa held-out queries/labels vào mining,
    loss, dev sweep hoặc checkpoint selection; chỉ encode các query để inference.
-6. Tự chạy tám dev ablations, lưu báo cáo nhưng không tự promote variant. Chấm
+6. Chạy tám dev ablations khi gọi `run_ablations=True`; mặc định để sau kết quả
+   đo đầu tiên để tránh tám lượt cascade tự động. Chấm
    held-out sau khi adapter/cutoff đã freeze; giữ calibration/adapter/label hashes.
    Không dùng held-out score để chọn lại. 04 đọc adapter/dev policy đã chọn.
 
@@ -174,7 +175,9 @@ held-out ở `retrieval_heldout.json` với `split=heldout`.
 trùng nhau hoặc contest queries. Chỉ bật `exhaustive_chunks=true` khi annotation
 đầy đủ; nếu không, negatives phải nằm trong reviewed list.
 
-`training_workflow.py` mine full cascade, tạo group 1 positive + 7 negatives.
+`training_workflow.py` dùng lại mining cascade đã hoàn tất; lượt mining mới
+lấy ứng viên bằng retrieval đa kênh, tạo group 1 positive + 7 negatives
+sau khi duyệt. Reranker vẫn chạy đầy đủ trong đánh giá dev/held-out và inference.
 Gold là source slices; training positive cần same-document gold bao phủ ≥80%
 child tokens, riêng với scorer F2 proxy. Quotas nguyên 2/2/1/1/1 xấp xỉ taxonomy
 25/25/20/15/15 trong plan; category thiếu ghi rõ unclassified, không tự phán đoán
@@ -193,7 +196,8 @@ tạo namespace `-ft-` mới.
 
 - `retrieval_diagnostics.run_dev_ablations(...)`: tám cấu hình full, bỏ document
   dense, bỏ second dense, bỏ translated sparse, bỏ HyDE, bỏ subqueries, parent512,
-  rerank RRF. Notebook 05 gọi tự động sau khi chọn adapter; báo cáo chưa auto-apply.
+  rerank RRF. Gọi `run_training_workflow(..., run_ablations=True)` sau kết quả
+  đầu tiên; báo cáo chưa auto-apply.
   Nhận index, vectors/manifest, translations, reranker, config, reviewed dev và
   contest queries để chặn tuning trên test; lưu score stages và cutoff sweeps.
 - `embedding_training.train_embedding_qlora(...)`: chỉ nhận verified independent
@@ -214,3 +218,25 @@ Master §§7/8/13/17/27/39/56 có module cho kiến trúc/supervised/ablation tr
 §§26/55 giữ baseline làm comparator. Relevance, glossary, fine-tune thực,
 hyperparameters, scale benchmark và official score cần dữ liệu/đo đạc tương ứng.
 Full inference code chưa phải cấu hình đã tối ưu.
+
+## Execution update — 06/10/2026
+
+04 v4 và 05 v6 tìm producer embeddings dùng chung theo exact input order/hash,
+model revision, pooling, token policy, precision, role và inference code. Producer
+manifest/done/vector checksums được kiểm trước reuse; giữ original runtime metadata,
+không copy corpus sang từng experiment hoặc relabel vectors. Mỗi input collection
+khác vẫn cần embeddings riêng, adapter embedding khác vẫn cần corpus mới.
+
+05 replay mining đã hoàn tất trước khi nạp GPU. Nếu còn thiếu review, trả trạng
+thái/chính file review cũ trên CPU. Mining lần đầu dùng full multichannel retrieval
+để lấy ứng viên, không chạy toàn cascade reranker 8B trước khi có negatives.
+Các ứng viên mới chưa thành nhãn; source positives và bảy negatives mỗi query
+vẫn phải được duyệt. QLoRA, dev finalist F2, frozen held-out và 04 giữ reranker 8B.
+Final adapter trùng weights/config với checkpoint cuối được đánh giá một lần.
+
+`/content/review_ai_pilot.json` được 05 tự nhập với backup, kiểm toàn bộ candidate
+source fields và giữ quyết định team; AI provenance và `human_validated=false` rõ ràng.
+Runtime VRAM chọn batch khởi đầu 4/8/16; OOM backoff cũ giảm batch khi cần.
+Không đổi model/semantic policy chỉ để nâng batch. Chưa có GPU speedup benchmark.
+`runtime_profile.json` ghi thời gian theo stage; mỗi embedding pass ghi số parts
+reuse/new, encoding seconds và tổng thời gian. Giữ RUN_NAME/Drive root hiện có.

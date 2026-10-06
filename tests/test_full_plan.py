@@ -431,7 +431,7 @@ def test_full_notebook_training_is_separate_no_action_and_pinned_models():
         notebook = json.loads((root/'notebooks'/name).read_text(encoding='utf-8'))
         source = '\n'.join(c['source'] for c in notebook['cells'] if c['cell_type'] == 'code')
         assert '.[notebook,retrieval,strong]' in source
-        expected_api = 'full-master-plan-strong-v3-per-model-15b' if name.startswith('04') else 'full-master-plan-supervised-v4-per-model-15b'
+        expected_api = 'full-master-plan-strong-v4-shared-cache' if name.startswith('04') else 'full-master-plan-supervised-v6-shared-cache-review'
         assert expected_api in source and 'git' in source
         assert 'ACTION =' not in source
         for cell in notebook['cells']:
@@ -470,6 +470,7 @@ def test_main_colab_entrypoint_wiring_all_queries_and_cache_resume(tmp_path, cat
     atomic_json(data/'raw/snapshot.json', {'files':{'links_corpus.parquet':{'sha256':'official-fixture'}}})
     queries = [{'id':50001+i*3,'query':f'HbA1c xét nghiệm {i}'} for i in range(1200)]
     monkeypatch.setattr(runtime, 'load_catalog', lambda *a, **k:catalog)
+    monkeypatch.setattr(runtime, 'inference_batches', lambda: {'embedding':2,'reranker':2})
     monkeypatch.setattr(runtime, 'load_queries', lambda *a, **k:queries)
     monkeypatch.setattr(runtime, 'parquet_path', lambda *a:Path('unused-CPU-fixture'))
     monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', lambda *a, **k:Tokenizer())

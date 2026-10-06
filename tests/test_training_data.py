@@ -386,6 +386,7 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
     monkeypatch.setattr(dataset,'parquet_path',lambda *a:Path('CPU-unused'))
     monkeypatch.setattr(workflow,'load_queries',lambda *a,**k:contest)
     monkeypatch.setattr(workflow,'load_catalog',lambda *a,**k:sources)
+    monkeypatch.setattr(workflow,'inference_batches',lambda: {'embedding':2,'reranker':2})
     monkeypatch.setattr(transformers.AutoTokenizer,'from_pretrained',lambda *a,**k:Tokenizer())
     calls={'dense':0,'secondary':0,'translation':0,'ranking':0,'training':0}
 
@@ -472,6 +473,10 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
     assert first['state']=='MINING_REQUIRES_MORE_GOLD_COVERAGE_OR_REVIEWED_NEGATIVES'
     assert calls['training']==0 and len(first['train_holds'])==4 and len(first['dev_holds'])==2
     before=dict(calls)
+    assert calls['ranking']==0
+    pending=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
+    assert pending['gpu_models_loaded_this_call']==0 and pending['mining_reused'] is True
+    assert calls==before
     review=read_json(first['review_path'])
     positives={q['id']:q['provenance']['child_id'] for split in ('train','dev')
         for q in read_json(data/f'labels/retrieval_{split}.json')['queries']}
@@ -484,7 +489,10 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
     assert calls['training']==1
     assert len(list((data/'training/stage-a-qlora-v3-per-model-15b/experiments').iterdir()))==1
     stop_before_training=False
-    completed=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
+    pilot=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
+    assert pilot['research_ablations']=='DEFERRED_UNTIL_FIRST_MEASURED_RESULT'
+    assert not (data/'training/stage-a-qlora-v3-per-model-15b/ablation_summary.json').exists()
+    completed=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work',run_ablations=True)
     assert completed['state']=='TRAINED_DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY'
     assert completed['model_parameter_budget']['adapter_parameters']==14
     assert completed['heldout_evaluation']['used_for_checkpoint_or_cutoff_selection'] is False
@@ -505,7 +513,7 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
     assert selected['manifest_sha256']==read_json(run/'calibrated_policy.json')['manifest_sha256']
     assert adapter==run/'selected_adapter'
     before_complete=dict(calls)
-    repeated=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
+    repeated=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work',run_ablations=True)
     assert repeated==completed
     assert {k:v for k,v in calls.items() if k!='training'}=={k:v for k,v in before_complete.items() if k!='training'}
     # Notebook 04 consumes the actual selected manifest/policy and emits all fixture IDs.
@@ -513,6 +521,7 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
     from vietmedbridge.competition_pilot import MASTER_PLAN
     (checkout/MASTER_PLAN).write_text('CPU wiring fixture, not a scored medical submission',encoding='utf-8')
     monkeypatch.setattr(runtime,'load_catalog',lambda *a,**k:sources)
+    monkeypatch.setattr(runtime,'inference_batches',lambda: {'embedding':2,'reranker':2})
     monkeypatch.setattr(runtime,'load_queries',lambda *a,**k:contest)
     monkeypatch.setattr(runtime,'parquet_path',lambda *a:Path('CPU-unused'))
     monkeypatch.setattr(runtime,'TorchDenseEncoder',Dense)
