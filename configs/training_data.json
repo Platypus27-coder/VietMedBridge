@@ -1,0 +1,12 @@
+{
+  "train_samples": 256,
+  "dev_samples": 40,
+  "dev_fraction": 0.2,
+  "max_children_per_document": 2,
+  "min_source_chars": 100,
+  "max_source_chars": 1600,
+  "min_train_reviewed": 32,
+  "min_dev_reviewed": 8,
+  "seed": 20261006,
+  "teacher_max_new_tokens": 384
+}

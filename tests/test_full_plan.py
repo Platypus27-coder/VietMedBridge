@@ -426,7 +426,8 @@ def test_full_notebook_training_is_separate_no_action_and_pinned_models():
         notebook = json.loads((root/'notebooks'/name).read_text(encoding='utf-8'))
         source = '\n'.join(c['source'] for c in notebook['cells'] if c['cell_type'] == 'code')
         assert '.[notebook,retrieval,strong]' in source
-        assert 'full-master-plan-strong-v2-15b' in source and 'git' in source
+        expected_api = 'full-master-plan-strong-v2-15b' if name.startswith('04') else 'full-master-plan-supervised-v3'
+        assert expected_api in source and 'git' in source
         assert 'ACTION =' not in source
         for cell in notebook['cells']:
             if cell['cell_type'] == 'code':

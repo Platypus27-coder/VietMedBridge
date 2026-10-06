@@ -1,5 +1,40 @@
 # Kiểm chứng data pipeline v2
 
+## Source-grounded supervised workflow — 06/10/2026
+
+- Notebook 05 nối frozen source → draft VI train query → explicit human source
+  review → hybrid mining → candidate review → QLoRA/dev selection. Dev query
+  do người review viết độc lập; teacher chỉ nhận passage của train. Không tạo
+  gold từ 1.200 query thi, không coi model output hoặc missing judgment là nhãn.
+  Dùng lại Qwen 4B, tổng pretrained vẫn **13.374.547.456**; adapter tính thêm.
+- **10 tests preparation/review pass**, gồm đúng hai notebook entrypoints,
+  ngắt/resume từng draft, tránh teacher reload, zero-new-samples không load
+  model, hash/source edits, contest overlap, độc lập dev, review correction,
+  positive-negative conflicts và source-split guards.
+- Regression cuối **175 passed, 9 skipped**; skips thuộc optional browser/
+  Crawl4AI integrations. Không tải weights local. Evidence ignored:
+  `artifacts/strong-model-review/regression-supervised-final.xml`.
+- Test đúng `run_training_workflow`: lần đầu chưa có negative judgments thì
+  xuất review và không gọi training; nhập judgments đã review qua đúng derived
+  parent catalog rồi resume, reuse toàn bộ embedding/LLM/rerank checkpoints,
+  đến training với groups 1 positive + 7 negatives và label-version namespace.
+  FAISS/mining/checkpoints chạy thật trên CPU; model loaders và QLoRA dùng
+  doubles. Test dừng trước QLoRA GPU, không chứng minh training/model quality.
+- Trên frozen corpus thật, bước chọn nguồn tạo được **256 train + 40 dev**:
+  tổng 148 VI/148 ZH, 855 eligible documents và 9 quarantined documents.
+  Nhóm source/đoạn trùng được gom trước split; train/dev source groups tách rời.
+  Pilot không có mẫu EN trong lần chọn này. Chỉ đọc source/tokenizer, chưa chạy
+  teacher hoặc tạo nhãn đã review. Evidence local ignored:
+  `artifacts/strong-model-review/training_source_plan_report.json`.
+- 8 notebooks qua schema/syntax/empty-output checks; 05 có 8 cells, code lock
+  `full-master-plan-supervised-v3`. 04 và frozen data không đổi. Review files
+  chỉnh ở đúng đường dẫn Drive; Run all nhập lại mà không ghi đè team edits.
+
+Chưa có reviewed labels thật, GPU QLoRA thực, independent held-out evaluation
+hoặc score BTC. Glossary/embedding tuning/sharded scale vẫn cần evidence theo
+master plan; không coi code workflow là hoàn tất các thí nghiệm/scale gates.
+Quy trình hiện tại ở [FULL_PLAN.md](FULL_PLAN.md).
+
 ## Aggregate model budget correction — 06/10/2026
 
 - Model v1 tổng 20.346.066.432 parameters; gate từng model ≤15B chưa đảm bảo

@@ -90,12 +90,46 @@ Không chạy hai runtime ghi cùng run. Đổi data/model/policy/code cần run
 percentiles. `full_plan_status.json` phân biệt inference/fine-tune/calibration/
 coverage. Source/schema pass chưa chứng minh relevance.
 
-## Supervised workflow khi có nhãn
+## Tạo draft, duyệt nhãn và supervised workflow
 
 Sếp xác nhận hiện **chưa có reviewed train/dev labels**. 04 chạy pretrained và
 cutoffs chưa tune. [Notebook 05](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb)
-chỉ dùng khi có hai file dưới đây; thiếu file trả
-`WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS` trước khi nạp model.
+đã có luồng tạo draft và review theo master §38 trong cùng notebook, không thêm
+notebook/ACTION:
+
+1. Đọc frozen candidate, loại source quarantine; gom source/đoạn trùng rồi tách
+   nhóm train/dev trước khi sinh câu hỏi. Chọn tối đa 256 train/40 dev sources,
+   giới hạn hai children/document; sample cân đối ngôn ngữ khi có nguồn.
+2. Qwen 4B hiện có tạo **draft VI train query**, có quote nguyên văn và checkpoint
+   từng mẫu. Không thêm model vào bộ 13.375B. Quote/schema/contest overlap checks
+   chỉ là kiểm bề mặt, không chứng nhận clinical faithfulness.
+3. `source_review.json` chứa source spans, hashes, draft và review fields. Dev
+   query để trống để người review viết độc lập. Team đánh ACCEPT/REJECT, reviewer,
+   query và exact quote; dev đánh `independently_written=true` sau khi tự viết.
+   Giữ mọi source fields; lưu file về đúng `review_path` trên Drive và Run all.
+   Tối thiểu 32 train/8 dev được accept và hết PENDING mới xuất hai labels files.
+4. Workflow chạy hybrid candidates. Nếu chưa có đủ positive/7 reviewed negatives
+   cho từng query, xuất `candidate_reviews/<hash>/review.json`. Team đánh
+   POSITIVE/NEGATIVE/SKIP + reviewer/category; unknown vẫn PENDING. Source spans,
+   query/hash/ID coverage và positive-negative conflicts được kiểm khi nhập lại.
+   Additional positives không vượt nhóm source đã reserve cho từng split.
+5. Run all sau khi lưu review về Drive: import judgments, reuse verified vectors
+   và scored stages. Training chưa chạy khi còn mining holds. Groups-ready mới
+   vào QLoRA, dev NDCG/MRR và finalist F2 selection; checkpoint namespace tách
+   theo label version. 04 đọc adapter/dev policy đã chọn như trước.
+
+Labels train/dev có `reviewed=true` chỉ sau explicit review. Source-derived
+synthetic train và independently authored dev có `label_kind`/reviewer/provenance
+riêng; đây không phải nhãn BTC. Không tự bật `exhaustive_chunks=true` hoặc coi
+teacher/negative scores là gold. Tất cả các bước dừng review là input cần team
+thực hiện, không phải inference/training đã được chứng minh. Chưa có nhãn thật,
+GPU QLoRA hay independent held-out test/official score ở local.
+
+`configs/training_data.json` là policy chuẩn bị draft; nó không thay đổi frozen
+candidate hoặc cấu hình inference 04. 05 nâng code lock sang
+`full-master-plan-supervised-v3`; 04 giữ `full-master-plan-strong-v2-15b`.
+API `run_training_workflow` gọi trực tiếp khi thiếu file vẫn trả
+`WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS`; notebook gọi preparation trước.
 Không lấy predictions của 1.200 contest queries làm gold.
 
 ```json

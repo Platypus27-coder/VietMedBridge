@@ -6,6 +6,7 @@ from pathlib import Path
 from .artifacts import atomic_json, digest_json, publish_file, read_json, verify_file
 from .embeddings import embed_units, embedding_matrix, unit_signature
 from .model_budget import model_budget_report
+from .negative_review import export_candidate_review, import_candidate_review
 from .query_expansion import cached_expansions, expand_queries
 from .query_translation import cached_translations, translate_queries
 from .qwen_models import TorchQwenEncoder, TorchQwenReranker, cached_qwen_embeddings, review_model_registry
@@ -13,6 +14,7 @@ from .reranker_training import mine_hard_negatives, train_qlora, validate_query_
 from .retrieval_data import load_catalog, load_queries
 from .retrieval_eval import cutoff_sweep, evaluate_candidate_recall
 from .retrieval_models import TorchDenseEncoder
+from .retrieval_cache import reuse_bge_cache
 from .source_parents import derive_parents
 from .strong_retrieval import StrongConfig, StrongIndex, auxiliary_units, predict_strong
 from .translation_model import TorchQueryTranslator
@@ -56,7 +58,7 @@ def _selected_adapter(source, destination):
 
 def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v2-15b"):
     root, checkout = Path(data_root), Path(checkout)
-    run = root / "training" / run_name
+    base_run = run = root / "training" / run_name
     train_path, dev_path = root / "labels/retrieval_train.json", root / "labels/retrieval_dev.json"
     if not train_path.is_file() or not dev_path.is_file():
         status = {"state": "WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS", "fine_tuned": False,
@@ -74,26 +76,46 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
     contest = load_queries(parquet_path(root, "query.parquet"), expected_count=1200)
     train_doc, dev_doc = read_json(train_path), read_json(dev_path)
     train, dev = validate_query_split(train_doc, dev_doc, contest)
+    tokenizer = AutoTokenizer.from_pretrained(config["dense"]["model_id"], revision=config["dense"]["revision"], trust_remote_code=False)
+    catalog = load_catalog(root / "processed/stage-a-data-v3-laodong", "candidate-1cd220a4be956d5a.json", tokenizer, **config["pilot_limits"])
+    snapshot = read_json(root / "raw/snapshot.json")
+    if snapshot["files"]["links_corpus.parquet"]["sha256"] != catalog.build_config["official_links_sha256"]:
+        raise ValueError("Training catalog differs from official corpus snapshot.")
+    policy = StrongConfig(**config["retrieval"])
+    catalog = derive_parents(catalog, tokenizer, (policy.parent_short_tokens, policy.parent_long_tokens))
+    train_doc, dev_doc, review_status = import_candidate_review(base_run, train_doc, dev_doc, catalog, tokenizer, contest)
+    if review_status["state"] == "CANDIDATE_REVIEW_APPLIED":
+        atomic_json(train_path, train_doc)
+        atomic_json(dev_path, dev_doc)
+    train, dev = validate_query_split(train_doc, dev_doc, contest)
     queries = [{"id": q["id"], "query": q["query"]} for q in train + dev]
     dev_queries = [{"id": q["id"], "query": q["query"]} for q in dev]
-    split_contract = {"train": digest_json(train_doc), "dev": digest_json(dev_doc), "contest": digest_json(contest)}
+    run = base_run / "experiments" / digest_json({"queries": queries, "config": config, "catalog": catalog.identity})[:10]
+    split_contract = {"train_queries": digest_json([{"id": q["id"], "query": q["query"]} for q in train]),
+        "dev_queries": digest_json(dev_queries), "contest": digest_json(contest)}
     if (run / "split_contract.json").exists() and read_json(run / "split_contract.json") != split_contract:
         raise ValueError("Training split changed; choose a new training run.")
     atomic_json(run / "split_contract.json", split_contract)
-    tokenizer = AutoTokenizer.from_pretrained(config["dense"]["model_id"], revision=config["dense"]["revision"], trust_remote_code=False)
-    catalog = load_catalog(root / "processed/stage-a-data-v3-laodong", "candidate-1cd220a4be956d5a.json", tokenizer, **config["pilot_limits"])
-    policy = StrongConfig(**config["retrieval"])
-    catalog = derive_parents(catalog, tokenizer, (policy.parent_short_tokens, policy.parent_long_tokens))
+    label_version = digest_json([train_doc, dev_doc])[:10]
+    atomic_json(run / "labels" / (label_version + ".json"), {"train": train_doc, "dev": dev_doc})
     glossary = root / "labels/medical_aliases.json"
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"], glossary_path=glossary if glossary.is_file() else None)
     query_units = [{"id": q["id"], "text": q["query"]} for q in queries]
-    dense = TorchDenseEncoder(config["dense"])
-    try:
-        cm = embed_units(catalog.units, dense, run / "corpus_embeddings", work_dir=work_dir, **config["embedding"])
-        qm = embed_units(query_units, dense, run / "query_embeddings", work_dir=work_dir, **config["embedding"])
-    finally:
-        dense.close()
-    corpus_vectors, query_vectors = embedding_matrix(run / "corpus_embeddings", cm), embedding_matrix(run / "query_embeddings", qm)
+    corpus_cache = reuse_bge_cache(run / "corpus_embeddings", catalog.units, config["dense"], part_size=config["embedding"]["part_size"])
+    query_cache = reuse_bge_cache(run / "query_embeddings", query_units, config["dense"], part_size=config["embedding"]["part_size"])
+    if corpus_cache is not None and query_cache is not None:
+        corpus_vectors, cm = corpus_cache
+        query_vectors, qm = query_cache
+        if cm["encoder"] != qm["encoder"]:
+            raise ValueError("Training BGE corpus/query encoder identities differ.")
+    else:
+        dense = TorchDenseEncoder(config["dense"])
+        try:
+            cm = embed_units(catalog.units, dense, run / "corpus_embeddings", work_dir=work_dir, **config["embedding"])
+            qm = embed_units(query_units, dense, run / "query_embeddings", work_dir=work_dir, **config["embedding"])
+        finally:
+            dense.close()
+        corpus_vectors, query_vectors = embedding_matrix(run / "corpus_embeddings", cm), embedding_matrix(run / "query_embeddings", qm)
     cached = cached_translations(queries, config["translation"], run / "translations")
     translations = cached[0] if cached is not None else None
     expansions = cached_expansions(queries, translations, config["translation"], run / "expansions", enabled=config["expansion_enabled"]) if translations is not None else None
@@ -130,37 +152,38 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         dev_bundle = mine_hard_negatives(records, dev_doc, catalog, tokenizer, contest)
         atomic_json(run / "train_mining.json", train_bundle)
         atomic_json(run / "dev_mining.json", dev_bundle)
-        if train_bundle["state"] != "READY" or dev_bundle["state"] != "READY":
+        if train_bundle["state"] != "READY" or dev_bundle["state"] != "READY" or train_bundle["holds"] or dev_bundle["holds"]:
+            review_path = export_candidate_review(base_run, records, train_doc, dev_doc, catalog)
             status = {"state": "MINING_REQUIRES_MORE_GOLD_COVERAGE_OR_REVIEWED_NEGATIVES", "fine_tuned": False,
-                "train_holds": train_bundle["holds"], "dev_holds": dev_bundle["holds"]}
-            atomic_json(run / "status.json", status)
+                "train_holds": train_bundle["holds"], "dev_holds": dev_bundle["holds"], "review_path": str(review_path)}
+            atomic_json(base_run / "status.json", status)
             return status
-        training = train_qlora(model, train_bundle, dev_bundle, run / "checkpoints",
+        training = train_qlora(model, train_bundle, dev_bundle, run / "checkpoints" / label_version,
             model_budget=budget, **config["training"])
     finally:
         model.close()
     dev_vectors, dev_manifest = slice_query_vectors(dev_queries, queries, query_vectors, qm)
     translated = {q["id"]: t for q, t in zip(queries, translations, strict=True)}
     dev_translations = [translated[q["id"]] for q in dev_queries]
-    finalists = sorted((run / "checkpoints").glob("checkpoint-*")) + [Path(training["adapter"])]
+    finalists = sorted((run / "checkpoints" / label_version).glob("checkpoint-*")) + [Path(training["adapter"])]
     trials = []
     for checkpoint in finalists:
         model_budget_report(config, registry, adapter_paths=[checkpoint])
         reranker = TorchQwenReranker(config["reranker"], adapter_path=checkpoint)
         try:
             records, report = predict_strong(index, dev_queries, dev_vectors, reranker,
-                run / "finalist_evaluation" / checkpoint.name / "queries", query_embedding_manifest=dev_manifest,
+                run / "finalist_evaluation" / label_version / checkpoint.name / "queries", query_embedding_manifest=dev_manifest,
                 translations=dev_translations, config=policy, batch_size=config["reranker_batch_size"])
             sweep = cutoff_sweep(records, dev_doc, catalog, tokenizer, policy)
-            atomic_json(run / "finalist_evaluation" / checkpoint.name / "cutoff_sweep.json", sweep)
+            atomic_json(run / "finalist_evaluation" / label_version / checkpoint.name / "cutoff_sweep.json", sweep)
             trials.append({"checkpoint": str(checkpoint), "best_dev_policy": sweep["best_dev_policy"],
                 "prediction_signature": report["signature"], "recall": evaluate_candidate_recall(records, dev_doc["queries"], catalog, tokenizer)})
         finally:
             reranker.close()
     trials.sort(key=lambda t: (-t["best_dev_policy"]["combined_f2"], t["checkpoint"]))
-    selected = _selected_adapter(trials[0]["checkpoint"], run / "selected_adapter")
-    selected_budget = model_budget_report(config, registry, adapter_paths=[run / "selected_adapter"])
-    atomic_json(run / "model_parameter_budget.json", selected_budget)
+    selected = _selected_adapter(trials[0]["checkpoint"], base_run / "selected_adapter")
+    selected_budget = model_budget_report(config, registry, adapter_paths=[base_run / "selected_adapter"])
+    atomic_json(base_run / "model_parameter_budget.json", selected_budget)
     best = trials[0]["best_dev_policy"]
     from .full_plan_runtime import calibration_context
     calibration = {"state": "DEV_SELECTED_HELD_OUT_PENDING", "split": "dev", "reviewed": True,
@@ -172,10 +195,10 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         "policy": {"doc_top_k": best["doc_top_k"], "chunk_top_k": best["chunk_top_k"],
             "doc_score_margin": best["score_margin"], "chunk_score_margin": best["score_margin"]}, "trials": trials}
     calibration["manifest_sha256"] = digest_json(calibration)
-    atomic_json(run / "calibrated_policy.json", calibration)
+    atomic_json(base_run / "calibrated_policy.json", calibration)
     status = {"state": "TRAINED_DEV_F2_SELECTED_HELD_OUT_PENDING", "fine_tuned": True,
         "model_parameter_budget": selected_budget,
-        "adapter": str(run / "selected_adapter"), "dev_proxy_f2": best["combined_f2"],
+        "adapter": str(base_run / "selected_adapter"), "dev_proxy_f2": best["combined_f2"],
         "official_btc_score": None, "corpus_promoted": False}
-    atomic_json(run / "status.json", status)
+    atomic_json(base_run / "status.json", status)
     return status

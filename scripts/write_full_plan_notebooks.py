@@ -125,20 +125,25 @@ def main():
     ])
     save("05_colab_supervised_training.ipynb", [
         md('''
-        # VietMedBridge — 05: Hard negatives → QLoRA → dev F2 chọn checkpoint
+        # VietMedBridge — 05: Source → nhãn đã duyệt → hard negatives → QLoRA → dev F2
 
         Giai đoạn supervised trong master §§13/27/39/56. **04 chạy pretrained và
         submit được ngay**, không cần chạy 05 trước khi có nhãn. Chọn runtime GPU
         mới; L4/A100 thuận tiện hơn cho training. Qwen8B nạp NF4, batch=1,
         gradient checkpointing/accumulation.
 
-        Hai file trong cùng Drive: data/labels/retrieval_train.json và
-        data/labels/retrieval_dev.json. Schema: {reviewed:true, split:"train" hoặc
-        "dev", exhaustive_chunks:true, queries:[{id:..., query:"...",
-        relevant_docs:[...], relevant_chunks:[{doc_id:...,chunk_text:"source đã review"}],
-        negative_categories:{child_id:"same_document_wrong_chunk|same_disease_wrong_intervention|same_entity_wrong_context|cross_language_false_friend|high_lexical_overlap"}}]}.
-        Khi gold không exhaustive, chỉ dùng negative_child_ids đã review. Category
-        thiếu giữ unclassified; không giả vờ đã kiểm semantic taxonomy.
+        Chưa có nhãn: notebook tự tách các nhóm source/đoạn trùng trước, chọn tối
+        đa 256 source samples train và 40 samples dev. Qwen 4B tạo câu hỏi VI
+        **chỉ cho train**, có exact evidence quote, checkpoint từng mẫu.
+        Dev để trống câu hỏi cho team viết độc lập trên nhóm source đã reserve.
+        Cùng bộ model 13.375B; không thêm teacher mới. Model outputs luôn là draft.
+
+        Notebook tải source_review.json để team duyệt: chỉ sửa review fields,
+        ACCEPT/REJECT + reviewer + query + exact evidence_quote. Dev yêu cầu
+        independently_written=true sau khi người review tự viết câu hỏi.
+        Lưu file đã duyệt về đúng review_path trên Drive và Run all lại.
+        Tối thiểu 32 train/8 dev được accept, không còn PENDING, mới xuất labels.
+        Không tự bật reviewed hoặc exhaustive_chunks cho model predictions.
 
         Train/dev tách theo query, IDs và nội dung không trùng 1.200 contest queries.
         Mine 1 positive + 7 negatives, ưu tiên top ranks, không lấy predictions làm gold.
@@ -148,19 +153,47 @@ def main():
         04 tự nhận selected_adapter/calibrated_policy trong namespace mới.
         '''),
         md("## 1. Bootstrap — CPU"),
-        code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json").replace("retrieval_runtime.json", "training_runtime.json")),
-        md("## 2. Chạy supervised workflow — GPU khi đã có nhãn hợp lệ"),
+        code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json")
+            .replace("retrieval_runtime.json", "training_runtime.json")
+            .replace("full-master-plan-strong-v2-15b", "full-master-plan-supervised-v3")),
+        md("## 2. Chuẩn bị nhãn — GPU chỉ khi còn thiếu draft train"),
         code('''
         import json
-        from vietmedbridge.training_workflow import run_training_workflow
-        TRAINING_STATUS = run_training_workflow(DATA_ROOT, CHECKOUT,
-            work_dir=WORK_DIR, run_name="stage-a-qlora-v2-15b")
-        print(json.dumps(TRAINING_STATUS, ensure_ascii=False, indent=2))
+        from vietmedbridge.training_data import prepare_training_data
+        PREPARATION = prepare_training_data(DATA_ROOT, CHECKOUT, max_new_samples=None)
+        print(json.dumps(PREPARATION, ensure_ascii=False, indent=2))
+        if PREPARATION["state"] == "WAITING_FOR_SOURCE_QUERY_REVIEW":
+            from google.colab import files
+            files.download(PREPARATION["review_path"])
+            print("Duyệt file, lưu lại đúng review_path trên Drive, rồi Run all lại.")
         '''),
         md('''
-        Không có nhãn: WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS, không tải
-        model để giả lập training. Gold/negative pool thiếu: giữ mining holds để
-        review. Ablation/embedding fine-tune/sharded dense có API trong package,
+        ## 3. Hybrid mining → duyệt hard negatives → QLoRA — GPU
+
+        Sau khi duyệt source queries, retriever chạy thật trên các query độc lập.
+        Chưa đủ positives/7 reviewed negatives mỗi query thì tải review.json chứa
+        source candidates/ranks. Team đánh POSITIVE/NEGATIVE/SKIP và reviewer;
+        category có thể để trống (unclassified). Không suy diễn missing = negative.
+        Lưu file về đúng review_path trên Drive rồi Run all lại. Vectors và scored
+        stages được reuse; dữ liệu training thay đổi có checkpoint namespace mới.
+        '''),
+        code('''
+        from vietmedbridge.training_workflow import run_training_workflow
+        if PREPARATION["state"] == "READY_FOR_HARD_NEGATIVE_REVIEW":
+            TRAINING_STATUS = run_training_workflow(DATA_ROOT, CHECKOUT,
+                work_dir=WORK_DIR, run_name="stage-a-qlora-v2-15b")
+        else:
+            TRAINING_STATUS = {"state": "WAITING_FOR_SOURCE_QUERY_REVIEW", "fine_tuned": False}
+        print(json.dumps(TRAINING_STATUS, ensure_ascii=False, indent=2))
+        if TRAINING_STATUS.get("review_path"):
+            from google.colab import files
+            files.download(TRAINING_STATUS["review_path"])
+        '''),
+        md('''
+        Dừng ở bước review nghĩa là cần nhãn do team duyệt; chưa có model fine-tune
+        hoặc F2 được chứng minh. Đã có code chọn adapter theo dev F2; independent
+        held-out test và official BTC score vẫn cần đo. Ablation/embedding
+        fine-tune/sharded dense có API trong package,
         hướng dẫn ở docs/FULL_PLAN.md. Sau khi chọn adapter hợp lệ, mở 04 và Run all;
         không chỉnh ACTION hoặc xóa run pretrained. Nhãn/config đổi cần run mới.
         '''),

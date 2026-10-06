@@ -29,11 +29,12 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
 5. **04 — Kiến trúc retrieval đầy đủ và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
    **Chọn GPU, chạy từ đầu.** Mặc định đọc `stage-a-data-v3-laodong`, candidate
    `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
-   representations duy nhất. Bản đầy đủ dùng **BGE-M3 + Qwen3-Embedding-8B**,
+   representations duy nhất. Bản hiện tại dùng **BGE-M3 + Qwen3-Embedding-0.6B**,
    BM25 VI/EN/ZH với PyVI/Jieba/soft medical fields → weighted RRF →
    **Qwen3-Reranker-8B** document/child MaxP → exact-source parent 512/640
    + token LCS dedup. Qwen3-4B dịch query, thêm PICO/subqueries/HyDE cho query
-   phức tạp khi qua guards. Hai model 8B dùng NF4, nạp lần lượt trên Colab.
+   phức tạp khi qua guards. Reranker 8B dùng NF4, các model nạp lần lượt trên Colab.
+   Tổng pretrained 13,375B; gate cộng thêm adapter và giữ tổng ≤15B.
    Tái sử dụng BGE vectors v1 đã kiểm; checkpoint vector/LLM/scored stage/query.
    **Run all mặc định chạy hết
    1.200 official queries** (`MAX_NEW_*=None`), validate source/schema rồi xuất
@@ -41,10 +42,14 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
    reference labels hay fine-tune trước lần submit pretrained đầu tiên (§§26/55).
    Khi Colab ngắt, mở lại runtime GPU và Run all cùng RUN_NAME để resume.
    Xem [hướng dẫn full plan](docs/FULL_PLAN.md).
-6. **05 — Supervised training, chỉ khi có reviewed train/dev labels:**
+6. **05 — Tạo draft từ source, duyệt nhãn và supervised training:**
    [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
-   Mining 1 positive + 7 negatives → QLoRA → dev NDCG/MRR → finalist F2 cutoff
-   → selected adapter cho 04. Hiện chưa có nhãn; Sếp chạy 04 pretrained trước.
+   Chọn GPU và Run all. Khi chưa có nhãn, Qwen 4B tạo draft train từ source;
+   dev query do team viết độc lập. Notebook xuất file review, giữ checkpoint.
+   Sau khi team duyệt source queries và hard negatives: mining 1 positive +
+   7 negatives → QLoRA → dev NDCG/MRR → finalist F2 cutoff → adapter cho 04.
+   Lưu file đã duyệt về đúng đường dẫn Drive rồi Run all để tiếp tục.
+   Xem [quy trình review và giới hạn bằng chứng](docs/FULL_PLAN.md).
 
 Ưu tiên hiện tại là thử đường chạy retrieval/submission trên candidate này trước,
 rồi tích hợp bản crawl 100k. Submission tìm trên corpus pilot nhỏ; score BTC chưa
@@ -59,7 +64,8 @@ Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
 03 validate/freeze, 04 retrieval/submission; 05 là training có điều kiện.
 00–03 chạy CPU; 04 cần GPU cho embeddings, query LLM và reranker.
-05 cần GPU khi đã có nhãn. Các model được nạp lần lượt.
+05 cần GPU để tạo draft train và chạy mining/QLoRA sau khi có nhãn đã duyệt.
+Các model được nạp lần lượt.
 Crawl baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION.
 Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
 chứng sau. `stage-a-v3` được giữ làm kết quả thí nghiệm, không là input mặc định của build.
@@ -86,7 +92,7 @@ Luồng chính 00–04 không yêu cầu chạy hai notebook này.
 
 Các notebook `01b–01g` cũ phục vụ retry/chẩn đoán/recovery đã được chuyển khỏi thư mục
 notebook đang dùng sang [`archive/notebooks/stage-a-1000-recovery/`](archive/notebooks/stage-a-1000-recovery/).
-Hiện tại Sếp dùng 00–04; nhóm notebook recovery sẽ được xem lại sau khi baseline
+Hiện tại Sếp dùng 00–05; nhóm notebook recovery sẽ được xem lại sau khi baseline
 đạt khoảng 1 triệu URL.
 
 Các notebook 02b/02c/02d của branch được giữ trong
@@ -165,9 +171,9 @@ Sinh lại notebook sau khi sửa cell source:
 
     python scripts/write_notebooks.py
 
-Sinh riêng notebook retrieval, không thay đổi 00–03:
+Sinh riêng notebook retrieval/training hiện tại, không thay đổi 00–03:
 
-    python scripts/write_retrieval_notebook.py
+    python scripts/write_full_plan_notebooks.py
 
 ## Phạm vi hiện tại
 
@@ -177,7 +183,8 @@ Gate cộng tổng các model và adapter, giới hạn ≤15B theo yêu cầu c
 Xem [cấu hình và cách chạy hiện tại](docs/FULL_PLAN.md); đây chưa phải xác nhận
 BTC về cách tính giới hạn tổng. Giữ DATA_ROOT, dùng run `stage-a-full-plan-v2-15b`.
 
-Đã có data pipeline và code baseline pretrained cho embedding/index/reranker/submission.
+Đã có data pipeline và code pretrained cho embedding/index/reranker/submission,
+source-to-query drafts, hai vòng review và supervised reranker workflow.
 GPU inference thực tế ở notebook 04 cần chạy trên Colab; chưa huấn luyện reranker
 và chưa triển khai scorer F2 chính thức. Child 180,
 overlap 40 và parent 512 token là các tham số khởi đầu cho thí nghiệm.
