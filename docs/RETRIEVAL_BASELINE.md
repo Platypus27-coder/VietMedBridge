@@ -1,11 +1,11 @@
-# Retrieval cascade v2 trên Colab — 06/10/2026
+# Retrieval cascade v2.1 trên Colab — 06/10/2026
 
 Mở [notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
 trong **runtime GPU mới**, chạy từ đầu. Bootstrap tự nâng retrieval code lock một
-lần lên workflow `document-child-parent-cascade-v2`, rồi ghim commit cho resume.
+lần lên workflow `document-child-parent-cascade-v2.1`, rồi ghim commit cho resume.
 Các notebook data 00–03 và candidate đã freeze không cần chạy lại.
 
-Mặc định `RUN_NAME=stage-a-retrieval-v2`, candidate team cũ với 864 documents,
+Mặc định `RUN_NAME=stage-a-retrieval-v2.1`, candidate team cũ với 864 documents,
 9.076 children và 8.760 unique dense inputs. `EMBEDDING_CACHE_RUN=stage-a-retrieval-v1`
 chỉ đọc vectors cũ. Reuse kiểm exact inputs/order, pinned BGE model/budget,
 pooling/precision, config/manifest/part hashes và done markers. Nếu cache hoàn
@@ -81,6 +81,40 @@ Chưa triển khai HyDE/PICO/subqueries, language analyzer/alias glossary, reran
 fine-tune/hard-negative mining, embedding fine-tune hoặc sharded/ANN full-scale.
 Những phần này cần ablation/labels/source QA; không gọi “best of Stage1/2” là đã
 chứng minh tốt nhất. Pilot vẫn giới hạn 2.000 documents/50.000 children.
+
+## Đối chiếu plan và sửa validator — 06/10/2026
+
+Kết luận: **đã triển khai lõi pilot theo plan, chưa hoàn tất 100% master plan hoặc
+chứng minh hệ thống không còn lỗi**. Master §26 cũng ghi ví dụ cấu hình là baseline,
+không phải final config. Tests kỹ thuật không thay semantic/model quality gates.
+
+- §§7.5, 7.8–7.9: original multilingual dense, EN/ZH sparse, weighted RRF,
+  document rerank bằng title+top-2 passages, local child retrieval và per-doc quota
+  đã có. BM25 VI vẫn thiếu bilingual medical alias fields/word segmentation.
+- §§7.6, 7.10–7.13: translation JSON, original VI reranking, parent source và
+  token LCS dedup đã có. MaxP được bật cho child quá pair budget, khác ví dụ
+  baseline §26 tắt MaxP; đây là lựa chọn triển khai cần GPU ablation, không phải
+  cải thiện F2 đã được chứng minh. Auxiliary translated rerank scores chưa có.
+- §7.14: cutoff API/sweep đã có, nhưng margins/floors mặc định chưa được calibrate;
+  chưa có reviewed dev set độc lập, official scorer parity hoặc relevance gate.
+- HyDE/second dense/PICO là các hướng thử nghiệm được plan gọi optional/ablate;
+  chưa triển khai không có nghĩa phải bật chúng trước baseline. Parent length
+  sweep, hard negatives/reranker fine-tune, alias resolution benchmark, source
+  QA và sharded/ANN full-scale vẫn là công việc còn lại.
+
+Rà code tái hiện được bug: query `Tôi không dung nạp metformin`, entities chứa
+`metformin`, nhưng bản dịch thay thành glipizide vẫn pass validator v2 vì nó chỉ
+kiểm regex số/acronym và negative cues. V2.1 kiểm Latin/ASCII entities bằng word
+boundaries trong từng branch, bổ sung intolerance cue và siết prompt. Regression
+test đã fail trước sửa, pass sau sửa; nhóm retrieval/cascade **24 tests pass**.
+Entities model bỏ sót và các điều kiện ngữ nghĩa ngoài cues vẫn cần human review;
+không tuyên bố deterministic validator chứng nhận bản dịch y khoa đúng hoàn toàn.
+
+Workflow lock đổi sang v2.1, default run `stage-a-retrieval-v2.1`; không trộn
+checkpoints validator cũ với mới. Vectors v1 vẫn reuse qua kiểm hash/policy.
+Không sửa/xóa raw, source, official IDs, frozen candidate hay kết quả run v1/v2.
+Chưa chạy Qwen/BGE cascade mới trên GPU, chưa tính F2 với nhãn thật. Chỉ chạy
+canary 25 queries trước; source-span/schema pass không tự duyệt full-scale run.
 
 ## Lưu triển khai v1 và audit artifact thực
 

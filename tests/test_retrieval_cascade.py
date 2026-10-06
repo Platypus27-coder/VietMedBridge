@@ -122,6 +122,24 @@ def test_translation_resume_and_tamper(tmp_path):
         cached_translations(queries, {}, tmp_path)
 
 
+def test_translation_latin_entities_cannot_be_dropped_or_substituted():
+    query = "Tôi không dung nạp metformin"
+    value = {"original_vi":query, "entities":["metformin"], "constraints":["không dung nạp"],
+             "query_en":"glipizide intolerance, not tolerated",
+             "query_zh":"格列吡嗪不耐受"}
+    variants = validate_variants(query, value)
+    assert variants["query_en"] is None and variants["query_zh"] is None
+    assert "LATIN_ENTITY_MISSING:metformin" in variants["rejections"]["en"]
+    assert "LATIN_ENTITY_MISSING:metformin" in variants["rejections"]["zh"]
+    value.update(query_en="Metformin intolerance, not tolerated", query_zh="metformin 不耐受")
+    variants = validate_variants(query, value)
+    assert variants["query_en"] == value["query_en"] and variants["query_zh"] == value["query_zh"]
+    value["query_en"] = "No metformin side effects"
+    variants = validate_variants(query, value)
+    assert variants["query_en"] is None
+    assert any(reason.startswith("CONSTRAINT_CUE_MISSING:không dung nạp") for reason in variants["rejections"]["en"])
+
+
 def test_cascade_document_aliases_and_stage_resume(tmp_path, catalog):
     index, queries, qm, qv, translations, config = pipeline(tmp_path, catalog)
     rows, _ = index.document_candidates(queries[0]["query"], qv[0], translations[0]["variants"], config)

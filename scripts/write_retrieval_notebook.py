@@ -8,7 +8,7 @@ RETRIEVAL_BOOTSTRAP = (BOOTSTRAP
     .replace('.[notebook]', '.[notebook,retrieval]')
     .replace("Giữ cùng DATA_ROOT trong cả bốn notebook.", "Giữ DATA_ROOT đã dùng ở notebook 00–03.")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        '''RETRIEVAL_WORKFLOW_API = "document-child-parent-cascade-v2"
+        '''RETRIEVAL_WORKFLOW_API = "document-child-parent-cascade-v2.1"
 upgrade = lock.get("workflow_api") != RETRIEVAL_WORKFLOW_API
 reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"''')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -44,6 +44,8 @@ def main():
         mới; `stage-a-retrieval-v1` chỉ được đọc để tái sử dụng BGE vectors đã xác nhận.
         Nếu cache không có/không đủ thì encode trong run mới. Cache sai checksum,
         thứ tự hoặc policy sẽ báo lỗi, không tự dùng lại. Không sửa/xóa manifest.
+        V2.1 siết validator tên thuốc/Latin entities và intolerance; dùng namespace
+        mới để không trộn translation/score checkpoints đã sinh bằng validator v2.
         MAX_NEW_* có thể giới hạn một phiên; None chạy hết. Để chạy canary 25 queries,
         đặt MAX_NEW_TRANSLATIONS=25 và MAX_NEW_QUERIES=25. Các phiên sau tăng dần
         hoặc đặt None; query đã hoàn tất được giữ lại. Đổi policy cần RUN_NAME mới.
@@ -59,7 +61,7 @@ def main():
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
-        RUN_NAME = "stage-a-retrieval-v2"
+        RUN_NAME = "stage-a-retrieval-v2.1"
         EMBEDDING_CACHE_RUN = "stage-a-retrieval-v1"
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
@@ -141,7 +143,7 @@ def main():
 
         Qwen3-4B-Instruct-2507, public weights/pinned revision, khoảng 4B parameters.
         Nạp fp16 từng query sau khi giải phóng embedding model. Dịch toàn bộ câu hỏi,
-        giữ original/entities/constraints; kiểm số, acronym, dấu so sánh và vài constraint
+        giữ original/entities/constraints; kiểm số, acronym, Latin entities, dấu so sánh và vài constraint
         cues. Branch không đạt kiểm tra bị tắt; original VI vẫn dùng dense và sparse.
         Các kiểm tra này chưa bảo đảm dịch đúng ngữ nghĩa. Raw output và rejection
         reasons được giữ theo từng query để team review. Chưa có HyDE/subquery.

@@ -36,6 +36,15 @@ score. Không dùng kết quả CPU giả lập để chứng minh chất lượ
 Chưa đo Qwen translation hoặc cascade reranker thực trên Colab, chưa có BTC scorer/
 labels. Không tuyên bố kiến trúc mới có F2 tốt hơn hoặc đã đạt best configuration.
 
+### Rà theo plan, validator v2.1
+
+Tái hiện regression fail khi original có `metformin` trong `entities` nhưng bản
+dịch thay thuốc khác vẫn pass. Sau sửa kiểm Latin entities/word boundaries và
+intolerance cue, **24 retrieval/cascade tests pass**. Notebook schema/syntax/
+empty-output checks cũng pass. Namespace/lock v2.1 không reuse translation/
+score checkpoints từ validator v2; cache vectors v1 giữ nguyên. Đây là validation
+CPU, không phải semantic translation benchmark/GPU inference mới.
+
 ## Review và merge branch Lao Động ngày 05/10/2026
 
 Đã review đến commit `48a5479`: article adapter và cookie recovery Lao Động,
