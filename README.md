@@ -28,9 +28,12 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy retrieval
 5. **04 — Retrieval baseline và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
    **Chọn GPU, chạy từ đầu.** Mặc định đọc `stage-a-data-v3-laodong`, candidate
    `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
-   representations duy nhất. BGE-M3 → BM25 + FAISS → BGE reranker → parent chunks
-   → ZIP chứa một JSON cho đủ 1.200 query. Có checkpoint từng lô embedding và từng
-   query, code lock riêng; không cần crawl/chia chunk lại. Xem [hướng dẫn 04](docs/RETRIEVAL_BASELINE.md).
+   representations duy nhất. Bản v2 dùng Qwen3-4B dịch query VI→EN/ZH, BGE-M3
+   dense MaxP + BM25 đa ngôn ngữ → weighted RRF → document rerank → local child
+   rerank/MaxP → exact parent + token LCS dedup. Tái sử dụng vectors v1 đã kiểm;
+   checkpoint translation/document/child/query riêng. Chạy canary 25 query trước
+   bằng MAX_NEW_TRANSLATIONS=25, MAX_NEW_QUERIES=25, rồi đặt None để chạy hết.
+   Xem [hướng dẫn 04](docs/RETRIEVAL_BASELINE.md).
 
 Ưu tiên hiện tại là thử đường chạy retrieval/submission trên candidate này trước,
 rồi tích hợp bản crawl 100k. Submission tìm trên corpus pilot nhỏ; score BTC chưa
@@ -44,7 +47,8 @@ Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích
 
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
 03 validate/freeze, 04 retrieval/submission. 00–03 chạy CPU; 04 cần GPU cho embedding
-và reranker. Crawl baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION.
+và reranker; bản 04 mới cần GPU cho LLM dịch query. Các model được nạp lần lượt.
+Crawl baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION.
 Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
 chứng sau. `stage-a-v3` được giữ làm kết quả thí nghiệm, không là input mặc định của build.
 

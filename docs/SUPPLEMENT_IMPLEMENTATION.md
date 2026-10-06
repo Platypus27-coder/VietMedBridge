@@ -52,6 +52,20 @@ PROMOTED registry/rollback cho release index chưa có. Candidate/snapshot manif
 và raw attempts hiện hỗ trợ chọn lại dữ liệu cũ để debug/rebuild. Không có full-run
 forecast, automatic per-shard drift kill-switch, bulk PMC/PubMed adapters hoặc OCR.
 
+## Bổ sung retrieval v2 — 06/10/2026
+
+Notebook 04 bổ sung document→child→parent cascade, conservative Qwen 4B query
+translation, content-language sparse routing, weighted RRF, per-doc quota,
+sliding MaxP và token LCS dedup. Hai rerank stages giữ toàn bộ pairs/scores với
+checksum/completeness và resume; reuse embeddings v1 qua inputs/policy/part checks.
+Scorer local và cutoff sweep đã có theo plan, nhưng chưa chứng minh tương thích
+scorer BTC hoặc chất lượng F2 vì thiếu official labels/scorer. Chưa có semantic
+translation benchmark, bilingual alias glossary hay Lucene language analyzers.
+
+Full-scale indexing, selective encoding, ANN, canary relevance gates, train/dev
+hard negatives/fine-tune, release PROMOTED và human QA vẫn chưa hoàn tất. Chạy
+Colab canary trước khi hoàn tất bản pilot; source integrity không thay relevance.
+
 ## Điều chỉnh so với ví dụ trong supplement
 
 Shard mặc định 512 records và tối đa 512 MiB JSONL trước nén. Giữ batch fetch

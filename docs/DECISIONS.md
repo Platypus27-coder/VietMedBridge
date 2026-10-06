@@ -21,6 +21,40 @@ submission evidence phù hợp cho Stage 3.
 Hai repo là nguồn kỹ thuật; không cài chúng thành dependency hoặc chỉnh sửa chúng.
 Master plan Stage 3 quyết định contract/metric, supplement bổ sung QA và scale gates.
 
+## Retrieval cascade v2 — 06/10/2026
+
+Đối chiếu implementation, không chỉ README:
+
+- Stage 1 MSC-AI `services/vector_store/hybrid.py`, `index_builder.py`: weighted
+  rank fusion, source/model/tokenizer cache manifests. Stage 1 Nguyễn Văn Nghiêm
+  `retrieval_bm25s.py`: BM25 với Lucene-style IDF và top-k/threshold sweep.
+  Stage 1 Trần Thanh Tú `retrieval_cutoff.py`: absolute floor và relative margin.
+  V2 dùng positive-IDF postings BM25, weighted RRF và optional raw-score cutoffs;
+  không sao chép synthetic legal QA/Điều/citation rules sang y sinh.
+- Stage 2 Vilamiu `retrieval/cascade_reranked.py`: summary → detail cascade,
+  equal detail quota cho mỗi parent. V2 dùng title + top-2 retrieval-hit passages
+  để rerank documents, quota 5 children cho mỗi document trong top-30.
+- Stage 2 ARCANE `fusion.py`, `rerank.py`,
+  `scripts/validate_rerank_scores.py`: shared representation, cùng scored pool
+  cho ablation, kiểm candidate-score completeness và pair/model/prompt hashes.
+  V2 giữ toàn bộ document/child pair inputs + scores, checksum từng stage;
+  có `rerank_fusion='rrf'` để benchmark so với raw reranker order.
+  Không coi fusion thắng ở table retrieval là bằng chứng nó sẽ thắng Stage 3.
+
+Master plan §§7.5–7.14, §26 và §55 quyết định adaptation: original multilingual
+dense + additive conservative EN/ZH translations, weighted document retrieval,
+document → child → parent, same-doc token LCS/union >=0.8 dedup. Sliding MaxP
+tránh mất bằng chứng ở tail khi query dài. Qwen3-4B chỉ dịch query; không tạo
+source/submission text. Model pin/public/date/parameter evidence được ghi trong
+`configs/query_translation_model_manifest.json`; inference thực cần Colab.
+
+Scorer local áp dụng F2 theo từng query rồi macro, relevant chunk phải cùng doc
+và LCS >=40% reference BGE tokens. Đây là proxy từ plan; thiếu normalization/
+implementation chính thức của BTC nên không tự gán nhãn “official compatible”.
+Cutoff calibration chỉ nhận reviewed dev labels, không tune trên contest/test,
+không tự đổi submission bằng best dev result. HyDE, PICO/subqueries, reranker/
+embedding fine-tune và full-scale ANN vẫn cần dữ liệu/ablation ở bước sau.
+
 ## Tách source và search formatting
 
 Normalization hoặc thêm title/heading giúp search nhưng thay đổi chuỗi nguồn.

@@ -1,0 +1,20 @@
+{
+  "retrieval_api": 2,
+  "dense": {"model_id": "BAAI/bge-m3", "revision": "5617a9f61b028005a4858fdac845db406aefb181", "max_length": 512},
+  "reranker": {"model_id": "BAAI/bge-reranker-v2-m3", "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e", "max_length": 512},
+  "translation": {"model_id": "Qwen/Qwen3-4B-Instruct-2507", "revision": "cdbee75f17c01a7cc42f958dc650907174af0554", "max_input_tokens": 1536, "max_new_tokens": 1024},
+  "embedding": {"part_size": 256, "batch_size": 16},
+  "retrieval": {
+    "doc_candidate_k": 200, "sparse_top_k": 200, "detail_doc_k": 30,
+    "children_per_doc": 5, "summary_children": 2, "rrf_k": 60,
+    "dense_weight": 1.0, "vi_weight": 0.8, "en_weight": 0.6, "zh_weight": 0.6,
+    "rerank_fusion": "reranker", "retrieval_share": 0.5,
+    "doc_min_k": 3, "doc_top_k": 10, "chunk_min_k": 2, "chunk_top_k": 8,
+    "max_chunks_per_doc": 2, "dedup_threshold": 0.8,
+    "doc_score_margin": null, "chunk_score_margin": null,
+    "doc_score_floor": null, "chunk_score_floor": null, "window_overlap_tokens": 32
+  },
+  "pilot_limits": {"max_documents": 2000, "max_children": 50000},
+  "expected_queries": 1200,
+  "scope": "plan-aligned pretrained cascade pilot; cutoffs untuned without reviewed dev labels"
+}

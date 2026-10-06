@@ -3,7 +3,38 @@
 Kiểm chứng retrieval baseline ngày 05/10/2026 nằm trong
 [RETRIEVAL_BASELINE.md](RETRIEVAL_BASELINE.md): 21 tests liên quan pass, candidate
 thật được đọc bằng tokenizer pinned và notebook 04 được smoke test bằng model
-giả. GPU inference và official score vẫn cần chạy trên Colab/hệ thống BTC.
+giả. Artifact inference GPU v1 thực của Sếp đã được audit riêng; chưa có official
+score. Không dùng kết quả CPU giả lập để chứng minh chất lượng GPU.
+
+## Retrieval cascade v2 — 06/10/2026
+
+- Bộ regression CPU: **132 passed, 9 skipped**; skips thuộc browser/Crawl4AI
+  integration tùy chọn. Sau khi siết cache fingerprint/label schema, nhóm
+  retrieval/cascade chạy lại **23 passed**, gồm mở lại index sau JSON roundtrip
+  với IDs khác độ dài để kiểm resume qua runtime mới.
+- Kiểm translation schema/numbers/acronyms/constraint cues, partial translation
+  canary resume cùng signature, document/child stage disconnect/reuse, giữ aliases,
+  quotas, quarantine ledger, source-preserving export và checksum tampering.
+- Posting BM25/FAISS là implementation thực trên CPU; reranker/translator là
+  test doubles. Test LCS so với dynamic programming, same-doc-only relevance,
+  dedup trước precision, macro F2 theo từng query, dev-only cutoff sweep và recall.
+- Dữ liệu thật: đọc lại frozen candidate 864 documents/9.076 children/8.760 units
+  cùng matrices BGE-M3 từ Colab (8.760×1.024 và 1.200×1.024). Canary 3 queries
+  kiểm **1.040 reranker pairs**, parent spans/IDs/ZIP và resume zero model calls.
+  Không inference GPU mới, không đánh giá F2/relevance bằng các điểm giả lập.
+- Kiểm MaxP bằng query thật dài nhất với **toàn 9.076 children**: cặp tokenized
+  dài nhất **512**, không vượt passage budget. Tokenizer BGE pinned thực dùng
+  local cache; không tải model weights.
+- Source holds: 9 documents (4 encoded payload + 5 article→homepage redirects)
+  được ghi ledger và giữ khỏi retrieval. Frozen sources/IDs không bị xóa. Còn
+  855 eligible docs; content-language routing cho 429 VI/426 ZH, **0 EN** trong
+  corpus này. Đây là coverage diagnostic, không phải chất lượng toàn corpus.
+- 7 notebook active/optional qua nbformat, Python syntax và empty-output checks;
+  chỉ regenerate notebook 04. Evidence CPU thật + test doubles nằm local ignored
+  `artifacts/retrieval-cascade-check/summary.json`.
+
+Chưa đo Qwen translation hoặc cascade reranker thực trên Colab, chưa có BTC scorer/
+labels. Không tuyên bố kiến trúc mới có F2 tốt hơn hoặc đã đạt best configuration.
 
 ## Review và merge branch Lao Động ngày 05/10/2026
 

@@ -26,9 +26,9 @@ def validate_submission(records, queries, catalog, report, *, expected_count=120
             raise ValueError("Prediction belongs to another query text.")
         seen.add(p["id"])
         docs, chunks = p["relevant_docs"], p["relevant_chunks"]
-        if not isinstance(docs, list) or not docs or any(type(d) is not int or d not in catalog.documents for d in docs) or len(set(docs)) != len(docs):
+        if not isinstance(docs, list) or any(type(d) is not int or d not in catalog.documents for d in docs) or len(set(docs)) != len(docs):
             raise ValueError("Selected documents need unique official integer IDs.")
-        if not isinstance(chunks, list) or not chunks or len(chunks) != len(record["provenance"]):
+        if not isinstance(chunks, list) or len(chunks) != len(record["provenance"]):
             raise ValueError("Selected chunks need matching source provenance.")
         selected_parents = set()
         for chunk, origin in zip(chunks, record["provenance"], strict=True):

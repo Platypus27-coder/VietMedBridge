@@ -1,4 +1,93 @@
-# Baseline retrieval trên Colab
+# Retrieval cascade v2 trên Colab — 06/10/2026
+
+Mở [notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
+trong **runtime GPU mới**, chạy từ đầu. Bootstrap tự nâng retrieval code lock một
+lần lên workflow `document-child-parent-cascade-v2`, rồi ghim commit cho resume.
+Các notebook data 00–03 và candidate đã freeze không cần chạy lại.
+
+Mặc định `RUN_NAME=stage-a-retrieval-v2`, candidate team cũ với 864 documents,
+9.076 children và 8.760 unique dense inputs. `EMBEDDING_CACHE_RUN=stage-a-retrieval-v1`
+chỉ đọc vectors cũ. Reuse kiểm exact inputs/order, pinned BGE model/budget,
+pooling/precision, config/manifest/part hashes và done markers. Nếu cache hoàn
+tất, không nạp embedding model. Provenance giữ đúng producer/runtime cũ.
+Không bỏ qua cache corruption hoặc tự gán vectors cũ vào model identity mới.
+
+Luồng mới kế thừa các phần phù hợp từ Stage 1/2; mapping code cụ thể ở
+[DECISIONS](DECISIONS.md). Tham số lấy từ master plan để bắt đầu benchmark,
+chưa phải cấu hình đã tối ưu cho ViBioMIR:
+
+1. **CPU/GPU khi cần encode:** BGE-M3 vectors cho original VI query và children.
+   FAISS exact cosine trên pilot; dense child MaxP gộp lên documents.
+2. **GPU:** Qwen3-4B-Instruct-2507 dịch toàn query sang EN/ZH dạng JSON gồm
+   original/entities/constraints. Giữ raw output/rejections, kiểm số/acronym/
+   comparator và một số constraint cues. Nhánh lỗi bị tắt, original dense/VI
+   giữ lại. Surface checks không chứng nhận dịch đúng ngữ nghĩa.
+3. **CPU:** VI/EN/ZH BM25 postings, positive Lucene-style IDF, CJK unigram/bigram.
+   Language suy từ source content, bỏ phụ thuộc declared labels sai của build
+   cũ; unknown đi vào cả ba sparse branches. Weighted RRF lấy 200 documents.
+   VI vẫn dùng Unicode syllable/word tokens; chưa phải Vietnamese word segmenter
+   hoặc hệ Lucene language analyzers. Chưa thêm medical bilingual alias glossary.
+4. **GPU:** BGE rerank mỗi document bằng title + top-2 child hits, chia passage
+   budget công bằng. Giữ top-30 documents; local dense + BM25 + global dense
+   rank chọn tối đa 5 children/document. Rerank original VI query với sliding
+   MaxP khi passage dài. Model chỉ cho điểm, không sinh evidence.
+5. **CPU:** Expand exact frozen parent; same-document BGE token LCS/union >=0.8
+   dedup. Caps mặc định 10 docs/8 chunks, tối đa 2 chunks/doc. Optional score
+   floors/margins chưa bật. Raw negative logits không tự có nghĩa irrelevant.
+6. **CPU, khi có reviewed reference labels:** local plan-derived Doc/Chunk macro F2,
+   40% reference LCS relevance. Notebook chỉ đánh giá, không tune contest queries.
+   Đây **chưa phải scorer BTC**. Không có labels thì NOT_EVALUATED, không fake
+   nhãn/F2, không promote. API top-k/margin sweep riêng chỉ nhận reviewed dev
+   labels trên dev query set độc lập đã chấm candidates; không tự áp dụng policy.
+
+Embedding, LLM và reranker được nạp lần lượt để tiết kiệm VRAM. Qwen có
+4.022.468.096 parameters, public Apache-2.0 weights; pinned revision có trước
+01/08/2026. Evidence nằm trong `configs/query_translation_model_manifest.json`,
+kiểm từ [model API](https://huggingface.co/api/models/Qwen/Qwen3-4B-Instruct-2507)
+và [model card](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507). Đây là kiểm
+theo plan nội bộ, chưa xác nhận BTC chấp nhận cấu hình. Chưa fine-tune model.
+
+## Chạy canary và resume
+
+Đặt `MAX_NEW_TRANSLATIONS=25`, `MAX_NEW_QUERIES=25` ở cell 2 để kiểm một lượt nhỏ.
+Notebook chạy retrieval cho phần prefix queries đã dịch, lưu IN_PROGRESS và
+dừng trước export. Sau khi xem translations/rankings/pairs/runtime evidence,
+đặt hai biến thành None và chạy lại từ đầu cùng RUN_NAME để hoàn tất 1.200 query.
+MAX_NEW_* giới hạn số query **mới mỗi phiên**; những query đã xong không tính lại.
+
+Drive lưu `translations/query-<id>.done.json`, `queries/query-<id>-documents.done.json`,
+`queries/query-<id>-children.done.json`, `queries/query-<id>.done.json`. Hai scored
+stages giữ TẤT CẢ pair inputs và finite scores, kiểm completeness và hashes trước
+resume. Ngắt sau document stage không làm rerank lại stage đó. Cache translation
+đầy đủ/hợp lệ được reuse mà không nạp LLM lại. Chỉ export khi đủ official queries.
+Scored pairs chiếm thêm dung lượng Drive, GPU work lớn hơn v1; chưa đo throughput
+Colab thực của cascade mới. Có thể giảm inference batch, không đổi policy khi resume.
+
+Để benchmark fusion theo Stage 2, chạy namespace mới với `rerank_fusion='rrf'` và
+retrieval_share khác; không đổi policy trong một run đã có checkpoints. Labels file
+tùy chọn `data/labels/retrieval_reference.json` có schema hướng dẫn trong notebook;
+chỉ đánh giá outputs hiện tại. Cutoff sweep cần dev query set độc lập và held-out
+validation ở namespace riêng; không lấy 1.200 contest queries làm tập tune.
+
+## Quality holds và giới hạn còn lại
+
+`index/quarantine.json` ghi homepage redirects, error pages và nguồn có encoded
+payload bị giữ khỏi retrieval. Đây là hold để review/re-extract, không xóa source,
+official IDs hoặc sửa candidate manifest. Docs ngắn/LOW quality không tự bị loại.
+Sidebar, title/body mismatch và template placeholders của build cũ có thể vẫn
+còn; retrieval tốt hơn không sửa được nguồn crawl/parse sai hoặc thiếu coverage.
+
+Chưa triển khai HyDE/PICO/subqueries, language analyzer/alias glossary, reranker
+fine-tune/hard-negative mining, embedding fine-tune hoặc sharded/ANN full-scale.
+Những phần này cần ablation/labels/source QA; không gọi “best of Stage1/2” là đã
+chứng minh tốt nhất. Pilot vẫn giới hạn 2.000 documents/50.000 children.
+
+## Lưu triển khai v1 và audit artifact thực
+
+Các phần bên dưới mô tả **v1**, giữ để đối chiếu với Colab run Sếp đã chạy;
+default v2 mới được mô tả ở trên. Audit v1 không phải phép đo chất lượng v2.
+
+### Baseline retrieval v1 trên Colab
 
 Mở [notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb),
 chọn GPU trong Runtime > Change runtime type rồi chạy từ đầu. Bootstrap tự clone
