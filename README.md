@@ -6,7 +6,8 @@ trong Google Drive.
 
 ## Quy trình Colab đã chốt
 
-Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy retrieval baseline.
+Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
+Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-end tới submission.
 Đã có candidate frozen thì mở thẳng 04. Không chạy các notebook
 01b–01g trong lượt crawl baseline quy mô lớn.
 
@@ -31,8 +32,11 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy retrieval
    representations duy nhất. Bản v2 dùng Qwen3-4B dịch query VI→EN/ZH, BGE-M3
    dense MaxP + BM25 đa ngôn ngữ → weighted RRF → document rerank → local child
    rerank/MaxP → exact parent + token LCS dedup. Tái sử dụng vectors v1 đã kiểm;
-   checkpoint translation/document/child/query riêng. Chạy canary 25 query trước
-   bằng MAX_NEW_TRANSLATIONS=25, MAX_NEW_QUERIES=25, rồi đặt None để chạy hết.
+   checkpoint translation/document/child/query riêng. **Run all mặc định chạy hết
+   1.200 official queries** (`MAX_NEW_*=None`), validate source/schema rồi xuất
+   `submission.zip`, manifest và file ghi điểm BTC. Không cần ACTION, đủ full corpus,
+   reference labels hay fine-tune trước lần submit pretrained đầu tiên (§§26/55).
+   Khi Colab ngắt, mở lại runtime GPU và Run all cùng RUN_NAME để resume.
    Xem [hướng dẫn 04](docs/RETRIEVAL_BASELINE.md).
 
 Ưu tiên hiện tại là thử đường chạy retrieval/submission trên candidate này trước,

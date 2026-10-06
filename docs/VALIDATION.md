@@ -6,6 +6,27 @@ thật được đọc bằng tokenizer pinned và notebook 04 được smoke te
 giả. Artifact inference GPU v1 thực của Sếp đã được audit riêng; chưa có official
 score. Không dùng kết quả CPU giả lập để chứng minh chất lượng GPU.
 
+## End-to-end competition pilot — 06/10/2026
+
+- **137 tests passed, 9 skipped** trong regression CPU. Skips thuộc browser/
+  Crawl4AI tùy chọn; không tải model weights hoặc chạy inference GPU local.
+- Test mới đi qua 1.200 query IDs không liên tục: embedding, FAISS/BM25 thực,
+  translation, document/child rerank, parent output và ZIP. Encoder/translator/
+  reranker dùng test doubles; predictions này không dùng submit BTC.
+- Ngắt sau 17 queries rồi resume đủ 1.200: không tính lại translations hoặc
+  scored stages hoàn tất. Export từ run chưa đủ query bị từ chối.
+- Binding yêu cầu đúng master plan, hash frozen catalog/query set/config;
+  plan khác hoặc thay nội dung plan trong cùng run bị từ chối. Notebook mặc
+  định MAX_NEW_*=None, giữ tất cả official queries và kiểm ZIP hash trước download.
+- ZIP chỉ có `results.json` ở root, CRC/schema/IDs/exact source pass. Export
+  lặp lại cùng predictions giữ ZIP hash, feedback đã ghi không bị reset; feedback
+  của ZIP khác bị từ chối. Thiếu hoặc hỏng optional labels không chặn ZIP hợp lệ.
+- Cả 7 notebook active/optional qua nbformat, Python syntax và empty-output
+  checks; notebook 04 hiện có 17 cells và không phát sinh notebook phụ.
+- Đây là kiểm kỹ thuật end-to-end trên CPU. Chưa có lượt Qwen/BGE cascade mới
+  chạy thật trên Colab, chưa upload ZIP mới hoặc nhận điểm BTC. Run GPU v1 cũ
+  giữ evidence riêng; không được gán thành kết quả của workflow mới.
+
 ## Retrieval cascade v2 — 06/10/2026
 
 - Bộ regression CPU: **132 passed, 9 skipped**; skips thuộc browser/Crawl4AI

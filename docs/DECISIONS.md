@@ -55,6 +55,20 @@ Cutoff calibration chỉ nhận reviewed dev labels, không tune trên contest/t
 không tự đổi submission bằng best dev result. HyDE, PICO/subqueries, reranker/
 embedding fine-tune và full-scale ANN vẫn cần dữ liệu/ablation ở bước sau.
 
+## End-to-end trên candidate hiện có
+
+Master plan `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md` là nguồn
+chính. §§26/55 cho phép bắt đầu bằng pretrained baseline; fine-tune/hard negatives
+ở giai đoạn có train/dev gold đủ. Theo yêu cầu lấy điểm sớm, notebook 04 mặc định
+chạy hết 1.200 official queries trên candidate hiện có rồi xuất submission ZIP;
+không chờ full corpus, import 100k, reviewed labels hay canary bắt buộc.
+
+Run contract gắn hash plan/data/queries/config với run. Export và readiness được
+ghi trước đánh giá proxy tùy chọn để file nhãn thiếu/lỗi không chặn pilot.
+ZIP có metadata ổn định khi export lại cùng predictions; score feedback gắn ZIP
+hash và giữ nguyên khi resume. Chỉ ghi score thật sau upload Dashboard BTC;
+không coi schema/source validation là đã đạt relevance hoặc promote corpus.
+
 ## Tách source và search formatting
 
 Normalization hoặc thêm title/heading giúp search nhưng thay đổi chuỗi nguồn.

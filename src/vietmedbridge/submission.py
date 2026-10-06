@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .artifacts import atomic_json, digest_json, local_workspace, publish_file
 
@@ -65,7 +65,11 @@ def export_submission(records, queries, catalog, report, output_dir, *, evidence
         result_path.write_text(payload, encoding="utf-8")
         zip_path = local / "submission.zip"
         with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as archive:
-            archive.write(result_path, arcname="results.json")
+            # Resume must preserve the artifact hash used to bind external BTC scores.
+            entry = ZipInfo("results.json", date_time=(1980, 1, 1, 0, 0, 0))
+            entry.compress_type = ZIP_DEFLATED
+            entry.external_attr = 0o600 << 16
+            archive.writestr(entry, payload.encode("utf-8"))
         with ZipFile(zip_path) as archive:
             if archive.namelist() != ["results.json"] or json.loads(archive.read("results.json")) != predictions or archive.testzip() is not None:
                 raise ValueError("Submission ZIP must contain exactly one valid JSON at its root.")

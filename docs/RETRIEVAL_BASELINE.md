@@ -1,8 +1,14 @@
-# Retrieval cascade v2.1 trên Colab — 06/10/2026
+# End-to-end competition pilot trên Colab — 06/10/2026
+
+Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](../R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md),
+đặc biệt baseline §§26/55. Supplement bổ sung QA; plan data v2 của team không
+thay thế master plan. Mục tiêu hiện tại: dùng candidate đã có, chạy pretrained
+end-to-end, nộp đủ 1.200 query để lấy điểm BTC; không chờ full corpus hoặc import
+100k. Fine-tune/hard negatives cần train/dev gold độc lập ở giai đoạn sau.
 
 Mở [notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
 trong **runtime GPU mới**, chạy từ đầu. Bootstrap tự nâng retrieval code lock một
-lần lên workflow `document-child-parent-cascade-v2.1`, rồi ghim commit cho resume.
+lần lên workflow `competition-pilot-e2e-v1`, rồi ghim commit cho resume.
 Các notebook data 00–03 và candidate đã freeze không cần chạy lại.
 
 Mặc định `RUN_NAME=stage-a-retrieval-v2.1`, candidate team cũ với 864 documents,
@@ -34,7 +40,10 @@ chưa phải cấu hình đã tối ưu cho ViBioMIR:
 5. **CPU:** Expand exact frozen parent; same-document BGE token LCS/union >=0.8
    dedup. Caps mặc định 10 docs/8 chunks, tối đa 2 chunks/doc. Optional score
    floors/margins chưa bật. Raw negative logits không tự có nghĩa irrelevant.
-6. **CPU, khi có reviewed reference labels:** local plan-derived Doc/Chunk macro F2,
+6. **CPU:** validate đủ 1.200 IDs, exact source slices và checkpoints, xuất ZIP
+   chỉ chứa `results.json` ở root. Lưu readiness/manifest và file ghi điểm BTC
+   riêng ngoài ZIP. Export không cần reference labels.
+7. **CPU, khi có reviewed reference labels, sau export:** local plan-derived Doc/Chunk macro F2,
    40% reference LCS relevance. Notebook chỉ đánh giá, không tune contest queries.
    Đây **chưa phải scorer BTC**. Không có labels thì NOT_EVALUATED, không fake
    nhãn/F2, không promote. API top-k/margin sweep riêng chỉ nhận reviewed dev
@@ -47,13 +56,14 @@ kiểm từ [model API](https://huggingface.co/api/models/Qwen/Qwen3-4B-Instruct
 và [model card](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507). Đây là kiểm
 theo plan nội bộ, chưa xác nhận BTC chấp nhận cấu hình. Chưa fine-tune model.
 
-## Chạy canary và resume
+## Chạy hết và resume
 
-Đặt `MAX_NEW_TRANSLATIONS=25`, `MAX_NEW_QUERIES=25` ở cell 2 để kiểm một lượt nhỏ.
-Notebook chạy retrieval cho phần prefix queries đã dịch, lưu IN_PROGRESS và
-dừng trước export. Sau khi xem translations/rankings/pairs/runtime evidence,
-đặt hai biến thành None và chạy lại từ đầu cùng RUN_NAME để hoàn tất 1.200 query.
-MAX_NEW_* giới hạn số query **mới mỗi phiên**; những query đã xong không tính lại.
+Giữ `MAX_NEW_EMBEDDING_PARTS=None`, `MAX_NEW_TRANSLATIONS=None`,
+`MAX_NEW_QUERIES=None` và **Run all**. Mặc định không giới hạn canary, không cần
+chọn ACTION và không dùng reference labels làm điều kiện export. Các giới hạn
+MAX_NEW_* chỉ dành cho lúc Sếp chủ động chia phiên: query đã xong không tính lại.
+Nếu giới hạn khiến run chưa đủ query, notebook lưu IN_PROGRESS và dừng trước
+export; đặt None rồi Run all cùng RUN_NAME để hoàn tất.
 
 Drive lưu `translations/query-<id>.done.json`, `queries/query-<id>-documents.done.json`,
 `queries/query-<id>-children.done.json`, `queries/query-<id>.done.json`. Hai scored
@@ -62,6 +72,26 @@ resume. Ngắt sau document stage không làm rerank lại stage đó. Cache tra
 đầy đủ/hợp lệ được reuse mà không nạp LLM lại. Chỉ export khi đủ official queries.
 Scored pairs chiếm thêm dung lượng Drive, GPU work lớn hơn v1; chưa đo throughput
 Colab thực của cascade mới. Có thể giảm inference batch, không đổi policy khi resume.
+
+`run_contract.json` ghi hash master plan, frozen candidate, query set và config.
+Không đổi những dữ liệu/policy này trong cùng RUN_NAME. Việc thêm bước export
+end-to-end không đổi inference policy v2.1, nên giữ lại checkpoints v2.1 hợp lệ.
+
+## Tải ZIP và xem điểm thật
+
+Cell cuối tự tải file đã kiểm checksum:
+`/content/drive/MyDrive/VietMedBridge/data/retrieval/stage-a-retrieval-v2.1/submission/submission.zip`.
+Upload **ZIP này** trên Dashboard BTC. `ready_to_submit.json` ghi trạng thái
+`READY_FOR_MANUAL_UPLOAD`, query count, ZIP/hash và prediction signature;
+`submission_manifest.json` ghi model/index/data/plan evidence. ZIP giữ hash
+ổn định khi export lại cùng predictions để không gắn nhầm feedback với run khác.
+
+`score_feedback.json` ban đầu ghi `AWAITING_BTC_SCORE` và các score bằng null.
+Sau upload, ghi submission ID, thời gian và score thật vào file này hoặc gửi
+cho tôi để đối chiếu. Resume giữ feedback đã ghi; không tự tạo điểm. File labels
+thiếu/lỗi/unreviewed chỉ ảnh hưởng đánh giá proxy tùy chọn sau export, không
+chặn ZIP hợp lệ. Chưa xác nhận mới chạy inference GPU hoặc BTC chấm thành công
+cho workflow này; kiểm thử local dùng model test doubles.
 
 Để benchmark fusion theo Stage 2, chạy namespace mới với `rerank_fusion='rrf'` và
 retrieval_share khác; không đổi policy trong một run đã có checkpoints. Labels file
@@ -110,16 +140,18 @@ test đã fail trước sửa, pass sau sửa; nhóm retrieval/cascade **24 test
 Entities model bỏ sót và các điều kiện ngữ nghĩa ngoài cues vẫn cần human review;
 không tuyên bố deterministic validator chứng nhận bản dịch y khoa đúng hoàn toàn.
 
-Workflow lock đổi sang v2.1, default run `stage-a-retrieval-v2.1`; không trộn
+Validator v2.1 dùng default run `stage-a-retrieval-v2.1`; không trộn
 checkpoints validator cũ với mới. Vectors v1 vẫn reuse qua kiểm hash/policy.
 Không sửa/xóa raw, source, official IDs, frozen candidate hay kết quả run v1/v2.
-Chưa chạy Qwen/BGE cascade mới trên GPU, chưa tính F2 với nhãn thật. Chỉ chạy
-canary 25 queries trước; source-span/schema pass không tự duyệt full-scale run.
+Chưa chạy Qwen/BGE cascade mới trên GPU, chưa tính F2 với nhãn thật. Notebook
+hiện chạy hết mặc định theo yêu cầu submit pilot; source-span/schema pass không
+tự duyệt chất lượng nguồn hoặc full-scale run.
 
 ## Lưu triển khai v1 và audit artifact thực
 
 Các phần bên dưới mô tả **v1**, giữ để đối chiếu với Colab run Sếp đã chạy;
-default v2 mới được mô tả ở trên. Audit v1 không phải phép đo chất lượng v2.
+default end-to-end với cascade v2.1 được mô tả ở trên. Audit v1 không phải phép
+đo chất lượng run mới.
 
 ### Baseline retrieval v1 trên Colab
 

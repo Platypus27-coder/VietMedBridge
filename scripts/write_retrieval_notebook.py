@@ -8,7 +8,7 @@ RETRIEVAL_BOOTSTRAP = (BOOTSTRAP
     .replace('.[notebook]', '.[notebook,retrieval]')
     .replace("Giữ cùng DATA_ROOT trong cả bốn notebook.", "Giữ DATA_ROOT đã dùng ở notebook 00–03.")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        '''RETRIEVAL_WORKFLOW_API = "document-child-parent-cascade-v2.1"
+        '''RETRIEVAL_WORKFLOW_API = "competition-pilot-e2e-v1"
 upgrade = lock.get("workflow_api") != RETRIEVAL_WORKFLOW_API
 reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"''')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -20,15 +20,19 @@ reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or 
 def main():
     save("04_colab_retrieval_baseline.ipynb", [
         md('''
-        # VietMedBridge — 04: Truy hồi document → child → parent
+        # VietMedBridge — 04: End-to-end → submission đủ 1.200 query
 
         Chọn **Runtime > Change runtime type > GPU (T4 trở lên)** rồi Run all.
+        Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
+        Dùng dữ liệu đã có để lấy điểm baseline theo §§26/55; không chờ full corpus.
         Đây là bản cascade theo master plan: BGE-M3 + BM25 VI/EN/ZH → weighted RRF
         → document rerank → child MaxP rerank → parent source → token LCS dedup.
         LLM Qwen3-4B chỉ dịch query, không sinh nội dung submission. Chưa fine-tune.
 
-        Một notebook cho retrieval. Bootstrap nâng code lock retrieval lên v2 một lần;
-        các notebook data 00–03 giữ nguyên. Khi nâng từ v1, dùng **runtime mới**.
+        Một notebook chạy trọn đến ZIP. Mặc định Run all chạy HẾT 1.200 query;
+        không bắt buộc canary và không cần nhãn để xuất submission.
+        Bootstrap nâng code lock retrieval lên workflow end-to-end một lần;
+        các notebook data 00–03 giữ nguyên. Khi nâng code, dùng **runtime mới**.
         Vector và query checkpoints nằm Drive; chạy lại từ đầu khi Colab ngắt.
         Không chạy hai runtime ghi cùng RUN_NAME. Kết quả cũ được giữ để so sánh.
 
@@ -40,15 +44,15 @@ def main():
         md('''
         ## 2. Candidate và run
 
-        Giữ mặc định nếu dùng candidate của team. `stage-a-retrieval-v2` lưu kết quả
+        Giữ mặc định nếu dùng candidate của team. `stage-a-retrieval-v2.1` lưu kết quả
         mới; `stage-a-retrieval-v1` chỉ được đọc để tái sử dụng BGE vectors đã xác nhận.
         Nếu cache không có/không đủ thì encode trong run mới. Cache sai checksum,
         thứ tự hoặc policy sẽ báo lỗi, không tự dùng lại. Không sửa/xóa manifest.
         V2.1 siết validator tên thuốc/Latin entities và intolerance; dùng namespace
         mới để không trộn translation/score checkpoints đã sinh bằng validator v2.
-        MAX_NEW_* có thể giới hạn một phiên; None chạy hết. Để chạy canary 25 queries,
-        đặt MAX_NEW_TRANSLATIONS=25 và MAX_NEW_QUERIES=25. Các phiên sau tăng dần
-        hoặc đặt None; query đã hoàn tất được giữ lại. Đổi policy cần RUN_NAME mới.
+        Giữ MAX_NEW_*=None để chạy hết và xuất ZIP. Các biến giới hạn chỉ dùng khi
+        chủ động muốn chia phiên; không cần sửa mặc định để chạy end-to-end.
+        Query đã hoàn tất được giữ lại. Đổi model/data/policy cần RUN_NAME mới.
         '''),
         code('''
         import re
@@ -58,6 +62,7 @@ def main():
         from vietmedbridge.artifacts import read_json, digest_json
         from vietmedbridge.dataset import parquet_path
         from vietmedbridge.retrieval_data import load_catalog, load_queries
+        from vietmedbridge.competition_pilot import MASTER_PLAN, bind_pilot_run
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
@@ -89,6 +94,8 @@ def main():
             raise ValueError("Candidate không thuộc corpus snapshot hiện tại.")
         QUERIES = load_queries(parquet_path(DATA_ROOT, "query.parquet"), expected_count=CONFIG["expected_queries"])
         QUERY_UNITS = [{"id":q["id"], "text":q["query"]} for q in QUERIES]
+        PILOT_CONTRACT = bind_pilot_run(RUN_DIR, plan_path=CHECKOUT / MASTER_PLAN,
+            catalog=CATALOG, queries=QUERIES, config=CONFIG, code_commit=CODE_COMMIT)
         print("GPU:", torch.cuda.get_device_name(0))
         print(json.dumps({"candidate": CATALOG.identity, "documents": len(CATALOG.documents),
             "children": len(CATALOG.children), "dense_inputs": len(CATALOG.units),
@@ -234,62 +241,55 @@ def main():
             raise RuntimeError("Query còn thiếu: chạy lại từ đầu để resume trước khi xuất submission.")
         '''),
         md('''
-        ## 7. Đánh giá nếu có reference labels — CPU
+        ## 7. Validate → ZIP → manifest → file ghi điểm — CPU
 
-        File labels tùy chọn: {"reviewed":true, "queries":[
-        {"id":..., "relevant_docs":[...], "relevant_chunks":[{"doc_id":...,"chunk_text":"..."}]}]}.
-        Nhãn phải được review. Cell này chỉ đánh giá, không tune trên 1.200 contest
-        queries. Cutoff sweep có API riêng cho một dev query set độc lập và đã chấm
-        candidates; không dùng chính contest query set làm dev.
-        Scorer local suy ra từ plan: cùng doc, LCS/BGE-M3 >=40% reference tokens;
-        macro F2 theo query, gộp Doc/Chunk F2. Chưa phải scorer chính thức BTC.
-        Không tự đổi submission/cutoffs dựa trên reference scores.
-        Nếu chưa có nhãn thì ghi NOT_EVALUATED, không tạo nhãn từ chính prediction.
+        Kiểm đủ 1.200 official queries, source slices và IDs trước export.
+        ZIP chứa đúng results.json ở root. ready_to_submit.json ghi đường dẫn/hash;
+        score_feedback.json giữ chỗ để ghi submission ID/điểm thật BTC sau upload.
+        Không tự tạo điểm và không đòi nhãn trước khi xuất ZIP.
+
+        Nếu REFERENCE_LABELS_PATH tồn tại, đánh giá proxy theo plan SAU export;
+        file nhãn lỗi/unreviewed được ghi vào report nhưng không chặn submission.
+        Nhãn tùy chọn: {"reviewed":true, "queries":[{"id":..., "relevant_docs":[...],
+        "relevant_chunks":[{"doc_id":...,"chunk_text":"..."}]}]}.
+        Không tune trên contest/test queries. Fine-tune cần train/dev gold độc lập,
+        không phải điều kiện để lấy score pretrained đầu tiên theo master plan.
         '''),
         code('''
-        from vietmedbridge.retrieval_eval import evaluate_predictions, evaluate_candidate_recall
+        from vietmedbridge.competition_pilot import finish_pilot
 
-        if REFERENCE_LABELS_PATH.is_file():
-            references = read_json(REFERENCE_LABELS_PATH)
-            if references.get("reviewed") is not True:
-                raise ValueError("Reference labels cần được review trước khi đánh giá.")
-            EVALUATION = evaluate_predictions([r["prediction"] for r in RECORDS],
-                                              references["queries"], tokenizer)
-            EVALUATION["candidate_recall"] = evaluate_candidate_recall(RECORDS,
-                references["queries"], CATALOG, tokenizer)
-            atomic_json(RUN_DIR / "evaluation/reference_report.json", EVALUATION)
-            print(json.dumps({k:v for k,v in EVALUATION.items() if k != "per_query"}, indent=2))
-            print("Proxy score theo plan; không dùng contest labels để tune cutoff.")
-        else:
-            print("NOT_EVALUATED_NO_REFERENCE_LABELS — cutoff đang là baseline chưa tune.")
-        '''),
-        md('''
-        ## 8. Kiểm source/ID/schema và xuất ZIP — CPU
-
-        Chỉ xuất khi đủ 1.200 query; chunks là exact frozen source slices, không phải
-        văn bản LLM sinh. ZIP chứa đúng results.json ở root; evidence nằm ngoài ZIP.
-        Đây vẫn là submission pilot, chưa đủ corpus và chưa chứng minh relevance/F2.
-        '''),
-        code('''
-        from vietmedbridge.submission import export_submission
-
-        EXPORT = export_submission(RECORDS, QUERIES, CATALOG, PREDICTION_REPORT,
-            RUN_DIR / "submission", expected_count=CONFIG["expected_queries"], work_dir=WORK_DIR,
+        EXPORT, READY = finish_pilot(RECORDS, QUERIES, CATALOG, PREDICTION_REPORT,
+            RUN_DIR, contract=PILOT_CONTRACT, tokenizer=tokenizer, work_dir=WORK_DIR,
+            reference_labels_path=REFERENCE_LABELS_PATH,
             evidence={"git_commit": CODE_COMMIT, "dense": CORPUS_EMBEDDINGS["encoder"],
                 "translation_llm": TRANSLATOR_IDENTITY, "reranker": RERANKER_IDENTITY,
-                "index": INDEX.manifest, "retrieval_config": CONFIG["retrieval"]})
-        print(json.dumps(EXPORT, ensure_ascii=False, indent=2))
-        print("ZIP:", RUN_DIR / "submission/submission.zip")
+                "index": INDEX.manifest, "retrieval_config": CONFIG["retrieval"],
+                "inference_scope": "COLAB_GPU_PRETRAINED_MODELS"})
+        print(json.dumps(READY, ensure_ascii=False, indent=2))
+        print("Nộp ZIP này trên Dashboard BTC. Gửi lại điểm/submission ID để so sánh baseline.")
         for q, record in zip(QUERIES[:3], RECORDS[:3]):
             p = record["prediction"]
             print("\\nQuery", q["id"], q["query"])
             print("Documents:", p["relevant_docs"])
             print("First chunk:", p["relevant_chunks"][0]["chunk_text"][:500] if p["relevant_chunks"] else "EMPTY")
         '''),
-        md("## 9. Tải submission pilot; tự upload lên BTC"),
+        md('''
+        ## 8. Tải ZIP và submit thử để lấy điểm
+
+        Cell dưới tải submission.zip đã validate. Sếp upload file này trong
+        My Submissions trên Dashboard BTC, rồi gửi điểm/submission ID cho tôi.
+        Drive giữ ZIP + manifest + score_feedback.json để gắn đúng điểm với đúng run.
+        Khi Colab ngắt, chọn GPU và Run all lại cùng RUN_NAME; checkpoint sẽ resume.
+        '''),
         code('''
         from google.colab import files
-        files.download(str(RUN_DIR / "submission/submission.zip"))
+        from vietmedbridge.artifacts import verify_file
+        if PREDICTION_REPORT["state"] != "COMPLETE" or "READY" not in globals():
+            raise RuntimeError("Hoàn tất 1.200 queries và cell export trước khi tải ZIP.")
+        if READY["prediction_signature"] != PREDICTION_REPORT["signature"]:
+            raise ValueError("ZIP/report không cùng prediction run.")
+        verify_file(READY["zip_path"], READY["zip_sha256"])
+        files.download(READY["zip_path"])
         '''),
     ])
 
