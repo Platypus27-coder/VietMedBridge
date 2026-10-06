@@ -2,6 +2,9 @@
 from copy import deepcopy
 import hashlib
 import json
+import struct
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -66,7 +69,7 @@ def reviewed_setup(tmp_path, sources, policy):
     for item in review['items']:
         item['review'].update(decision='ACCEPT',reviewer='CPU-review-fixture-not-real-gold',
             query=f'Chỉ số HbA1c trong nhóm kiểm thử {item["doc_id"]} được mô tả thế nào?',
-            evidence_quote=item['text'][:70],independently_written=item['split']=='dev')
+            evidence_quote=item['text'][:70],independently_written=item['split']!='train')
     atomic_json(path, review)
     return plan, review
 
@@ -140,6 +143,24 @@ def test_reviewed_publication_requires_independent_dev_and_tracks_provenance(tmp
     assert all(not q['negative_child_ids'] for q in train['queries'])
 
 
+def test_three_source_folds_keep_heldout_out_of_teacher_and_training_labels(tmp_path,sources,policy):
+    policy={**policy,'heldout_samples':2,'heldout_fraction':.25,'min_heldout_reviewed':1}
+    plan,review=reviewed_setup(tmp_path,sources,policy)
+    groups={s:{r['source_group'] for r in plan['samples'] if r['split']==s} for s in ('train','dev','heldout')}
+    assert not (groups['train']&groups['dev'] or groups['train']&groups['heldout'] or groups['dev']&groups['heldout'])
+    assert len(list((tmp_path/'drafts').iterdir()))==4
+    assert all(i['draft'] is None for i in review['items'] if i['split']=='heldout')
+    result=publish_reviewed_labels(tmp_path,plan,sources,[],tmp_path/'labels')
+    heldout=read_json(tmp_path/'labels/retrieval_heldout.json')
+    assert result['accepted']=={'train':4,'dev':2,'heldout':2}
+    assert all(q['provenance']['label_kind']=='INDEPENDENT_HUMAN_HELD_OUT' for q in heldout['queries'])
+    from vietmedbridge.heldout import validate_heldout_split
+    train,dev=read_json(result['train_path']),read_json(result['dev_path'])
+    heldout['queries'][0]['id']=train['queries'][0]['id']
+    with pytest.raises(ValueError,match='overlap'):
+        validate_heldout_split(heldout,train,dev,[],sources)
+
+
 def test_exact_notebook_preparation_entrypoint_resume_and_no_reload_after_review(tmp_path,sources,policy,monkeypatch):
     from vietmedbridge import dataset,retrieval_data,translation_model
     import transformers
@@ -166,7 +187,7 @@ def test_exact_notebook_preparation_entrypoint_resume_and_no_reload_after_review
     second=prepare_training_data(data,checkout)
     assert first['state']==second['state']=='WAITING_FOR_SOURCE_QUERY_REVIEW'
     assert len(created)==1 and created[0].calls==4
-    assert first['model_parameter_budget']['total_parameters']==13_374_547_456
+    assert first['model_parameter_budget']['total_parameters']==20_346_066_432
     review=read_json(first['review_path'])
     for item in review['items']:
         item['review'].update(decision='ACCEPT',reviewer='CPU-review-double',
@@ -235,11 +256,15 @@ def test_candidate_additional_positive_cannot_cross_reserved_dev_sources(tmp_pat
 
 def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_training(tmp_path,sources,policy,monkeypatch):
     """Actual FAISS/mining/review path; external model/training calls are doubles."""
+    # Keep nested finalist/adapter namespaces below Windows MAX_PATH in CPU tests.
+    tmp_path=tmp_path.parent/'tw'
+    tmp_path.mkdir()
     from test_retrieval import Encoder
     from test_retrieval_cascade import CascadeReranker, Translator
     from test_full_plan import EncodeTokenizer
     from vietmedbridge import dataset, training_workflow as workflow, qwen_models, retrieval_models, translation_model
     from vietmedbridge.qwen_models import EMBEDDING_DIMENSION, QUERY_INSTRUCTION, RoleEncoder, pair_windows
+    from vietmedbridge.reranker_training import write_adapter_manifest
     import transformers
 
     project=Path(__file__).resolve().parents[1]
@@ -248,13 +273,16 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
     config['lexical_segmentation']=False
     config['expansion_enabled']=False
     config['retrieval'].update(doc_candidate_k=8,sparse_top_k=8,detail_doc_k=8,doc_top_k=8)
+    sources.candidate['golden']={'tokenizer':config['dense']}
+    contest=[{'id':900000+i,'query':f'Official CPU fixture question {i}'} for i in range(1200)]
     atomic_json(checkout/'configs/retrieval_full.json',config)
     atomic_json(checkout/'configs/strong_model_manifest.json',read_json(project/'configs/strong_model_manifest.json'))
     atomic_json(data/'raw/snapshot.json',{'files':{'links_corpus.parquet':{'sha256':'CPU-official-fixture'}}})
+    policy={**policy,'heldout_samples':2,'heldout_fraction':.25,'min_heldout_reviewed':1}
     plan,_=reviewed_setup(data/'preparation',sources,policy)
     publish_reviewed_labels(data/'preparation',plan,sources,[],data/'labels')
     monkeypatch.setattr(dataset,'parquet_path',lambda *a:Path('CPU-unused'))
-    monkeypatch.setattr(workflow,'load_queries',lambda *a,**k:[])
+    monkeypatch.setattr(workflow,'load_queries',lambda *a,**k:contest)
     monkeypatch.setattr(workflow,'load_catalog',lambda *a,**k:sources)
     monkeypatch.setattr(transformers.AutoTokenizer,'from_pretrained',lambda *a,**k:Tokenizer())
     calls={'dense':0,'secondary':0,'translation':0,'ranking':0,'training':0}
@@ -275,6 +303,7 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
         dimension=EMBEDDING_DIMENSION
         def __init__(self,spec):
             super().__init__()
+            self.oom_backoffs=0
             self.identity={**spec,'dimension':self.dimension,'pooling':'last-attended-token-l2',
                 'query_instruction':QUERY_INSTRUCTION,'truncation':False,'fine_tuned':False,
                 'role':'second_dense','precision':'torch.float16','device_class':'cuda',
@@ -298,10 +327,13 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
             pass
 
     class Ranking(CascadeReranker):
-        def __init__(self,spec):
+        def __init__(self,spec,adapter_path=None):
             super().__init__()
             self.spec,self.tokenizer=spec,EncodeTokenizer()
+            self.oom_backoffs=0
             self.identity={**spec,'fine_tuned':False,'test_double':True}
+            if adapter_path is not None:
+                self.identity.update(fine_tuned=True,adapter_manifest_sha256=read_json(Path(adapter_path)/'adapter_manifest.json')['manifest_sha256'])
         def windows(self,query,text,overlap):
             return pair_windows(self.tokenizer,query,text,self.spec['max_length'],overlap)
         def score(self,pairs,**kwargs):
@@ -312,13 +344,22 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
 
     class TrainingReached(Exception):
         pass
+    stop_before_training=True
     def train(reranker,train_bundle,dev_bundle,output_dir,**kwargs):
         calls['training']+=1
         assert not train_bundle['holds'] and not dev_bundle['holds']
         assert all(len(g['pairs'])==8 for b in (train_bundle,dev_bundle) for g in b['groups'])
-        assert kwargs['model_budget']['total_parameters']==13_374_547_456
+        assert kwargs['model_budget']['total_parameters']==20_346_066_432
+        assert not {g['query_id'] for b in (train_bundle,dev_bundle) for g in b['groups']} & {q['id'] for q in read_json(data/'labels/retrieval_heldout.json')['queries']}
         assert Path(output_dir).name==digest_json([read_json(data/'labels/retrieval_train.json'),read_json(data/'labels/retrieval_dev.json')])[:10]
-        raise TrainingReached('CPU test stops before real GPU QLoRA')
+        if stop_before_training:
+            raise TrainingReached('CPU test stops before real GPU QLoRA')
+        adapter=Path(output_dir)/'best-dev-adapter';adapter.mkdir(parents=True,exist_ok=True)
+        header=json.dumps({'lora.weight':{'shape':[2,7],'dtype':'F32','data_offsets':[0,56]}}).encode()
+        (adapter/'adapter_model.safetensors').write_bytes(struct.pack('<Q',len(header))+header+bytes(56))
+        atomic_json(adapter/'adapter_config.json',{'test_double':True})
+        write_adapter_manifest(adapter,labels=train_bundle,training_contract={'test_double':True})
+        return {'adapter':str(adapter),'test_double':True}
     monkeypatch.setattr(workflow,'TorchDenseEncoder',Dense)
     monkeypatch.setattr(workflow,'TorchQwenEncoder',Secondary)
     monkeypatch.setattr(workflow,'TorchQueryTranslator',Translation)
@@ -339,4 +380,46 @@ def test_exact_training_entrypoint_review_roundtrip_reuses_inference_before_trai
         workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
     assert {k:v for k,v in calls.items() if k!='training'}=={k:v for k,v in before.items() if k!='training'}
     assert calls['training']==1
-    assert len(list((data/'training/stage-a-qlora-v2-15b/experiments').iterdir()))==1
+    assert len(list((data/'training/stage-a-qlora-v3-per-model-15b/experiments').iterdir()))==1
+    stop_before_training=False
+    completed=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
+    assert completed['state']=='TRAINED_DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY'
+    assert completed['model_parameter_budget']['adapter_parameters']==14
+    assert completed['heldout_evaluation']['used_for_checkpoint_or_cutoff_selection'] is False
+    run=data/'training/stage-a-qlora-v3-per-model-15b'
+    assert len(read_json(run/'ablation_summary.json')['trials'])==8
+    assert (run/'selected_adapter/adapter_manifest.json').is_file()
+    heldout_ids={q['id'] for q in read_json(data/'labels/retrieval_heldout.json')['queries']}
+    assert heldout_ids=={q['id'] for q in completed['heldout_evaluation']['evaluation']['per_query']}
+    for path in run.glob('experiments/*/mining_queries/query-*.done.json'):
+        record=read_json(path)
+        if 'prediction' in record:
+            assert record['prediction']['id'] not in heldout_ids
+    from vietmedbridge.full_plan_runtime import reviewed_calibration,calibration_context
+    from vietmedbridge.medical_lexical import MedicalAnalyzer
+    from vietmedbridge.source_parents import derive_parents
+    selected,adapter=reviewed_calibration(run,derive_parents(sources,Tokenizer()),contest,config['reranker'],
+        context=calibration_context(config,MedicalAnalyzer(segmentation=False)))
+    assert selected['manifest_sha256']==read_json(run/'calibrated_policy.json')['manifest_sha256']
+    assert adapter==run/'selected_adapter'
+    before_complete=dict(calls)
+    repeated=workflow.run_training_workflow(data,checkout,work_dir=tmp_path/'work')
+    assert repeated==completed
+    assert {k:v for k,v in calls.items() if k!='training'}=={k:v for k,v in before_complete.items() if k!='training'}
+    # Notebook 04 consumes the actual selected manifest/policy and emits all fixture IDs.
+    from vietmedbridge import full_plan_runtime as runtime
+    from vietmedbridge.competition_pilot import MASTER_PLAN
+    (checkout/MASTER_PLAN).write_text('CPU wiring fixture, not a scored medical submission',encoding='utf-8')
+    monkeypatch.setattr(runtime,'load_catalog',lambda *a,**k:sources)
+    monkeypatch.setattr(runtime,'load_queries',lambda *a,**k:contest)
+    monkeypatch.setattr(runtime,'parquet_path',lambda *a:Path('CPU-unused'))
+    monkeypatch.setattr(runtime,'TorchDenseEncoder',Dense)
+    monkeypatch.setattr(runtime,'TorchQwenEncoder',Secondary)
+    monkeypatch.setattr(runtime,'TorchQueryTranslator',Translation)
+    monkeypatch.setattr(runtime,'TorchQwenReranker',Ranking)
+    monkeypatch.setitem(sys.modules,'torch',SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:True,
+        get_device_name=lambda *a:'CPU_DOUBLE_NOT_GPU')))
+    submission=runtime.run_full_pipeline(data,checkout,code_commit='CPU-double',work_dir=tmp_path/'work')
+    assert submission['ready']['query_count']==1200 and submission['ready']['official_score'] is None
+    assert submission['status']['fine_tuning']=='DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY'
+    assert submission['status']['model_parameter_budget']['adapter_parameters']==14

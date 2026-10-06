@@ -20,6 +20,7 @@ from .retrieval_policy import select_parents
 
 @dataclass(frozen=True)
 class StrongConfig(CascadeConfig):
+    document_dense_weight: float = .6
     second_dense_weight: float = .8
     subquery_weight: float = .3
     hyde_weight: float = .3
@@ -31,7 +32,7 @@ class StrongConfig(CascadeConfig):
     def validate(self):
         super().validate()
         if any(not np.isfinite(getattr(self, k)) or getattr(self, k) < 0 for k in
-               ("second_dense_weight", "subquery_weight", "hyde_weight", "auxiliary_rerank_weight")):
+               ("document_dense_weight", "second_dense_weight", "subquery_weight", "hyde_weight", "auxiliary_rerank_weight")):
             raise ValueError("Invalid strong-branch weight.")
         if (type(self.parent_short_tokens) is not int or type(self.parent_long_tokens) is not int
             or self.parent_short_tokens < 180 or self.parent_long_tokens < self.parent_short_tokens):
@@ -74,13 +75,35 @@ class StrongIndex(CascadeIndex):
     def __init__(self, catalog, vectors, embedding_manifest, index_dir, tokenizer, *,
                  secondary_vectors, secondary_manifest, auxiliary_vectors,
                  auxiliary_manifest, auxiliary_inputs, queries, expansions,
-                 analyzer=None, work_dir=None):
+                 analyzer=None, work_dir=None, document_vectors=None, document_manifest=None, document_inputs=None):
         import faiss
 
         super().__init__(catalog, vectors, embedding_manifest, index_dir, tokenizer, work_dir=work_dir)
         if auxiliary_inputs != auxiliary_units(queries, expansions):
             raise ValueError("Auxiliary query vectors must cover the exact validated expansion inputs.")
         self.analyzer = analyzer or MedicalAnalyzer()
+        self.document_dense = None
+        document_evidence = None
+        if document_vectors is not None:
+            dm = document_manifest
+            validate_vectors(document_vectors, len(document_inputs), self.dense.d)
+            if (dm["state"] != "COMPLETE" or dm["dimension"] != self.dense.d
+                or dm["units_sha256"] != unit_signature(document_inputs)
+                or digest_json({k:v for k,v in dm.items() if k != "manifest_sha256"}) != dm["manifest_sha256"]):
+                raise ValueError("Document embedding manifest/input mismatch.")
+            keys = ("model_id", "revision", "max_length", "pooling", "dimension", "query_instruction",
+                    "truncation", "precision", "device_class", "inference_code_sha256", "model")
+            if any(dm["encoder"].get(k) != self.encoder.get(k) for k in keys):
+                raise ValueError("Document and child BGE embedding policies differ.")
+            self.document_dense_ids = [int(u["id"]) for u in document_inputs]
+            if len(set(self.document_dense_ids)) != len(self.document_dense_ids) or set(self.document_dense_ids) != set(self.doc_ids):
+                raise ValueError("Document embeddings must cover all eligible source IDs exactly once.")
+            self.document_dense = faiss.IndexFlatIP(self.dense.d)
+            self.document_dense.add(document_vectors)
+            document_evidence = {"manifest_sha256": dm["manifest_sha256"],
+                "vectors_sha256": hashlib.sha256(document_vectors.tobytes()).hexdigest()}
+        elif document_manifest is not None or document_inputs is not None:
+            raise ValueError("Incomplete document dense inputs.")
         for values, manifest, inputs, role in ((secondary_vectors, secondary_manifest, catalog.units, "corpus"),
                                                (auxiliary_vectors, auxiliary_manifest, auxiliary_inputs, "query")):
             validate_vectors(values, len(inputs), manifest["dimension"])
@@ -106,6 +129,7 @@ class StrongIndex(CascadeIndex):
             "secondary_vectors_sha256": hashlib.sha256(secondary_vectors.tobytes()).hexdigest(),
             "auxiliary_vectors_sha256": hashlib.sha256(auxiliary_vectors.tobytes()).hexdigest(),
             "catalog": catalog.identity, "analyzer": self.analyzer.identity, "field_boosts": boosts,
+            "document_dense": document_evidence,
             "code_sha256": sha256_file(Path(__file__))}
         self.manifest = identity | {"signature": digest_json(identity)}
         self.manifest["manifest_sha256"] = digest_json(self.manifest)
@@ -146,6 +170,11 @@ class StrongIndex(CascadeIndex):
 
         dense_leg("dense", primary, config.dense_weight)
         dense_leg("dense_qwen", scores.secondary, config.second_dense_weight)
+        if self.document_dense is not None and config.document_dense_weight:
+            values, positions = self.document_dense.search(np.asarray(vector,np.float32).reshape(1,-1), self.document_dense.ntotal)
+            values = {self.document_dense_ids[int(i)]:float(v) for i,v in zip(positions[0],values[0],strict=True) if i >= 0}
+            orders["dense_document"] = sorted(values,key=lambda d:(-values[d],d))[:config.doc_candidate_k]
+            branch_scores["dense_document"],weights["dense_document"] = values,config.document_dense_weight
         expansion = self.expansions[query]
         for idx, text in enumerate(expansion["subqueries"]):
             dense_leg(f"subquery_{idx}", self._secondary_scores(text), config.subquery_weight)

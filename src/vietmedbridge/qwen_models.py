@@ -13,10 +13,10 @@ from .embeddings import embedding_matrix, unit_signature
 from .model_budget import model_budget_report
 from .retrieval_models import _TorchInference
 
-EMBEDDING_ID = "Qwen/Qwen3-Embedding-0.6B"
-EMBEDDING_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
-EMBEDDING_PARAMETERS = 595776512
-EMBEDDING_DIMENSION = 1024
+EMBEDDING_ID = "Qwen/Qwen3-Embedding-8B"
+EMBEDDING_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+EMBEDDING_PARAMETERS = 7567295488
+EMBEDDING_DIMENSION = 4096
 RERANKER_ID = "Qwen/Qwen3-Reranker-8B"
 RERANKER_REVISION = "77d193c791ed757ca307ee72715aa132723da912"
 QUERY_INSTRUCTION = "Given a Vietnamese biomedical question, retrieve source passages in Vietnamese, English or Chinese that provide relevant evidence."

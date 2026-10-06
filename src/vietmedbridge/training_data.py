@@ -77,6 +77,12 @@ def plan_training_sources(catalog, contest_queries, policy):
                 "min_train_reviewed", "min_dev_reviewed", "seed", "teacher_max_new_tokens")
     if any(type(policy.get(k)) is not int or policy[k] < 1 for k in required) or not 0 < policy.get("dev_fraction", 0) < 1:
         raise ValueError("Invalid training-data preparation policy.")
+    heldout = policy.get("heldout_samples", 0)
+    if (type(heldout) is not int or heldout < 0 or (heldout and
+        (type(policy.get("min_heldout_reviewed")) is not int or policy["min_heldout_reviewed"] < 1
+         or not 0 < policy.get("heldout_fraction", 0) < 1 - policy["dev_fraction"]))):
+        raise ValueError("Invalid independent held-out source policy.")
+    splits = ("train", "dev", "heldout") if heldout else ("train", "dev")
     eligible, exclusions = {}, {}
     for identifier, doc in catalog.documents.items():
         reason = error_page_reason(doc.get("title", ""), doc["source_text"])
@@ -120,12 +126,14 @@ def plan_training_sources(catalog, contest_queries, policy):
     for d in sorted(children):
         groups[find(d)].append(d)
     order = sorted(groups, key=lambda g: digest_json([policy["seed"], groups[g]]))
-    if len(order) < 2:
-        raise ValueError("Need at least two independent source groups for train/dev.")
-    dev_count = max(1, min(len(order) - 1, round(len(order) * policy["dev_fraction"])))
-    dev_groups = set(order[:dev_count])
-    source_splits = {str(d): ("dev" if find(d) in dev_groups else "train") for d in eligible}
-    rows = {"train": defaultdict(list), "dev": defaultdict(list)}
+    if len(order) < len(splits):
+        raise ValueError("Need independent source groups for each train/dev/held-out fold.")
+    heldout_count = max(1, min(len(order)-2, round(len(order)*policy["heldout_fraction"]))) if heldout else 0
+    heldout_groups = set(order[:heldout_count])
+    dev_count = max(1, min(len(order)-heldout_count-1, round(len(order)*policy["dev_fraction"])))
+    dev_groups = set(order[heldout_count:heldout_count+dev_count])
+    source_splits = {str(d): ("heldout" if find(d) in heldout_groups else "dev" if find(d) in dev_groups else "train") for d in eligible}
+    rows = {split: defaultdict(list) for split in splits}
     seen = set()
     for group in order:
         for d in groups[group]:
@@ -146,14 +154,14 @@ def plan_training_sources(catalog, contest_queries, policy):
                     "start_char": child["start_char"], "end_char": child["end_char"], "text": child["text"],
                     "title": eligible[d].get("title", ""), "url": eligible[d].get("url", "")})
     selected = []
-    for split in ("train", "dev"):
+    for split in splits:
         buckets, count = rows[split], 0
         while any(buckets.values()) and count < policy[split + "_samples"]:
             for language in sorted(buckets):
                 if buckets[language] and count < policy[split + "_samples"]:
                     selected.append(buckets[language].pop(0))
                     count += 1
-    if not all(any(s["split"] == split for s in selected) for split in ("train", "dev")):
+    if not all(any(s["split"] == split for s in selected) for split in splits):
         raise ValueError("No source samples in one of the train/dev folds.")
     if len({s["id"] for s in selected}) != len(selected):
         raise ValueError("Synthetic query ID collision.")
@@ -228,7 +236,7 @@ def export_source_review(root, plan):
             raise ValueError("Human review belongs to a different source plan.")
     else:
         atomic_json(path, {"source_plan_sha256": plan["sha256"], "reviewed": False, "items": items,
-            "instructions": "Edit only review fields. ACCEPT/REJECT require reviewer name. Dev query must be written independently; cite exact source quote. Pending items do not become labels."})
+            "instructions": "Edit only review fields. ACCEPT/REJECT require reviewer name. Dev/held-out queries must be written independently; cite exact source quote. Pending items do not become labels."})
     return path
 
 
@@ -240,7 +248,8 @@ def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
     expected = {s["item_id"]: s for s in plan["samples"]}
     if len(review["items"]) != len(expected) or {r["item_id"] for r in review["items"]} != set(expected):
         raise ValueError("Human review item coverage changed.")
-    queries, pending, decisions = {"train": [], "dev": []}, 0, []
+    queries = {s["split"]: [] for s in plan["samples"]}
+    pending, decisions = 0, []
     for item in review["items"]:
         sample = expected[item["item_id"]]
         if {k: item.get(k) for k in sample} != sample:
@@ -262,15 +271,16 @@ def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
         if (not _vietnamese_question(text) or not isinstance(quote, str) or len(quote.strip()) < 20
             or quote not in sample["text"] or not query_is_independent(text, contest_queries)):
             raise ValueError("Reviewed query/quote is invalid or overlaps contest queries.")
-        if sample["split"] == "dev" and decision.get("independently_written") is not True:
-            raise ValueError("Dev questions must be independently written by the reviewer.")
+        if sample["split"] != "train" and decision.get("independently_written") is not True:
+            raise ValueError("Dev/held-out questions must be independently written by the reviewer.")
         queries[sample["split"]].append({"id": sample["id"], "query": text.strip(),
             "relevant_docs": [sample["doc_id"]], "relevant_chunks": [{"doc_id": sample["doc_id"], "chunk_text": sample["text"]}],
             "negative_child_ids": [], "negative_categories": {}, "provenance": {"item_id": sample["item_id"],
                 "child_id": sample["child_id"], "source_text_sha256": sample["source_text_sha256"],
                 "start_char": sample["start_char"], "end_char": sample["end_char"], "source_group": sample["source_group"],
                 "evidence_quote": quote, "reviewer": decision["reviewer"], "source_plan_sha256": plan["sha256"],
-                "label_kind": "HUMAN_REVIEWED_SYNTHETIC_TRAIN" if sample["split"] == "train" else "INDEPENDENT_HUMAN_DEV"}})
+                "label_kind": {"train":"HUMAN_REVIEWED_SYNTHETIC_TRAIN","dev":"INDEPENDENT_HUMAN_DEV",
+                               "heldout":"INDEPENDENT_HUMAN_HELD_OUT"}[sample["split"]]}})
     counts = {k: len(v) for k, v in queries.items()}
     if any(len({query_key(q["query"]) for q in qs}) != len(qs) for qs in queries.values()):
         raise ValueError("Duplicate reviewed questions within a split; edit or reject the duplicate.")
@@ -282,6 +292,9 @@ def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
     train, dev = validate_query_split(documents["train"], documents["dev"], contest_queries)
     if any(not query_is_independent(q["query"], train) for q in dev):
         raise ValueError("Reviewed train/dev questions overlap.")
+    if "heldout" in documents:
+        from .heldout import validate_heldout_split
+        validate_heldout_split(documents["heldout"],documents["train"],documents["dev"],contest_queries,catalog)
     for split, document in documents.items():
         atomic_json(labels_dir / ("retrieval_" + split + ".json"), document)
     atomic_json(root / "accepted_review.json", _seal({"source_plan_sha256": plan["sha256"], "decisions": decisions,
@@ -290,7 +303,7 @@ def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
         "train_path": str(labels_dir / "retrieval_train.json"), "dev_path": str(labels_dir / "retrieval_dev.json")}
 
 
-def prepare_training_data(data_root, checkout, *, run_name="stage-a-source-training-v1", max_new_samples=None):
+def prepare_training_data(data_root, checkout, *, run_name="stage-a-source-training-v2-heldout", max_new_samples=None):
     """Notebook entrypoint; reuse valid labels or draft/review the frozen corpus."""
     if max_new_samples is not None and (type(max_new_samples) is not int or max_new_samples < 0):
         raise ValueError("Invalid new draft sample limit.")

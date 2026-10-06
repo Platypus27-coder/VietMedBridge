@@ -1,5 +1,45 @@
 # Kiểm chứng data pipeline v2
 
+## Per-model rule và hoàn thiện luồng pilot — 06/10/2026
+
+Sếp xác nhận với BTC giới hạn ≤15B là **từng model**, thay yêu cầu tổng trước đó.
+Khôi phục pinned Qwen3-Embedding-8B (7.567.295.488 parameters, 4.096 dimensions,
+NF4). Tổng inventory 20.346.066.432; model lớn nhất 8.188.548.096, dưới 15B.
+Gate kiểm mỗi base + adapter tương ứng; không dùng quantization để giảm counts.
+Các mục aggregate phía dưới ghi lịch sử policy cũ, không là cấu hình hiện tại.
+
+- Regression CPU **177 passed, 9 skipped**; skips thuộc browser/Crawl4AI tùy
+  chọn. Evidence ignored: `artifacts/strong-model-review/regression-per-model-full.xml`.
+  Kiểm targeted cuối **57 passed** sau các cập nhật status/parent recall.
+  Đúng luồng 05 → 04 đã pass: explicit source/candidate reviews, mining
+  1 positive + 7 negatives, adapter/cutoff selection, 8 dev ablations, held-out
+  evaluation, resume và ZIP đủ 1.200 IDs. FAISS/LCS/checkpoint/publication chạy
+  thật trên CPU; encoder/LLM/reranker/QLoRA dùng doubles. Không dùng test ZIP để
+  submit BTC hoặc gọi đây là chất lượng/huấn luyện model thật.
+- Source thật: tạo **855 document dense representations**, title + bounded
+  source opening, tối đa **508 BGE tokens gồm special tokens** trong budget512.
+  Không coi source opening là abstract đã trích nếu nguồn chưa có abstract riêng.
+  Nhánh này có weighted RRF/manifest/source IDs và ablation riêng; output vẫn
+  là source parents, không phải representation văn bản tổng hợp.
+- Source preparation thật chọn **256 train, 40 dev, 40 held-out**: tổng168 VI/
+  168 ZH; không có EN trong sample pilot này. Gom duplicate sources/passages
+  trước split. Teacher chỉ sinh draft train; dev/held-out do team viết độc lập.
+  Source/hash/quote/contest overlap vẫn kiểm, tối thiểu32/8/8 accepted và hết
+  PENDING trước label publication. Chưa chạy teacher hay tạo reviewed labels thật.
+- Doc/chunk score margins được sweep độc lập. Held-out queries/labels không
+  đi vào mining, loss, dev sweep hoặc checkpoint selection; chấm sau freeze,
+  bind adapter/calibration/label hashes, không tự promote/retune theo held-out.
+  Candidate recall dùng parent đã chọn trong scored ranking, gồm budget512/640.
+- 04/05 nâng code locks sang `full-master-plan-strong-v3-per-model-15b` và
+  `full-master-plan-supervised-v4-per-model-15b`; namespaces tách khỏi v1/v2.
+  Atomic writers giữ temp file cùng thư mục, tên UUID ngắn để tránh MAX_PATH
+  khi test namespaces sâu trên Windows. Frozen corpus và notebooks00–03 giữ nguyên.
+
+Đã nối luồng code chính trên corpus pilot. GPU inference/QLoRA thật, reviewed
+labels, score BTC, reviewed glossary, optional embedding tuning và full-scale
+backend benchmark vẫn cần dữ liệu/đo đạc; không claim master research plan100%.
+Hướng dẫn chạy hiện tại ở [FULL_PLAN.md](FULL_PLAN.md).
+
 ## Source-grounded supervised workflow — 06/10/2026
 
 - Notebook 05 nối frozen source → draft VI train query → explicit human source

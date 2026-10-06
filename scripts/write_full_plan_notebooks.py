@@ -8,7 +8,7 @@ BOOT = (BOOTSTRAP
     .replace('"install", "-q", "-e"', '"install", "--disable-pip-version-check", "-e"')
     .replace("Giữ cùng DATA_ROOT trong cả bốn notebook.", "Giữ DATA_ROOT đã dùng ở notebook 00–03.")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        '''RETRIEVAL_WORKFLOW_API = "full-master-plan-strong-v2-15b"
+        '''RETRIEVAL_WORKFLOW_API = "full-master-plan-strong-v3-per-model-15b"
 upgrade = lock.get("workflow_api") != RETRIEVAL_WORKFLOW_API
 reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"''')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -26,18 +26,17 @@ def main():
         Chọn **runtime GPU mới, T4 trở lên**, rồi Run all. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
 
-        Kiến trúc: **BGE-M3 + Qwen3-Embedding-0.6B + BM25 VI/EN/ZH → weighted RRF
+        Kiến trúc: **BGE-M3 child/document dense + Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF
         → Qwen3-Reranker-8B document → local child retrieval/MaxP rerank
         → exact-source parent 512/640 → LCS dedup → ZIP đủ 1.200 query**.
         Qwen3-4B dịch query; PICO-lite/subqueries/HyDE chỉ additive cho query phức tạp.
         Các số/Latin entities/constraint cues được kiểm; original query luôn giữ.
         Sparse dùng PyVI, Jieba, CJK n-grams và title/heading/body/alias fields.
 
-        Tổng bốn model **13.374.547.456 parameters**, trước lượng tử hóa.
-        Gate kiểm tổng **≤15B** cho mọi model đã dùng, kể cả chạy lần lượt;
-        adapter được cộng thêm khi fine-tune. Đây là giới hạn tổng Sếp yêu cầu,
-        chưa phải xác nhận BTC giải thích rule theo tổng.
-        Qwen embedding 0.6B dùng fp16; reranker 8B dùng **NF4 4-bit**.
+        Sếp đã xác nhận với BTC: **≤15B cho từng model**, không tính tổng model.
+        BGE-M3 0,568B; Qwen embedding 7,567B; query LLM 4,022B; reranker 8,189B.
+        Gate tính adapter vào base model tương ứng, trước quantization.
+        Hai model 8B dùng **NF4 4-bit**.
         Models nạp lần lượt. Đây là lựa chọn tài nguyên
         cho T4, chưa benchmark tương đương fp16. Weights/cache nằm ổ local Colab;
         vector parts, translation/expansion và scored stages checkpoint trên Drive.
@@ -59,8 +58,8 @@ def main():
         hash/order/model trước reuse. Qwen vectors có corpus/query identities riêng.
 
         Sau checks nguồn/snapshot/query, GPU chạy phần thiếu:
-        BGE (nếu cần) → Qwen4B query understanding → Qwen0.6B embedding → Qwen8B rerank.
-        Run v2-15b tách khỏi v1; Qwen vectors cũ của 8B không được reuse.
+        BGE child/document → Qwen4B query understanding → Qwen8B embedding → Qwen8B rerank.
+        Run v3-per-model-15b tách khỏi v1/v2; không trộn Qwen vectors 0.6B và 8B.
         Giữ DATA_ROOT; corpus và BGE vectors hợp lệ vẫn được tận dụng.
         Runtime lưu từng phần; lỗi mạng/OOM giữ checkpoints đã hoàn tất.
         Glossary tùy chọn data/labels/medical_aliases.json cần reviewed=true,
@@ -73,7 +72,7 @@ def main():
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
-        RUN_NAME = "stage-a-full-plan-v2-15b"
+        RUN_NAME = "stage-a-full-plan-v3-per-model-15b"
         EMBEDDING_CACHE_RUN = "stage-a-retrieval-v1"
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
@@ -133,29 +132,30 @@ def main():
         gradient checkpointing/accumulation.
 
         Chưa có nhãn: notebook tự tách các nhóm source/đoạn trùng trước, chọn tối
-        đa 256 source samples train và 40 samples dev. Qwen 4B tạo câu hỏi VI
+        đa 256 source samples train, 40 dev và 40 held-out. Qwen 4B tạo câu hỏi VI
         **chỉ cho train**, có exact evidence quote, checkpoint từng mẫu.
-        Dev để trống câu hỏi cho team viết độc lập trên nhóm source đã reserve.
-        Cùng bộ model 13.375B; không thêm teacher mới. Model outputs luôn là draft.
+        Dev/held-out để trống câu hỏi cho team viết độc lập trên các nhóm source
+        đã reserve. Không thêm teacher mới. Model outputs luôn là draft.
 
         Notebook tải source_review.json để team duyệt: chỉ sửa review fields,
-        ACCEPT/REJECT + reviewer + query + exact evidence_quote. Dev yêu cầu
+        ACCEPT/REJECT + reviewer + query + exact evidence_quote. Dev/held-out yêu cầu
         independently_written=true sau khi người review tự viết câu hỏi.
         Lưu file đã duyệt về đúng review_path trên Drive và Run all lại.
-        Tối thiểu 32 train/8 dev được accept, không còn PENDING, mới xuất labels.
+        Tối thiểu 32 train/8 dev/8 held-out được accept, hết PENDING mới xuất labels.
         Không tự bật reviewed hoặc exhaustive_chunks cho model predictions.
 
         Train/dev tách theo query, IDs và nội dung không trùng 1.200 contest queries.
         Mine 1 positive + 7 negatives, ưu tiên top ranks, không lấy predictions làm gold.
         QLoRA checkpoint giữ optimizer/RNG để resume. Đánh giá dev NDCG/MRR rồi
         chạy finalists qua full pipeline và CPU F2 cutoff sweep. Chọn adapter theo
-        dev F2, giữ trạng thái held-out pending; không promote corpus.
+        dev F2. Tự chạy dev ablations, rồi chấm held-out với adapter/cutoff đã
+        freeze; không chọn model bằng held-out score và không promote corpus.
         04 tự nhận selected_adapter/calibrated_policy trong namespace mới.
         '''),
         md("## 1. Bootstrap — CPU"),
         code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json")
             .replace("retrieval_runtime.json", "training_runtime.json")
-            .replace("full-master-plan-strong-v2-15b", "full-master-plan-supervised-v3")),
+            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v4-per-model-15b")),
         md("## 2. Chuẩn bị nhãn — GPU chỉ khi còn thiếu draft train"),
         code('''
         import json
@@ -181,7 +181,7 @@ def main():
         from vietmedbridge.training_workflow import run_training_workflow
         if PREPARATION["state"] == "READY_FOR_HARD_NEGATIVE_REVIEW":
             TRAINING_STATUS = run_training_workflow(DATA_ROOT, CHECKOUT,
-                work_dir=WORK_DIR, run_name="stage-a-qlora-v2-15b")
+                work_dir=WORK_DIR, run_name="stage-a-qlora-v3-per-model-15b")
         else:
             TRAINING_STATUS = {"state": "WAITING_FOR_SOURCE_QUERY_REVIEW", "fine_tuned": False}
         print(json.dumps(TRAINING_STATUS, ensure_ascii=False, indent=2))
@@ -191,9 +191,8 @@ def main():
         '''),
         md('''
         Dừng ở bước review nghĩa là cần nhãn do team duyệt; chưa có model fine-tune
-        hoặc F2 được chứng minh. Đã có code chọn adapter theo dev F2; independent
-        held-out test và official BTC score vẫn cần đo. Ablation/embedding
-        fine-tune/sharded dense có API trong package,
+        hoặc F2 được chứng minh. Dev F2, ablation và held-out đều là local proxy,
+        chưa phải score BTC. Embedding fine-tune/sharded dense có API trong package,
         hướng dẫn ở docs/FULL_PLAN.md. Sau khi chọn adapter hợp lệ, mở 04 và Run all;
         không chỉnh ACTION hoặc xóa run pretrained. Nhãn/config đổi cần run mới.
         '''),

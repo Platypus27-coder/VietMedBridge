@@ -18,7 +18,7 @@ QUOTAS = (2, 2, 1, 1, 1)
 
 
 def validate_training_labels(document, contest_queries, *, split=None):
-    if document.get("reviewed") is not True or document.get("split") not in ("train", "dev") or (split and document["split"] != split):
+    if document.get("reviewed") is not True or document.get("split") not in ("train", "dev", "heldout") or (split and document["split"] != split):
         raise ValueError("Training/calibration requires reviewed train/dev labels.")
     queries = document.get("queries", [])
     if not queries or len({q["id"] for q in queries}) != len(queries):

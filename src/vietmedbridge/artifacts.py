@@ -38,7 +38,7 @@ def read_json(path: str | Path) -> Any:
 def atomic_json(path: str | Path, value: Any) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + f".{uuid4().hex}.tmp")
+    temporary = destination.with_name(f".{uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, destination)
@@ -50,7 +50,7 @@ def publish_file(local_path: str | Path, destination: str | Path) -> str:
     """Copy a completed local artifact, then atomically publish its filename."""
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + f".{uuid4().hex}.tmp")
+    temporary = destination.with_name(f".{uuid4().hex}.tmp")
     try:
         shutil.copyfile(local_path, temporary)
         checksum = sha256_file(temporary)

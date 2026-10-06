@@ -43,7 +43,7 @@ def train_embedding_qlora(encoder, train_bundle, dev_bundle, output_dir, *, reca
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         task_type="FEATURE_EXTRACTION", bias="none"))
     from .model_budget import add_adapter_parameters
-    budget = add_adapter_parameters(model_budget, sum(p.numel() for p in model.parameters() if p.requires_grad))
+    budget = add_adapter_parameters(model_budget, sum(p.numel() for p in model.parameters() if p.requires_grad), role="second_dense")
     atomic_json(root / "model_parameter_budget.json", budget)
 
     class Groups:

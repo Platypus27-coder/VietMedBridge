@@ -9,6 +9,7 @@ import time
 from .artifacts import atomic_json, digest_json, read_json, sha256_file
 from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .dataset import parquet_path
+from .document_dense import prepare_document_vectors
 from .embeddings import embed_units, embedding_matrix
 from .medical_lexical import MedicalAnalyzer
 from .model_budget import model_budget_report
@@ -56,7 +57,7 @@ def reviewed_calibration(root, catalog, queries, spec, *, context):
 
 def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
                       build_run="stage-a-data-v3-laodong", candidate_name="candidate-1cd220a4be956d5a.json",
-                      run_name="stage-a-full-plan-v2-15b", embedding_cache_run="stage-a-retrieval-v1",
+                      run_name="stage-a-full-plan-v3-per-model-15b", embedding_cache_run="stage-a-retrieval-v1",
                       max_new_embedding_parts=None, max_new_translations=None, max_new_queries=None):
     import torch
     from transformers import AutoTokenizer
@@ -86,7 +87,7 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     glossary = root / "labels/medical_aliases.json"
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"], glossary_path=glossary if glossary.is_file() else None)
     config["analyzer"] = analyzer.identity
-    calibration, adapter_path = reviewed_calibration(root / "training/stage-a-qlora-v2-15b", catalog, queries, config["reranker"],
+    calibration, adapter_path = reviewed_calibration(root / "training/stage-a-qlora-v3-per-model-15b", catalog, queries, config["reranker"],
         context=calibration_context(config, analyzer))
     budget = model_budget_report(config, registry, adapter_paths=[adapter_path] if adapter_path else [])
     config["model_parameter_budget"] = budget
@@ -100,7 +101,7 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     contract = bind_pilot_run(run, plan_path=checkout / MASTER_PLAN, catalog=catalog,
         queries=queries, config=config, code_commit=code_commit)
     atomic_json(run / "model_parameter_budget.json", budget)
-    print(f"Aggregate model parameters: {budget['total_parameters']:,} / {budget['limit_parameters']:,}")
+    print(f"Largest model: {budget['max_model_parameters']:,} / {budget['limit_parameters']:,}; total inventory: {budget['total_parameters']:,}")
     print("GPU:", torch.cuda.get_device_name(0), "| Run:", run)
     query_units = [{"id": q["id"], "text": q["query"]} for q in queries]
     cache = root / "retrieval" / embedding_cache_run
@@ -122,6 +123,8 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
         finally:
             dense.close()
         corpus_vectors, query_vectors = embedding_matrix(run / "corpus_embeddings", cm), embedding_matrix(run / "query_embeddings", qm)
+    document_vectors, dm, doc_units = prepare_document_vectors(catalog, tokenizer, config["dense"],
+        base_run / "document_embeddings", TorchDenseEncoder, embedding=config["embedding"], work_dir=work_dir)
     translation_root = run / "translations"
     cached = cached_translations(queries, config["translation"], translation_root)
     if cached is None:
@@ -167,7 +170,8 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
         auxiliary_vectors, am = auxiliary_cache
     index = StrongIndex(catalog, corpus_vectors, cm, run / "index", tokenizer,
         secondary_vectors=secondary_vectors, secondary_manifest=sm, auxiliary_vectors=auxiliary_vectors,
-        auxiliary_manifest=am, auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=analyzer, work_dir=work_dir)
+        auxiliary_manifest=am, auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=analyzer, work_dir=work_dir,
+        document_vectors=document_vectors, document_manifest=dm, document_inputs=doc_units)
     reranker = TorchQwenReranker(config["reranker"], adapter_path=adapter_path)
     started = time.monotonic()
     try:
@@ -182,21 +186,34 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     if report["state"] != "COMPLETE":
         raise RuntimeError("Queries checkpointed. Run all again with limits=None before exporting.")
     evidence = {"git_commit": code_commit, "dense": cm["encoder"], "second_dense": sm["encoder"],
-        "translation_llm": read_json(translation_root / "config.json")["translator"], "expansion_signature": expansions[0]["signature"],
+        "document_dense": dm, "translation_llm": read_json(translation_root / "config.json")["translator"], "expansion_signature": expansions[0]["signature"],
         "reranker": reranker_identity, "index": index.manifest, "retrieval_config": asdict(policy),
         "calibration": calibration, "model_parameter_budget": budget,
         "inference_scope": "COLAB_GPU_DEV_SELECTED_ADAPTER" if calibration else "COLAB_GPU_FULL_PRETRAINED_ARCHITECTURE"}
     _, ready = finish_pilot(records, queries, catalog, report, run, contract=contract, tokenizer=tokenizer,
         evidence=evidence, reference_labels_path=root / "labels/retrieval_reference.json", work_dir=work_dir)
     diagnostics = diagnose(records, queries, index, run / "diagnostics.json")
+    heldout_state = "WAITING_FOR_INDEPENDENT_REVIEWED_HELD_OUT_LABELS"
+    heldout_path = root / "training/stage-a-qlora-v3-per-model-15b/heldout_evaluation.json"
+    if calibration is not None and heldout_path.exists():
+        heldout = read_json(heldout_path)
+        if (heldout.get("state") == "FROZEN_POLICY_HELD_OUT_EVALUATED_LOCAL_PROXY"
+            and heldout.get("catalog") == catalog.identity
+            and heldout.get("calibration_manifest_sha256") == calibration["manifest_sha256"]
+            and heldout.get("adapter_manifest_sha256") == calibration["adapter_manifest_sha256"]
+            and digest_json({k:v for k,v in heldout.items() if k != "manifest_sha256"}) == heldout.get("manifest_sha256")):
+            heldout_state = heldout["state"]
     status = {"master_plan": MASTER_PLAN, "architecture": config["architecture"], "query_count": len(records),
         "model_parameter_budget": budget,
+        "document_dense":"EXECUTED_OR_VERIFIED_CACHE", "heldout_evaluation":heldout_state,
         "frozen_documents": len(catalog.documents), "eligible_documents": len(index.doc_ids),
         "second_dense": "EXECUTED_OR_VERIFIED_CACHE", "qwen_reranking": "EXECUTED_OR_VERIFIED_CACHE",
         "query_expansion": "VALIDATED_COMPLEX_ONLY_ADDITIVE", "medical_alias_entries": analyzer.identity["aliases"],
         "fine_tuning": "DEV_SELECTED_HELD_OUT_PENDING" if calibration else "WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS",
         "cutoff_calibration": "DEV_SELECTED" if calibration else "UNTUNED_WITHOUT_DEV_LABELS",
         "full_corpus": False, "official_btc_score": None, "quality_promoted": False}
+    if calibration is not None and heldout_state == "FROZEN_POLICY_HELD_OUT_EVALUATED_LOCAL_PROXY":
+        status["fine_tuning"] = "DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY"
     atomic_json(run / "full_plan_status.json", status)
     return {"ready": ready, "status": status, "diagnostics_path": str(run / "diagnostics.json"),
         "samples": [{"query": q, "prediction": r["prediction"]} for q, r in zip(queries[:3], records[:3], strict=True)]}

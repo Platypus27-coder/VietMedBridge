@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 
 from .artifacts import atomic_json, digest_json, publish_file, read_json, verify_file
 from .embeddings import embed_units, embedding_matrix, unit_signature
+from .document_dense import prepare_document_vectors
+from .heldout import evaluate_frozen_selection, validate_heldout_split
 from .model_budget import model_budget_report
 from .negative_review import export_candidate_review, import_candidate_review
 from .query_expansion import cached_expansions, expand_queries
@@ -13,6 +16,7 @@ from .qwen_models import TorchQwenEncoder, TorchQwenReranker, cached_qwen_embedd
 from .reranker_training import mine_hard_negatives, train_qlora, validate_query_split
 from .retrieval_data import load_catalog, load_queries
 from .retrieval_eval import cutoff_sweep, evaluate_candidate_recall
+from .retrieval_diagnostics import run_dev_ablations
 from .retrieval_models import TorchDenseEncoder
 from .retrieval_cache import reuse_bge_cache
 from .source_parents import derive_parents
@@ -56,7 +60,7 @@ def _selected_adapter(source, destination):
     return manifest
 
 
-def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v2-15b"):
+def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v3-per-model-15b"):
     root, checkout = Path(data_root), Path(checkout)
     base_run = run = root / "training" / run_name
     train_path, dev_path = root / "labels/retrieval_train.json", root / "labels/retrieval_dev.json"
@@ -88,11 +92,16 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         atomic_json(train_path, train_doc)
         atomic_json(dev_path, dev_doc)
     train, dev = validate_query_split(train_doc, dev_doc, contest)
-    queries = [{"id": q["id"], "query": q["query"]} for q in train + dev]
+    heldout_path = root / "labels/retrieval_heldout.json"
+    heldout_doc = read_json(heldout_path) if heldout_path.exists() else None
+    heldout = validate_heldout_split(heldout_doc,train_doc,dev_doc,contest,catalog) if heldout_doc is not None else []
+    mining_queries = [{"id": q["id"], "query": q["query"]} for q in train + dev]
+    heldout_queries = [{"id":q["id"],"query":q["query"]} for q in heldout]
+    queries = mining_queries + heldout_queries
     dev_queries = [{"id": q["id"], "query": q["query"]} for q in dev]
     run = base_run / "experiments" / digest_json({"queries": queries, "config": config, "catalog": catalog.identity})[:10]
     split_contract = {"train_queries": digest_json([{"id": q["id"], "query": q["query"]} for q in train]),
-        "dev_queries": digest_json(dev_queries), "contest": digest_json(contest)}
+        "dev_queries": digest_json(dev_queries), "heldout_queries":digest_json(heldout_queries), "contest": digest_json(contest)}
     if (run / "split_contract.json").exists() and read_json(run / "split_contract.json") != split_contract:
         raise ValueError("Training split changed; choose a new training run.")
     atomic_json(run / "split_contract.json", split_contract)
@@ -116,6 +125,8 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         finally:
             dense.close()
         corpus_vectors, query_vectors = embedding_matrix(run / "corpus_embeddings", cm), embedding_matrix(run / "query_embeddings", qm)
+    document_vectors, dm, doc_units = prepare_document_vectors(catalog, tokenizer, config["dense"],
+        run / "document_embeddings", TorchDenseEncoder, embedding=config["embedding"], work_dir=work_dir)
     cached = cached_translations(queries, config["translation"], run / "translations")
     translations = cached[0] if cached is not None else None
     expansions = cached_expansions(queries, translations, config["translation"], run / "expansions", enabled=config["expansion_enabled"]) if translations is not None else None
@@ -143,11 +154,15 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         auxiliary_vectors, am = query_cache
     index = StrongIndex(catalog, corpus_vectors, cm, run / "index", tokenizer,
         secondary_vectors=secondary_vectors, secondary_manifest=sm, auxiliary_vectors=auxiliary_vectors,
-        auxiliary_manifest=am, auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=analyzer, work_dir=work_dir)
+        auxiliary_manifest=am, auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=analyzer, work_dir=work_dir,
+        document_vectors=document_vectors, document_manifest=dm, document_inputs=doc_units)
+    translated = {q["id"]: t for q, t in zip(queries, translations, strict=True)}
+    mining_vectors, mining_manifest = slice_query_vectors(mining_queries,queries,query_vectors,qm)
+    mining_translations = [translated[q["id"]] for q in mining_queries]
     model = TorchQwenReranker(config["reranker"])
     try:
-        records, _ = predict_strong(index, queries, query_vectors, model, run / "mining_queries",
-            query_embedding_manifest=qm, translations=translations, config=policy, batch_size=config["reranker_batch_size"])
+        records, _ = predict_strong(index, mining_queries, mining_vectors, model, run / "mining_queries",
+            query_embedding_manifest=mining_manifest, translations=mining_translations, config=policy, batch_size=config["reranker_batch_size"])
         train_bundle = mine_hard_negatives(records, train_doc, catalog, tokenizer, contest)
         dev_bundle = mine_hard_negatives(records, dev_doc, catalog, tokenizer, contest)
         atomic_json(run / "train_mining.json", train_bundle)
@@ -163,7 +178,6 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
     finally:
         model.close()
     dev_vectors, dev_manifest = slice_query_vectors(dev_queries, queries, query_vectors, qm)
-    translated = {q["id"]: t for q, t in zip(queries, translations, strict=True)}
     dev_translations = [translated[q["id"]] for q in dev_queries]
     finalists = sorted((run / "checkpoints" / label_version).glob("checkpoint-*")) + [Path(training["adapter"])]
     trials = []
@@ -193,12 +207,36 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         "reranker_spec": config["reranker"], "calibration_context": calibration_context(config, analyzer),
         "scorer": "PLAN_DERIVED_LOCAL_PROXY_NOT_OFFICIAL_BTC",
         "policy": {"doc_top_k": best["doc_top_k"], "chunk_top_k": best["chunk_top_k"],
-            "doc_score_margin": best["score_margin"], "chunk_score_margin": best["score_margin"]}, "trials": trials}
+            "doc_score_margin": best["doc_score_margin"], "chunk_score_margin": best["chunk_score_margin"]}, "trials": trials}
     calibration["manifest_sha256"] = digest_json(calibration)
     atomic_json(base_run / "calibrated_policy.json", calibration)
+    selected_policy = replace(policy,**calibration["policy"])
+    selected_model = TorchQwenReranker(config["reranker"],adapter_path=base_run / "selected_adapter")
+    try:
+        if config.get("research",{}).get("dev_ablations",True):
+            ablations = run_dev_ablations(index,dev_queries,dev_vectors,dev_manifest,dev_translations,
+                selected_model,selected_policy,dev_doc,contest,run / "ablations" / label_version)
+            atomic_json(base_run / "ablation_summary.json", {"split":"dev","trials":ablations,
+                "used_for_final_checkpoint_selection":False,"heldout_data_used":False})
+        if heldout_doc is not None:
+            vectors,manifest = slice_query_vectors(heldout_queries,queries,query_vectors,qm)
+            records,_ = predict_strong(index,heldout_queries,vectors,selected_model,
+                run / "heldout" / (label_version+'-'+digest_json(heldout_doc)[:10]) / "queries",
+                query_embedding_manifest=manifest,translations=[translated[q["id"]] for q in heldout_queries],
+                config=selected_policy,batch_size=config["reranker_batch_size"])
+            heldout_report = evaluate_frozen_selection(records,heldout_doc,catalog,tokenizer,calibration,base_run / "heldout_evaluation.json")
+        else:
+            heldout_report = {"state":"WAITING_FOR_INDEPENDENT_REVIEWED_HELD_OUT_LABELS",
+                "required_file":str(heldout_path),"used_for_checkpoint_or_cutoff_selection":False}
+            atomic_json(base_run / "heldout_evaluation.json",heldout_report)
+    finally:
+        selected_model.close()
     status = {"state": "TRAINED_DEV_F2_SELECTED_HELD_OUT_PENDING", "fine_tuned": True,
+        "heldout_evaluation":heldout_report,
         "model_parameter_budget": selected_budget,
         "adapter": str(base_run / "selected_adapter"), "dev_proxy_f2": best["combined_f2"],
         "official_btc_score": None, "corpus_promoted": False}
+    if heldout_doc is not None:
+        status["state"] = "TRAINED_DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY"
     atomic_json(base_run / "status.json", status)
     return status

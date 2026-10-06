@@ -16,6 +16,7 @@ from test_retrieval_cascade import CascadeReranker, Tokenizer, Translator
 from vietmedbridge.artifacts import atomic_json, digest_json, read_json, sha256_file
 from vietmedbridge.competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from vietmedbridge.embeddings import embed_units, embedding_matrix
+from vietmedbridge.document_dense import document_units
 from vietmedbridge.full_plan_runtime import reviewed_calibration
 from vietmedbridge.medical_lexical import MedicalAnalyzer
 from vietmedbridge.query_expansion import (PICO_FIELDS, cached_expansions, expand_queries,
@@ -56,10 +57,13 @@ def strong_pipeline(tmp_path, catalog, queries=None):
     sm = embed_units(source.units, secondary, tmp_path/'secondary', part_size=1)
     secondary.identity = {**secondary.identity, 'input_role':'query'}
     am = embed_units(aux, secondary, tmp_path/'aux')
+    docs=document_units(source,tokenizer)
+    dm=embed_units(docs,encoder,tmp_path/'documents')
     index = StrongIndex(source, embedding_matrix(tmp_path/'corpus', cm), cm, tmp_path/'index', tokenizer,
         secondary_vectors=embedding_matrix(tmp_path/'secondary', sm), secondary_manifest=sm,
         auxiliary_vectors=embedding_matrix(tmp_path/'aux', am), auxiliary_manifest=am,
-        auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=MedicalAnalyzer(segmentation=False))
+        auxiliary_inputs=aux, queries=queries, expansions=expansions, analyzer=MedicalAnalyzer(segmentation=False),
+        document_vectors=embedding_matrix(tmp_path/'documents',dm),document_manifest=dm,document_inputs=docs)
     config = StrongConfig(doc_candidate_k=3, sparse_top_k=3, detail_doc_k=3, doc_top_k=3,
         doc_min_k=1, chunk_top_k=3, chunk_min_k=1, children_per_doc=1)
     return index, queries, qm, embedding_matrix(tmp_path/'qvectors', qm), translations, config
@@ -82,6 +86,7 @@ def test_strong_all_1200_queries_resume_source_export_and_diagnostics(tmp_path, 
     assert again == records and repeated_report == report and repeat.calls == 0
     diagnostic = diagnose(records, queries, index, tmp_path/'diagnostic.json')
     assert diagnostic['candidate_branch_occurrences']['dense_qwen'] > 0
+    assert diagnostic['candidate_branch_occurrences']['dense_document'] > 0
     assert diagnostic['quality_state'] == 'NOT_EVALUATED_NO_REFERENCE_LABELS'
     for record in records:
         assert record['prediction']['relevant_chunks']
@@ -415,7 +420,7 @@ def test_dev_ablations_run_all_profiles_and_forbid_contest_tuning(tmp_path, cata
     labels = {'split':'dev','reviewed':True,'queries':[labeled(q['id'],q['query'],583,index.catalog.parents['parent-583']['text']) for q in queries]}
     results = run_dev_ablations(index, queries, vectors, qm, translations, CascadeReranker(), policy,
         labels, [], tmp_path/'ablations')
-    assert len(results) == 7 and all('combined_f2' in r for r in results)
+    assert len(results) == 8 and all('combined_f2' in r for r in results)
     with pytest.raises(ValueError, match='Contest'):
         run_dev_ablations(index, queries, vectors, qm, translations, CascadeReranker(), policy, labels, queries, tmp_path/'leak')
 
@@ -426,7 +431,7 @@ def test_full_notebook_training_is_separate_no_action_and_pinned_models():
         notebook = json.loads((root/'notebooks'/name).read_text(encoding='utf-8'))
         source = '\n'.join(c['source'] for c in notebook['cells'] if c['cell_type'] == 'code')
         assert '.[notebook,retrieval,strong]' in source
-        expected_api = 'full-master-plan-strong-v2-15b' if name.startswith('04') else 'full-master-plan-supervised-v3'
+        expected_api = 'full-master-plan-strong-v3-per-model-15b' if name.startswith('04') else 'full-master-plan-supervised-v4-per-model-15b'
         assert expected_api in source and 'git' in source
         assert 'ACTION =' not in source
         for cell in notebook['cells']:
@@ -476,7 +481,7 @@ def test_main_colab_entrypoint_wiring_all_queries_and_cache_resume(tmp_path, cat
         def __init__(self, spec):
             super().__init__()
             self.identity = {**spec, 'pooling':'cls-l2-v1','precision':'torch.float16', 'device_class':'cuda',
-                'truncation':False, 'query_instruction':None,'inference_code_sha256':sha256_file(retrieval_models.__file__),
+                'dimension':self.dimension,'truncation':False, 'query_instruction':None,'inference_code_sha256':sha256_file(retrieval_models.__file__),
                 'test_double':True}
         def encode(self, texts, **kwargs):
             calls['primary'] += 1
@@ -531,7 +536,7 @@ def test_main_colab_entrypoint_wiring_all_queries_and_cache_resume(tmp_path, cat
     result = runtime.run_full_pipeline(data, checkout, code_commit='CPU-test', work_dir=tmp_path/'work')
     assert result['ready']['query_count'] == result['status']['query_count'] == 1200
     assert result['ready']['official_score'] is None
-    assert result['status']['model_parameter_budget']['total_parameters'] == 13_374_547_456
+    assert result['status']['model_parameter_budget']['total_parameters'] == 20_346_066_432
     assert result['status']['fine_tuning'] == 'WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS'
     before = dict(calls)
     repeated = runtime.run_full_pipeline(data, checkout, code_commit='CPU-test', work_dir=tmp_path/'work')

@@ -29,12 +29,12 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
 5. **04 — Kiến trúc retrieval đầy đủ và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
    **Chọn GPU, chạy từ đầu.** Mặc định đọc `stage-a-data-v3-laodong`, candidate
    `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
-   representations duy nhất. Bản hiện tại dùng **BGE-M3 + Qwen3-Embedding-0.6B**,
+   representations duy nhất. Bản hiện tại dùng **BGE-M3 child/document dense + Qwen3-Embedding-8B**,
    BM25 VI/EN/ZH với PyVI/Jieba/soft medical fields → weighted RRF →
    **Qwen3-Reranker-8B** document/child MaxP → exact-source parent 512/640
    + token LCS dedup. Qwen3-4B dịch query, thêm PICO/subqueries/HyDE cho query
-   phức tạp khi qua guards. Reranker 8B dùng NF4, các model nạp lần lượt trên Colab.
-   Tổng pretrained 13,375B; gate cộng thêm adapter và giữ tổng ≤15B.
+   phức tạp khi qua guards. Hai model 8B dùng NF4, nạp lần lượt trên Colab.
+   Theo xác nhận của Sếp từ BTC, gate giữ **≤15B từng model**, gồm adapter của model đó.
    Tái sử dụng BGE vectors v1 đã kiểm; checkpoint vector/LLM/scored stage/query.
    **Run all mặc định chạy hết
    1.200 official queries** (`MAX_NEW_*=None`), validate source/schema rồi xuất
@@ -45,9 +45,10 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
 6. **05 — Tạo draft từ source, duyệt nhãn và supervised training:**
    [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
    Chọn GPU và Run all. Khi chưa có nhãn, Qwen 4B tạo draft train từ source;
-   dev query do team viết độc lập. Notebook xuất file review, giữ checkpoint.
+   dev/held-out query do team viết độc lập. Notebook xuất file review, giữ checkpoint.
    Sau khi team duyệt source queries và hard negatives: mining 1 positive +
-   7 negatives → QLoRA → dev NDCG/MRR → finalist F2 cutoff → adapter cho 04.
+   7 negatives → QLoRA → dev NDCG/MRR → finalist F2 cutoff độc lập doc/chunk
+   → dev ablations → đánh giá held-out với policy đã freeze → adapter cho 04.
    Lưu file đã duyệt về đúng đường dẫn Drive rồi Run all để tiếp tục.
    Xem [quy trình review và giới hạn bằng chứng](docs/FULL_PLAN.md).
 
@@ -177,11 +178,11 @@ Sinh riêng notebook retrieval/training hiện tại, không thay đổi 00–03
 
 ## Phạm vi hiện tại
 
-Notebook 04 hiện dùng tổng bốn model **13.374.547.456 parameters**, trước
-quantization: BGE-M3, Qwen Embedding 0.6B, Qwen Instruct 4B và Qwen Reranker 8B.
-Gate cộng tổng các model và adapter, giới hạn ≤15B theo yêu cầu của Sếp.
-Xem [cấu hình và cách chạy hiện tại](docs/FULL_PLAN.md); đây chưa phải xác nhận
-BTC về cách tính giới hạn tổng. Giữ DATA_ROOT, dùng run `stage-a-full-plan-v2-15b`.
+Notebook 04 dùng BGE-M3, Qwen Embedding 8B, Qwen Instruct 4B và Qwen Reranker 8B.
+Tổng inventory 20.346.066.432 parameters; gate kiểm **≤15B từng model**, theo
+xác nhận của Sếp từ BTC ngày 06/10/2026. Adapter cộng vào base model tương ứng.
+Xem [cấu hình và cách chạy hiện tại](docs/FULL_PLAN.md). Giữ DATA_ROOT,
+dùng run `stage-a-full-plan-v3-per-model-15b`.
 
 Đã có data pipeline và code pretrained cho embedding/index/reranker/submission,
 source-to-query drafts, hai vòng review và supervised reranker workflow.

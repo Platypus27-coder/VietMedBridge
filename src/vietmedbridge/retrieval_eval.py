@@ -80,20 +80,21 @@ def cutoff_sweep(records, labels_document, catalog, tokenizer, config):
     if any(not isinstance(r.get("relevant_docs"), list) or not isinstance(r.get("relevant_chunks"), list) for r in labels):
         raise ValueError("Dev labels need explicit document and chunk reference lists.")
     scores = []
-    for doc_k, chunk_k, margin in product((3, 5, 10), (2, 4, 8), (None, 1.0, 2.0, 4.0)):
+    for doc_k, chunk_k, doc_margin, chunk_margin in product((3, 5, 10), (2, 4, 8), (None, 1.0, 2.0, 4.0), (None, 1.0, 2.0, 4.0)):
         if doc_k > config.detail_doc_k:
             continue
         policy = replace(config, doc_min_k=min(config.doc_min_k, doc_k), doc_top_k=doc_k,
                          chunk_min_k=min(config.chunk_min_k, chunk_k), chunk_top_k=chunk_k,
-                         doc_score_margin=margin, chunk_score_margin=margin)
+                         doc_score_margin=doc_margin, chunk_score_margin=chunk_margin)
         predictions = [select_parents(catalog, record["ranking"], policy, tokenizer, record["prediction"]["id"])[0] for record in records]
         report = evaluate_predictions(predictions, labels, tokenizer)
         if report["combined_f2"] is None:
             raise ValueError("Need positive document AND chunk references for combined F2.")
-        scores.append({"doc_top_k": doc_k, "chunk_top_k": chunk_k, "score_margin": margin,
+        scores.append({"doc_top_k": doc_k, "chunk_top_k": chunk_k,
+                       "doc_score_margin": doc_margin, "chunk_score_margin": chunk_margin,
                        "combined_f2": report["combined_f2"],
                        "documents_macro": report["documents_macro"], "chunks_macro": report["chunks_macro"]})
-    scores.sort(key=lambda r: (-r["combined_f2"], r["doc_top_k"] + r["chunk_top_k"], str(r["score_margin"])))
+    scores.sort(key=lambda r: (-r["combined_f2"], r["doc_top_k"] + r["chunk_top_k"], str(r["doc_score_margin"]), str(r["chunk_score_margin"])))
     return {"scorer": "PLAN_DERIVED_LOCAL_PROXY_NOT_OFFICIAL_BTC", "split": "dev",
             "labels_sha256": digest_json(labels_document), "trials": scores,
             "best_dev_policy": scores[0], "state": "DEV_CALIBRATED_REQUIRES_HELD_OUT_TEST",
@@ -118,7 +119,7 @@ def evaluate_candidate_recall(records, labels, catalog, tokenizer):
             doc_recalls.append(row["fused_document_pool_recall"])
         expected_chunks = label.get("relevant_chunks") or []
         if expected_chunks:
-            parent_ids = {catalog.children[r["child_id"]]["parent_id"] for r in ranking["children"]}
+            parent_ids = {r.get("parent_id",catalog.children[r["child_id"]]["parent_id"]) for r in ranking["children"]}
             parents = [(catalog.parents[p]["doc_id"], score_tokens(tokenizer, catalog.parents[p]["text"])) for p in parent_ids]
             covered = 0
             for reference in expected_chunks:

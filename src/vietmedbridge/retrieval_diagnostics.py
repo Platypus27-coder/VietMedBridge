@@ -52,6 +52,7 @@ def run_dev_ablations(index, queries, vectors, manifest, translations, reranker,
     if {q["id"]: q["query"] for q in queries} != {q["id"]: q["query"] for q in labels_document["queries"]}:
         raise ValueError("Ablations must use the independent labeled dev query set.")
     variants = {"full": config, "without_second_dense": replace(config, second_dense_weight=0),
+        "without_document_dense":replace(config,document_dense_weight=0),
         "without_translated_sparse": replace(config, en_weight=0, zh_weight=0),
         "without_hyde": replace(config, hyde_weight=0), "without_subqueries": replace(config, subquery_weight=0),
         "parent512": replace(config, adaptive_parents=False), "rrf_rerank_fusion": replace(config, rerank_fusion="rrf")}

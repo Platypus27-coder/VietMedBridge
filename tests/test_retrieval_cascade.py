@@ -194,7 +194,8 @@ def test_partial_translation_canary_resumes_with_same_signature(tmp_path, catalo
     labels = {"split":"dev", "reviewed":True, "queries":[{"id":123,
         "relevant_docs":[583], "relevant_chunks":[{"doc_id":583,"chunk_text":catalog.parents["parent-583"]["text"]}]}]}
     sweep = cutoff_sweep(records, labels, catalog, index.tokenizer, config)
-    assert len(sweep["trials"]) == 12 and sweep["best_dev_policy"]["combined_f2"] > 0
+    assert len(sweep["trials"]) == 48 and sweep["best_dev_policy"]["combined_f2"] > 0
+    assert any(t['doc_score_margin'] != t['chunk_score_margin'] for t in sweep['trials'])
     assert not sweep["auto_applied_to_submission"]
     recall = evaluate_candidate_recall(records, labels["queries"], catalog, index.tokenizer)
     assert recall["frozen_document_id_coverage_macro"] == recall["fused_document_pool_recall_macro"] == recall["child_parent_pool_recall_macro"] == 1
