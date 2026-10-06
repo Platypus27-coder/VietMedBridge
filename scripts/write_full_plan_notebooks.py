@@ -144,6 +144,14 @@ def main():
         Tối thiểu 32 train/8 dev/8 held-out được accept, hết PENDING mới xuất labels.
         Không tự bật reviewed hoặc exhaustive_chunks cho model predictions.
 
+        Nếu Sếp giao Codex duyệt bộ pilot: file có review_mode=AI_ASSISTED_PILOT,
+        reviewer_type=AI và nguồn gốc ủy quyền được ghi rõ. Bộ pilot vẫn cần đủ
+        32 train/8 dev/8 held-out; các mẫu PENDING còn lại được để dành, không
+        biến thành nhãn âm tính. Dev/held-out ghi AI_REVIEWED_PILOT, không giả
+        independently_written=true hoặc nhãn human gold. Upload file
+        source_review_ai_pilot.json vào /content bằng tab Files của Colab rồi
+        Run all. Cell chuẩn bị tự giữ backup và đưa bản duyệt vào đúng Drive path.
+
         Train/dev tách theo query, IDs và nội dung không trùng 1.200 contest queries.
         Mine 1 positive + 7 negatives, ưu tiên top ranks, không lấy predictions làm gold.
         QLoRA checkpoint giữ optimizer/RNG để resume. Đánh giá dev NDCG/MRR rồi
@@ -155,11 +163,15 @@ def main():
         md("## 1. Bootstrap — CPU"),
         code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json")
             .replace("retrieval_runtime.json", "training_runtime.json")
-            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v4-per-model-15b")),
+            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v5-ai-reviewed-pilot")),
         md("## 2. Chuẩn bị nhãn — GPU chỉ khi còn thiếu draft train"),
         code('''
         import json
-        from vietmedbridge.training_data import prepare_training_data
+        from pathlib import Path
+        from vietmedbridge.training_data import prepare_training_data, install_ai_pilot_review
+        AI_REVIEW_UPLOAD = Path("/content/source_review_ai_pilot.json")
+        if AI_REVIEW_UPLOAD.is_file():
+            print(json.dumps(install_ai_pilot_review(AI_REVIEW_UPLOAD, DATA_ROOT), ensure_ascii=False, indent=2))
         PREPARATION = prepare_training_data(DATA_ROOT, CHECKOUT, max_new_samples=None)
         print(json.dumps(PREPARATION, ensure_ascii=False, indent=2))
         if PREPARATION["state"] == "WAITING_FOR_SOURCE_QUERY_REVIEW":
@@ -190,7 +202,7 @@ def main():
             files.download(TRAINING_STATUS["review_path"])
         '''),
         md('''
-        Dừng ở bước review nghĩa là cần nhãn do team duyệt; chưa có model fine-tune
+        Dừng ở bước review nghĩa là cần nhãn nguồn hoặc hard negatives; chưa có model fine-tune
         hoặc F2 được chứng minh. Dev F2, ablation và held-out đều là local proxy,
         chưa phải score BTC. Embedding fine-tune/sharded dense có API trong package,
         hướng dẫn ở docs/FULL_PLAN.md. Sau khi chọn adapter hợp lệ, mở 04 và Run all;

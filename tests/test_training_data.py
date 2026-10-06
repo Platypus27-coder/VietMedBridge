@@ -17,7 +17,7 @@ from vietmedbridge.reranker_training import mine_hard_negatives
 from vietmedbridge.retrieval_data import Catalog
 from vietmedbridge.training_data import (bind_source_plan, export_source_review,
     generate_training_drafts, plan_training_sources, prepare_training_data,
-    publish_reviewed_labels, validate_draft)
+    publish_reviewed_labels, validate_draft, install_ai_pilot_review, reuse_completed_review_plan)
 
 
 @pytest.fixture
@@ -141,6 +141,108 @@ def test_reviewed_publication_requires_independent_dev_and_tracks_provenance(tmp
     assert all(q['provenance']['label_kind']=='HUMAN_REVIEWED_SYNTHETIC_TRAIN' for q in train['queries'])
     assert all(q['provenance']['label_kind']=='INDEPENDENT_HUMAN_DEV' for q in dev_doc['queries'])
     assert all(not q['negative_child_ids'] for q in train['queries'])
+
+
+def test_explicit_ai_pilot_publishes_only_reviewed_subset_without_claiming_human_gold(tmp_path,sources,policy):
+    policy = {**policy,'heldout_samples':2,'heldout_fraction':.25,'min_heldout_reviewed':1}
+    plan,review = reviewed_setup(tmp_path,sources,policy)
+    review.update(review_mode='AI_ASSISTED_PILOT',review_authorization='USER_DELEGATED_TO_CODEX_2026_10_06')
+    chosen = set()
+    for item in review['items']:
+        if item['split'] in chosen:
+            item['review'].update(decision='PENDING',reviewer='',independently_written=False)
+        else:
+            chosen.add(item['split'])
+            item['review'].update(reviewer='AI CPU review fixture',reviewer_type='AI',query_author_type='AI',independently_written=False)
+    atomic_json(tmp_path/'source_review.json',review)
+    result = publish_reviewed_labels(tmp_path,plan,sources,[],tmp_path/'labels')
+    assert result['state']=='READY_FOR_HARD_NEGATIVE_REVIEW'
+    assert result['accepted']=={'train':1,'dev':1,'heldout':1}
+    assert result['deferred_source_items']==5 and result['human_validated'] is False
+    for split in ('train','dev','heldout'):
+        label = read_json(tmp_path/'labels'/f'retrieval_{split}.json')
+        assert len(label['queries'])==1 and label['human_validated'] is False
+        assert label['review_mode']=='AI_ASSISTED_PILOT'
+        assert label['queries'][0]['provenance']['label_kind']==f'AI_REVIEWED_PILOT_{split.upper()}'
+    assert sum(i['review']['decision']=='PENDING' for i in read_json(tmp_path/'source_review.json')['items'])==5
+
+
+def test_ai_pilot_rejects_false_human_claims_and_still_requires_minimums_and_exact_quotes(tmp_path,sources,policy):
+    plan,review = reviewed_setup(tmp_path,sources,policy)
+    first = review['items'][0]
+    first['review']['reviewer_type']='AI'
+    atomic_json(tmp_path/'source_review.json',review)
+    with pytest.raises(ValueError,match='explicit AI_ASSISTED_PILOT'):
+        publish_reviewed_labels(tmp_path,plan,sources,[],tmp_path/'labels')
+    review.update(review_mode='AI_ASSISTED_PILOT',review_authorization='USER_DELEGATED_TO_CODEX_2026_10_06')
+    for item in review['items']:
+        item['review'].update(reviewer_type='AI',query_author_type='AI',independently_written=False)
+    first['review']['independently_written']=True
+    atomic_json(tmp_path/'source_review.json',review)
+    with pytest.raises(ValueError,match='independent human authorship'):
+        publish_reviewed_labels(tmp_path,plan,sources,[],tmp_path/'labels')
+    first['review']['independently_written']=False
+    first['review']['evidence_quote']='A fabricated quote not present in the source.'
+    atomic_json(tmp_path/'source_review.json',review)
+    with pytest.raises(ValueError,match='query/quote'):
+        publish_reviewed_labels(tmp_path,plan,sources,[],tmp_path/'labels')
+    for item in review['items']:
+        item['review']['decision']='PENDING'
+    atomic_json(tmp_path/'source_review.json',review)
+    assert publish_reviewed_labels(tmp_path,plan,sources,[],tmp_path/'labels')['state']=='WAITING_FOR_SOURCE_QUERY_REVIEW'
+    assert not (tmp_path/'labels/retrieval_train.json').exists()
+
+
+def test_ai_review_upload_keeps_backup_sources_and_conflicting_team_edits(tmp_path,sources,policy):
+    data = tmp_path/'data'
+    review_dir = data/'labels/preparation/stage-a-source-training-v2-heldout'
+    plan, original = reviewed_setup(review_dir,sources,policy)
+    incoming = deepcopy(original)
+    incoming.update(review_mode='AI_ASSISTED_PILOT',review_authorization='USER_DELEGATED_TO_CODEX_2026_10_06')
+    for item in incoming['items']:
+        item['review'].update(reviewer_type='AI',query_author_type='AI',independently_written=False)
+    for item in original['items']:
+        item['review'].update(decision='PENDING',reviewer='',independently_written=False)
+    target = review_dir/'source_review.json'
+    atomic_json(target,original)
+    upload = tmp_path/'source_review_ai_pilot.json'
+    atomic_json(upload,incoming)
+    result = install_ai_pilot_review(upload,data)
+    assert read_json(result['backup_path'])==original and read_json(target)==incoming
+    assert result['accepted']=={'train':4,'dev':2,'heldout':0}
+    assert install_ai_pilot_review(upload,data)['accepted']==result['accepted']
+    changed = deepcopy(incoming)
+    changed['items'][0]['review']['notes']='team already edited this decision'
+    atomic_json(target,changed)
+    with pytest.raises(ValueError,match='conflict'):
+        install_ai_pilot_review(upload,data)
+    assert read_json(target)==changed
+    atomic_json(target,original)
+    incoming['items'][0]['text']='tampered source'
+    atomic_json(upload,incoming)
+    with pytest.raises(ValueError,match='immutable'):
+        install_ai_pilot_review(upload,data)
+    assert read_json(target)==original
+
+
+def test_review_only_upgrade_reuses_complete_sealed_drafts_but_checks_every_source_contract(tmp_path,sources,policy):
+    plan,review = reviewed_setup(tmp_path,sources,policy)
+    review.update(review_mode='AI_ASSISTED_PILOT',review_authorization='USER_DELEGATED_TO_CODEX_2026_10_06')
+    atomic_json(tmp_path/'source_review.json',review)
+    proposed = {k:v for k,v in plan.items() if k!='sha256'}
+    proposed['code_sha256']='different-review-code-version'
+    proposed['sha256']=digest_json(proposed)
+    assert reuse_completed_review_plan(tmp_path,proposed)==plan
+    spec={'model_id':'CPU-TEACHER-DOUBLE','revision':'fixture','max_new_tokens':384}
+    assert generate_training_drafts(tmp_path,reuse_completed_review_plan(tmp_path,proposed),spec,[],None)['written_this_call']==0
+    changed = deepcopy(proposed)
+    changed['prompt_sha256']='changed-teacher-prompt'
+    with pytest.raises(ValueError,match='source/prompt/policy changed'):
+        reuse_completed_review_plan(tmp_path,changed)
+    sample=next(s for s in plan['samples'] if s['split']=='train')
+    (tmp_path/'drafts'/(sample['item_id']+'.json')).unlink()
+    with pytest.raises(ValueError,match='drafts to be complete'):
+        reuse_completed_review_plan(tmp_path,proposed)
 
 
 def test_three_source_folds_keep_heldout_out_of_teacher_and_training_labels(tmp_path,sources,policy):

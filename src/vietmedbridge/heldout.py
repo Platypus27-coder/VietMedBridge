@@ -38,6 +38,8 @@ def evaluate_frozen_selection(records, labels_document, catalog, tokenizer, cali
         if r["query_sha256"] != digest_json({"id":q["id"],"query":q["query"]}):
             raise ValueError("Held-out prediction/query checkpoint mismatch.")
     report = {"state":"FROZEN_POLICY_HELD_OUT_EVALUATED_LOCAL_PROXY", "split":"heldout",
+        "label_review_mode":labels_document.get("review_mode","HUMAN_REVIEW"),
+        "label_evaluation_scope":labels_document.get("evaluation_scope","HUMAN_REVIEWED_LOCAL_PROXY"),
         "calibration_manifest_sha256":calibration["manifest_sha256"],
         "adapter_manifest_sha256":calibration["adapter_manifest_sha256"],
         "labels_sha256":digest_json(labels_document),"catalog":catalog.identity,

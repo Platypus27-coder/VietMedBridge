@@ -179,6 +179,33 @@ def bind_source_plan(root, plan):
     atomic_json(path, plan)
 
 
+def reuse_completed_review_plan(root, proposed):
+    """A review-only upgrade may consume completed drafts under their original seal.
+
+Compare the complete source/query/prompt/policy contract, not just the review's
+plan ID. Never generate new drafts while reporting the old code's provenance.
+Draft content, model and teacher-code checks still run in generate_training_drafts.
+"""
+    root = Path(root)
+    if not (root / "source_plan.json").is_file() or not (root / "source_review.json").is_file():
+        return proposed
+    review = read_json(root / "source_review.json")
+    if review.get("review_mode") != "AI_ASSISTED_PILOT":
+        return proposed
+    existing = _check(read_json(root / "source_plan.json"))
+    if existing == proposed:
+        return proposed
+    ignored = {"code_sha256", "sha256"}
+    if ({k:v for k,v in existing.items() if k not in ignored}
+        != {k:v for k,v in proposed.items() if k not in ignored}
+        or review["source_plan_sha256"] != existing["sha256"]):
+        raise ValueError("AI pilot source/prompt/policy changed; keep the original data or use a new preparation run.")
+    if any(not (root / "drafts" / (s["item_id"] + ".json")).is_file()
+           for s in existing["samples"] if s["split"] == "train"):
+        raise ValueError("Review-only code upgrade requires all original train drafts to be complete.")
+    return existing
+
+
 def generate_training_drafts(root, plan, teacher_spec, contest_queries, teacher=None, *, max_new_samples=None):
     root = Path(root)
     if max_new_samples is not None and (type(max_new_samples) is not int or max_new_samples < 0):
@@ -240,9 +267,54 @@ def export_source_review(root, plan):
     return path
 
 
+def install_ai_pilot_review(upload_path, data_root, *, run_name="stage-a-source-training-v2-heldout"):
+    """Install an explicit AI pilot export without overwriting a team's review edits."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name):
+        raise ValueError("Unsafe preparation run name.")
+    target = Path(data_root) / "labels/preparation" / run_name / "source_review.json"
+    incoming, existing = read_json(upload_path), read_json(target)
+    if incoming.get("review_mode") != "AI_ASSISTED_PILOT" or incoming.get("review_authorization") != "USER_DELEGATED_TO_CODEX_2026_10_06":
+        raise ValueError("Expected the explicitly user-delegated AI pilot review export.")
+    if incoming.get("source_plan_sha256") != existing.get("source_plan_sha256"):
+        raise ValueError("Uploaded review belongs to another source plan.")
+    before = {i["item_id"]: i for i in existing["items"]}
+    if len(incoming["items"]) != len(before) or {i["item_id"] for i in incoming["items"]} != set(before):
+        raise ValueError("Uploaded review item coverage changed.")
+    counts = {s: 0 for s in ("train", "dev", "heldout")}
+    for item in incoming["items"]:
+        old, decision = before[item["item_id"]], item["review"]
+        if {k:v for k,v in old.items() if k != "review"} != {k:v for k,v in item.items() if k != "review"}:
+            raise ValueError("Uploaded review modified immutable source/draft fields.")
+        if old["review"].get("decision") != "PENDING" and old["review"] != decision:
+            raise ValueError("Existing review edits conflict with upload; preserve the team's decisions.")
+        if decision.get("decision") == "ACCEPT":
+            quote = decision.get("evidence_quote")
+            if (not _vietnamese_question(decision.get("query")) or not isinstance(quote, str)
+                or len(quote.strip()) < 20 or quote not in item["text"]):
+                raise ValueError("Uploaded accepted query/quote does not match its source.")
+            if (decision.get("reviewer_type") != "AI" or decision.get("query_author_type") != "AI"
+                or decision.get("independently_written") is not False or not decision.get("reviewer", "").strip()):
+                raise ValueError("Uploaded AI pilot must identify AI authorship and review.")
+            counts[item["split"]] += 1
+        elif decision.get("decision") not in ("PENDING", "REJECT"):
+            raise ValueError("Unknown uploaded review decision.")
+    backup = target.with_name("source_review.before-ai-pilot-" + digest_json(existing)[:12] + ".json")
+    if not backup.exists():
+        atomic_json(backup, existing)
+    atomic_json(target, incoming)
+    return {"review_path": str(target), "backup_path": str(backup), "accepted": counts,
+            "review_mode": "AI_ASSISTED_PILOT", "human_validated": False}
+
+
 def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
     root, labels_dir = Path(root), Path(labels_dir)
     review = read_json(root / "source_review.json")
+    review_mode = review.get("review_mode", "HUMAN_REVIEW")
+    if review_mode not in ("HUMAN_REVIEW", "AI_ASSISTED_PILOT"):
+        raise ValueError("Unknown source review mode.")
+    ai_pilot = review_mode == "AI_ASSISTED_PILOT"
+    if ai_pilot and review.get("review_authorization") != "USER_DELEGATED_TO_CODEX_2026_10_06":
+        raise ValueError("AI pilot review requires explicit user-delegated review provenance.")
     if review["source_plan_sha256"] != plan["sha256"] or catalog.identity != plan["catalog"]:
         raise ValueError("Human review/catalog/source plan mismatch.")
     expected = {s["item_id"]: s for s in plan["samples"]}
@@ -265,30 +337,44 @@ def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
         if decision.get("decision") not in ("ACCEPT", "REJECT") or not isinstance(decision.get("reviewer"), str) or not decision["reviewer"].strip():
             raise ValueError("Explicit ACCEPT/REJECT and reviewer name are required.")
         decisions.append({"item_id": item["item_id"], "review": decision})
+        reviewer_type = decision.get("reviewer_type", "HUMAN")
+        if reviewer_type not in ("HUMAN", "AI") or (ai_pilot and reviewer_type != "AI"):
+            raise ValueError("Source review must identify the actual reviewer type.")
+        if reviewer_type == "AI" and not ai_pilot:
+            raise ValueError("AI source labels require the explicit AI_ASSISTED_PILOT mode.")
         if decision["decision"] == "REJECT":
             continue
         text, quote = decision.get("query"), decision.get("evidence_quote")
         if (not _vietnamese_question(text) or not isinstance(quote, str) or len(quote.strip()) < 20
             or quote not in sample["text"] or not query_is_independent(text, contest_queries)):
             raise ValueError("Reviewed query/quote is invalid or overlaps contest queries.")
-        if sample["split"] != "train" and decision.get("independently_written") is not True:
+        if not ai_pilot and sample["split"] != "train" and decision.get("independently_written") is not True:
             raise ValueError("Dev/held-out questions must be independently written by the reviewer.")
+        if ai_pilot and (decision.get("independently_written") is not False
+                         or decision.get("query_author_type") != "AI"):
+            raise ValueError("AI pilot questions must not claim independent human authorship.")
         queries[sample["split"]].append({"id": sample["id"], "query": text.strip(),
             "relevant_docs": [sample["doc_id"]], "relevant_chunks": [{"doc_id": sample["doc_id"], "chunk_text": sample["text"]}],
             "negative_child_ids": [], "negative_categories": {}, "provenance": {"item_id": sample["item_id"],
                 "child_id": sample["child_id"], "source_text_sha256": sample["source_text_sha256"],
                 "start_char": sample["start_char"], "end_char": sample["end_char"], "source_group": sample["source_group"],
                 "evidence_quote": quote, "reviewer": decision["reviewer"], "source_plan_sha256": plan["sha256"],
-                "label_kind": {"train":"HUMAN_REVIEWED_SYNTHETIC_TRAIN","dev":"INDEPENDENT_HUMAN_DEV",
-                               "heldout":"INDEPENDENT_HUMAN_HELD_OUT"}[sample["split"]]}})
+                "label_kind": ("AI_REVIEWED_PILOT_" + sample["split"].upper()) if ai_pilot else
+                    {"train":"HUMAN_REVIEWED_SYNTHETIC_TRAIN","dev":"INDEPENDENT_HUMAN_DEV",
+                     "heldout":"INDEPENDENT_HUMAN_HELD_OUT"}[sample["split"]],
+                "reviewer_type": reviewer_type, "human_validated": not ai_pilot}})
     counts = {k: len(v) for k, v in queries.items()}
     if any(len({query_key(q["query"]) for q in qs}) != len(qs) for qs in queries.values()):
         raise ValueError("Duplicate reviewed questions within a split; edit or reject the duplicate.")
-    if pending or any(counts[s] < plan["policy"]["min_" + s + "_reviewed"] for s in counts):
+    review_scope = {"review_mode": review_mode, "human_validated": not ai_pilot,
+                    "evaluation_scope": "SOURCE_DISJOINT_AI_LABELS_LOCAL_PROXY" if ai_pilot else "HUMAN_REVIEWED_LOCAL_PROXY",
+                    "review_code_sha256": sha256_file(Path(__file__))}
+    if (pending and not ai_pilot) or any(counts[s] < plan["policy"]["min_" + s + "_reviewed"] for s in counts):
         return {"state": "WAITING_FOR_SOURCE_QUERY_REVIEW", "pending": pending, "accepted": counts,
-            "minimum_accepted": {s: plan["policy"]["min_" + s + "_reviewed"] for s in counts}, "review_path": str(root / "source_review.json")}
+            "minimum_accepted": {s: plan["policy"]["min_" + s + "_reviewed"] for s in counts}, "review_path": str(root / "source_review.json"), **review_scope}
     documents = {s: {"reviewed": True, "split": s, "exhaustive_chunks": False, "queries": qs,
-        "catalog": catalog.identity, "source_splits": plan["source_splits"], "positive_review_sha256": digest_json(decisions)} for s, qs in queries.items()}
+        "catalog": catalog.identity, "source_splits": plan["source_splits"], "positive_review_sha256": digest_json(decisions),
+        "deferred_source_items": pending, **review_scope} for s, qs in queries.items()}
     train, dev = validate_query_split(documents["train"], documents["dev"], contest_queries)
     if any(not query_is_independent(q["query"], train) for q in dev):
         raise ValueError("Reviewed train/dev questions overlap.")
@@ -299,7 +385,7 @@ def publish_reviewed_labels(root, plan, catalog, contest_queries, labels_dir):
         atomic_json(labels_dir / ("retrieval_" + split + ".json"), document)
     atomic_json(root / "accepted_review.json", _seal({"source_plan_sha256": plan["sha256"], "decisions": decisions,
         "labels_sha256": {s: digest_json(d) for s, d in documents.items()}}))
-    return {"state": "READY_FOR_HARD_NEGATIVE_REVIEW", "accepted": counts, "review_path": str(root / "source_review.json"),
+    return {"state": "READY_FOR_HARD_NEGATIVE_REVIEW", "accepted": counts, "deferred_source_items": pending, **review_scope, "review_path": str(root / "source_review.json"),
         "train_path": str(labels_dir / "retrieval_train.json"), "dev_path": str(labels_dir / "retrieval_dev.json")}
 
 
@@ -315,9 +401,11 @@ def prepare_training_data(data_root, checkout, *, run_name="stage-a-source-train
     from .retrieval_data import load_catalog, load_queries
     contest = load_queries(parquet_path(root, "query.parquet"), expected_count=1200)
     if train_path.exists() and dev_path.exists():
-        train, dev = validate_query_split(read_json(train_path), read_json(dev_path), contest)
+        train_document, dev_document = read_json(train_path), read_json(dev_path)
+        train, dev = validate_query_split(train_document, dev_document, contest)
         return {"state": "READY_FOR_HARD_NEGATIVE_REVIEW", "accepted": {"train": len(train), "dev": len(dev)},
-            "train_path": str(train_path), "dev_path": str(dev_path)}
+            "train_path": str(train_path), "dev_path": str(dev_path),
+            **{k: train_document[k] for k in ("review_mode", "human_validated", "evaluation_scope", "deferred_source_items") if k in train_document}}
     from transformers import AutoTokenizer
     from .model_budget import model_budget_report
     from .qwen_models import review_model_registry
@@ -333,6 +421,7 @@ def prepare_training_data(data_root, checkout, *, run_name="stage-a-source-train
         raise ValueError("Training corpus differs from official snapshot.")
     plan = plan_training_sources(catalog, contest, policy)
     output = root / "labels/preparation" / run_name
+    plan = reuse_completed_review_plan(output, plan)
     bind_source_plan(output, plan)
     atomic_json(output / "model_parameter_budget.json", budget)
     spec = {**config["translation"], "max_new_tokens": policy["teacher_max_new_tokens"]}

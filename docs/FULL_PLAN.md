@@ -111,7 +111,19 @@ notebook/ACTION:
    query để trống để người review viết độc lập. Team đánh ACCEPT/REJECT, reviewer,
    query và exact quote; dev/held-out đánh `independently_written=true` sau khi tự viết.
    Giữ mọi source fields; lưu file về đúng `review_path` trên Drive và Run all.
-   Tối thiểu 32 train/8 dev/8 held-out được accept, hết PENDING mới xuất labels.
+   Tối thiểu 32 train/8 dev/8 held-out được accept, hết PENDING mới xuất labels
+   trong chế độ người duyệt mặc định.
+   Sếp đã giao Codex duyệt pilot ngày 06/10/2026: bản được cấp phép có
+   `review_mode=AI_ASSISTED_PILOT`, reviewer/author type là AI. Chế độ này xuất
+   riêng các mẫu ACCEPT khi đủ tối thiểu; PENDING được giữ để làm sau, không
+   thành nhãn âm. Labels ghi `AI_REVIEWED_PILOT_*`, `human_validated=false`
+   và `SOURCE_DISJOINT_AI_LABELS_LOCAL_PROXY`. Không đặt
+   `independently_written=true` cho câu hỏi AI. Các kiểm tra nguồn, hash,
+   source split, contest overlap và minimum counts vẫn áp dụng.
+   Notebook 05 v5 nhận `/content/source_review_ai_pilot.json`; helper import
+   giữ backup bản Drive, kiểm mọi source/draft fields và từ chối ghi đè các
+   quyết định đã được team sửa. Kết quả dev/held-out AI là proxy pilot, cần
+   human audit trước khi dùng để khẳng định chất lượng hoặc promote corpus.
 4. Workflow chạy hybrid candidates. Nếu chưa có đủ positive/7 reviewed negatives
    cho từng query, xuất `candidate_reviews/<hash>/review.json`. Team đánh
    POSITIVE/NEGATIVE/SKIP + reviewer/category; unknown vẫn PENDING. Source spans,

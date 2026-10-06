@@ -170,7 +170,8 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         if train_bundle["state"] != "READY" or dev_bundle["state"] != "READY" or train_bundle["holds"] or dev_bundle["holds"]:
             review_path = export_candidate_review(base_run, records, train_doc, dev_doc, catalog)
             status = {"state": "MINING_REQUIRES_MORE_GOLD_COVERAGE_OR_REVIEWED_NEGATIVES", "fine_tuned": False,
-                "train_holds": train_bundle["holds"], "dev_holds": dev_bundle["holds"], "review_path": str(review_path)}
+                "train_holds": train_bundle["holds"], "dev_holds": dev_bundle["holds"], "review_path": str(review_path),
+                "label_review_mode": train_doc.get("review_mode", "HUMAN_REVIEW")}
             atomic_json(base_run / "status.json", status)
             return status
         training = train_qlora(model, train_bundle, dev_bundle, run / "checkpoints" / label_version,
@@ -206,6 +207,8 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         "dev_query_ids": [q["id"] for q in dev_queries], "dev_query_texts_sha256": [digest_json(q["query"]) for q in dev_queries],
         "reranker_spec": config["reranker"], "calibration_context": calibration_context(config, analyzer),
         "scorer": "PLAN_DERIVED_LOCAL_PROXY_NOT_OFFICIAL_BTC",
+        "label_review_mode": dev_doc.get("review_mode", "HUMAN_REVIEW"),
+        "label_evaluation_scope": dev_doc.get("evaluation_scope", "HUMAN_REVIEWED_LOCAL_PROXY"),
         "policy": {"doc_top_k": best["doc_top_k"], "chunk_top_k": best["chunk_top_k"],
             "doc_score_margin": best["doc_score_margin"], "chunk_score_margin": best["chunk_score_margin"]}, "trials": trials}
     calibration["manifest_sha256"] = digest_json(calibration)
@@ -232,6 +235,8 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
     finally:
         selected_model.close()
     status = {"state": "TRAINED_DEV_F2_SELECTED_HELD_OUT_PENDING", "fine_tuned": True,
+        "label_review_mode": train_doc.get("review_mode", "HUMAN_REVIEW"),
+        "label_evaluation_scope": dev_doc.get("evaluation_scope", "HUMAN_REVIEWED_LOCAL_PROXY"),
         "heldout_evaluation":heldout_report,
         "model_parameter_budget": selected_budget,
         "adapter": str(base_run / "selected_adapter"), "dev_proxy_f2": best["combined_f2"],
