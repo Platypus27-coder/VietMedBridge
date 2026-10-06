@@ -10,10 +10,13 @@ import numpy as np
 
 from .artifacts import digest_json, read_json, sha256_file, verify_file
 from .embeddings import embedding_matrix, unit_signature
+from .model_budget import model_budget_report
 from .retrieval_models import _TorchInference
 
-EMBEDDING_ID = "Qwen/Qwen3-Embedding-8B"
-EMBEDDING_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+EMBEDDING_ID = "Qwen/Qwen3-Embedding-0.6B"
+EMBEDDING_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+EMBEDDING_PARAMETERS = 595776512
+EMBEDDING_DIMENSION = 1024
 RERANKER_ID = "Qwen/Qwen3-Reranker-8B"
 RERANKER_REVISION = "77d193c791ed757ca307ee72715aa132723da912"
 QUERY_INSTRUCTION = "Given a Vietnamese biomedical question, retrieve source passages in Vietnamese, English or Chinese that provide relevant evidence."
@@ -34,6 +37,7 @@ def review_model_registry(config, document):
             or date.fromisoformat(entry["public_release"]) >= date(2026, 8, 1)
             or datetime.fromisoformat(entry["revision_last_modified"].replace("Z", "+00:00")) >= cutoff):
             raise ValueError("Model/revision lacks eligible public/date/parameter evidence in the reviewed registry.")
+    model_budget_report(config, document)
     return digest_json(document)
 
 
@@ -57,7 +61,7 @@ def cached_qwen_embeddings(root, inputs, spec, role):
     if (manifest["units_sha256"] != unit_signature(inputs) or encoder.get("input_role") != role
         or encoder.get("query_instruction") != QUERY_INSTRUCTION or encoder.get("fine_tuned") is not False
         or encoder.get("pooling") != "last-attended-token-l2" or encoder.get("truncation") is not False
-        or encoder.get("role") != "second_dense" or encoder.get("dimension") != 4096 or manifest["dimension"] != 4096
+        or encoder.get("role") != "second_dense" or encoder.get("dimension") != EMBEDDING_DIMENSION or manifest["dimension"] != EMBEDDING_DIMENSION
         or encoder.get("precision") != "torch.float16" or encoder.get("device_class") != "cuda"
         or encoder.get("inference_code_sha256") != sha256_file(Path(__file__))
         or any(encoder.get(k) != v for k, v in spec.items())):
@@ -113,7 +117,7 @@ class _QwenCUDA(_TorchInference):
 
         model_id, revision = review_spec(spec, role)
         if not torch.cuda.is_available():
-            raise RuntimeError("Qwen 8B requires a Colab GPU; do not load weights on local CPU.")
+            raise RuntimeError("Qwen retrieval inference requires a Colab GPU; do not load weights on local CPU.")
         self.torch, self.device, self.spec = torch, "cuda", dict(spec)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision,
             use_fast=True, padding_side="left", trust_remote_code=False)
@@ -129,7 +133,7 @@ class _QwenCUDA(_TorchInference):
             "torch": torch.__version__, "transformers": importlib.metadata.version("transformers"),
             "bitsandbytes": importlib.metadata.version("bitsandbytes") if spec["quantization"] == "nf4" else None,
             "inference_code_sha256": sha256_file(Path(__file__)), "fine_tuned": False}
-        self.identity["parameters_before_quantization"] = 7567295488 if role == "embedding" else 8188548096
+        self.identity["parameters_before_quantization"] = EMBEDDING_PARAMETERS if role == "embedding" else 8188548096
         self.oom_backoffs = 0
 
     def close(self):

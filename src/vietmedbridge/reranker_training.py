@@ -145,7 +145,7 @@ def verify_training_checkpoint(directory, contract):
     return manifest
 
 
-def train_qlora(reranker, train_bundle, dev_bundle, output_dir, *, epochs=2, learning_rate=2e-5, seed=42):
+def train_qlora(reranker, train_bundle, dev_bundle, output_dir, *, model_budget, epochs=2, learning_rate=2e-5, seed=42):
     """BCE yes/no training, 1 positive + 7 negatives; only CUDA/verified train/dev."""
     import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -174,6 +174,9 @@ def train_qlora(reranker, train_bundle, dev_bundle, output_dir, *, epochs=2, lea
     model = get_peft_model(model, LoraConfig(r=16, lora_alpha=32, lora_dropout=.05,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         bias="none", task_type="CAUSAL_LM"))
+    from .model_budget import add_adapter_parameters
+    budget = add_adapter_parameters(model_budget, sum(p.numel() for p in model.parameters() if p.requires_grad))
+    atomic_json(root / "model_parameter_budget.json", budget)
     model.config.use_cache = False
     tokenizer = reranker.tokenizer
 

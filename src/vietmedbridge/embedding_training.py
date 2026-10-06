@@ -10,7 +10,7 @@ from .reranker_training import ranking_metrics, verify_training_checkpoint
 
 
 def train_embedding_qlora(encoder, train_bundle, dev_bundle, output_dir, *, recall_report,
-                         epochs=2, learning_rate=1e-5, temperature=.05, seed=42):
+                         model_budget=None, epochs=2, learning_rate=1e-5, temperature=.05, seed=42):
     """Train 1 positive + 7 negatives with contrastive loss, not answer generation."""
     recall = recall_report.get("fused_document_pool_recall_macro")
     if type(recall) not in (int, float) or not np.isfinite(recall) or not 0 <= recall < .95:
@@ -42,6 +42,9 @@ def train_embedding_qlora(encoder, train_bundle, dev_bundle, output_dir, *, reca
     model = get_peft_model(model, LoraConfig(r=16, lora_alpha=32, lora_dropout=.05,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         task_type="FEATURE_EXTRACTION", bias="none"))
+    from .model_budget import add_adapter_parameters
+    budget = add_adapter_parameters(model_budget, sum(p.numel() for p in model.parameters() if p.requires_grad))
+    atomic_json(root / "model_parameter_budget.json", budget)
 
     class Groups:
         def __init__(self, bundle):

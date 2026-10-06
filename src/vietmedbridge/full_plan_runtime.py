@@ -11,6 +11,7 @@ from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .dataset import parquet_path
 from .embeddings import embed_units, embedding_matrix
 from .medical_lexical import MedicalAnalyzer
+from .model_budget import model_budget_report
 from .query_expansion import cached_expansions, expand_queries
 from .query_translation import cached_translations, translate_queries
 from .qwen_models import TorchQwenEncoder, TorchQwenReranker, cached_qwen_embeddings, review_model_registry
@@ -55,7 +56,7 @@ def reviewed_calibration(root, catalog, queries, spec, *, context):
 
 def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
                       build_run="stage-a-data-v3-laodong", candidate_name="candidate-1cd220a4be956d5a.json",
-                      run_name="stage-a-full-plan-v1", embedding_cache_run="stage-a-retrieval-v1",
+                      run_name="stage-a-full-plan-v2-15b", embedding_cache_run="stage-a-retrieval-v1",
                       max_new_embedding_parts=None, max_new_translations=None, max_new_queries=None):
     import torch
     from transformers import AutoTokenizer
@@ -67,7 +68,8 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
         raise RuntimeError("Select a Colab GPU before Run all.")
     root, checkout = Path(data_root), Path(checkout)
     config = read_json(checkout / "configs/retrieval_full.json")
-    review_model_registry(config, read_json(checkout / "configs/strong_model_manifest.json"))
+    registry = read_json(checkout / "configs/strong_model_manifest.json")
+    review_model_registry(config, registry)
     config["strong_model_review_sha256"] = sha256_file(checkout / "configs/strong_model_manifest.json")
     policy = StrongConfig(**config["retrieval"])
     policy.validate()
@@ -84,8 +86,10 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     glossary = root / "labels/medical_aliases.json"
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"], glossary_path=glossary if glossary.is_file() else None)
     config["analyzer"] = analyzer.identity
-    calibration, adapter_path = reviewed_calibration(root / "training/stage-a-qlora-v1", catalog, queries, config["reranker"],
+    calibration, adapter_path = reviewed_calibration(root / "training/stage-a-qlora-v2-15b", catalog, queries, config["reranker"],
         context=calibration_context(config, analyzer))
+    budget = model_budget_report(config, registry, adapter_paths=[adapter_path] if adapter_path else [])
+    config["model_parameter_budget"] = budget
     base_run = root / "retrieval" / run_name
     if calibration is not None:
         config["adapter_manifest_sha256"] = calibration["adapter_manifest_sha256"]
@@ -95,6 +99,8 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     run = root / "retrieval" / run_name
     contract = bind_pilot_run(run, plan_path=checkout / MASTER_PLAN, catalog=catalog,
         queries=queries, config=config, code_commit=code_commit)
+    atomic_json(run / "model_parameter_budget.json", budget)
+    print(f"Aggregate model parameters: {budget['total_parameters']:,} / {budget['limit_parameters']:,}")
     print("GPU:", torch.cuda.get_device_name(0), "| Run:", run)
     query_units = [{"id": q["id"], "text": q["query"]} for q in queries]
     cache = root / "retrieval" / embedding_cache_run
@@ -178,11 +184,13 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
     evidence = {"git_commit": code_commit, "dense": cm["encoder"], "second_dense": sm["encoder"],
         "translation_llm": read_json(translation_root / "config.json")["translator"], "expansion_signature": expansions[0]["signature"],
         "reranker": reranker_identity, "index": index.manifest, "retrieval_config": asdict(policy),
-        "calibration": calibration, "inference_scope": "COLAB_GPU_DEV_SELECTED_ADAPTER" if calibration else "COLAB_GPU_FULL_PRETRAINED_ARCHITECTURE"}
+        "calibration": calibration, "model_parameter_budget": budget,
+        "inference_scope": "COLAB_GPU_DEV_SELECTED_ADAPTER" if calibration else "COLAB_GPU_FULL_PRETRAINED_ARCHITECTURE"}
     _, ready = finish_pilot(records, queries, catalog, report, run, contract=contract, tokenizer=tokenizer,
         evidence=evidence, reference_labels_path=root / "labels/retrieval_reference.json", work_dir=work_dir)
     diagnostics = diagnose(records, queries, index, run / "diagnostics.json")
     status = {"master_plan": MASTER_PLAN, "architecture": config["architecture"], "query_count": len(records),
+        "model_parameter_budget": budget,
         "frozen_documents": len(catalog.documents), "eligible_documents": len(index.doc_ids),
         "second_dense": "EXECUTED_OR_VERIFIED_CACHE", "qwen_reranking": "EXECUTED_OR_VERIFIED_CACHE",
         "query_expansion": "VALIDATED_COMPLEX_ONLY_ADDITIVE", "medical_alias_entries": analyzer.identity["aliases"],

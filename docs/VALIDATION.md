@@ -1,5 +1,32 @@
 # Kiểm chứng data pipeline v2
 
+## Aggregate model budget correction — 06/10/2026
+
+- Model v1 tổng 20.346.066.432 parameters; gate từng model ≤15B chưa đảm bảo
+  giới hạn tổng mà Sếp yêu cầu. V2 giữ reranker 8B, query LLM 4B, BGE-M3 và
+  đổi second dense sang pinned Qwen3-Embedding-0.6B (595.776.512 parameters,
+  1.024 dimensions). Tổng pretrained **13.374.547.456**, trước quantization.
+  Rule BTC tính tổng hay từng model chưa được xác nhận; policy này áp giới
+  hạn tổng theo yêu cầu của Sếp.
+- Gate cộng mọi checkpoint đã dùng, không phụ thuộc precision/nạp lần lượt;
+  adapter safetensors đã kiểm hash được cộng thêm. Training đếm LoRA parameters
+  trước train. Tests kiểm bộ >15B dù từng model dưới 15B, ngưỡng đúng 15B,
+  adapter overflow, missing counts, checkpoint dùng chung và hash tampering.
+- **165 passed, 9 skipped** trên regression CPU. Test đúng entrypoint 04 chạy
+  đủ 1.200 query bằng model doubles và resume giữ nguyên ZIP/hash/cache.
+  FAISS native DLL cần chạy ngoài Windows sandbox; temp/test artifacts nằm
+  trong repo. Skips thuộc optional browser/Crawl4AI integrations.
+- Hub API xác minh revision `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`,
+  parameter count và config. Tải tokenizer/config, không weights. Tokenizer
+  0.6B đọc thật **8.760 corpus units/1.200 queries**: tối đa 336/410 tokens,
+  dưới budget 1.536. Evidence local ignored:
+  `artifacts/strong-model-review/aggregate_budget_verified.json`,
+  `embedding_06b_sources.json`, `regression-budget.xml`.
+- 8 notebooks qua schema/syntax/empty-output checks. 04/05 nâng workflow API
+  sang `full-master-plan-strong-v2-15b`; run inference/training tách khỏi v1.
+  Qwen vectors 8B không reuse cho 0.6B; BGE/corpus hợp lệ vẫn reuse.
+- GPU inference, QLoRA thực và relevance comparison của cấu hình mới chưa đo.
+
 ## Full master-plan architecture — 06/10/2026
 
 - Regression CPU cuối: **159 passed, 9 skipped**. Skips thuộc browser/Crawl4AI

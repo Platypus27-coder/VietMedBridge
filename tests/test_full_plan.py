@@ -22,7 +22,8 @@ from vietmedbridge.query_expansion import (PICO_FIELDS, cached_expansions, expan
     is_complex, validate_expansion)
 from vietmedbridge.query_translation import translate_queries
 from vietmedbridge.qwen_models import (pack_pair, pair_windows, review_spec, RERANKER_ID, RERANKER_REVISION,
-    TorchQwenEncoder, TorchQwenReranker, cached_qwen_embeddings, EMBEDDING_ID, EMBEDDING_REVISION, QUERY_INSTRUCTION)
+    TorchQwenEncoder, TorchQwenReranker, cached_qwen_embeddings, EMBEDDING_ID, EMBEDDING_REVISION,
+    EMBEDDING_DIMENSION, QUERY_INSTRUCTION)
 from vietmedbridge.reranker_training import mine_hard_negatives, ranking_metrics, validate_query_split
 from vietmedbridge.retrieval_diagnostics import diagnose, run_dev_ablations
 from vietmedbridge.sharded_dense import build_dense_shards, ShardedDenseIndex
@@ -268,13 +269,13 @@ def test_actual_qwen_batch_methods_last_token_pooling_and_raw_yes_no_logits():
 
 def test_qwen_vector_cache_binds_pooling_role_and_original_producer(tmp_path):
     from vietmedbridge import qwen_models
-    spec = {'model_id':EMBEDDING_ID,'revision':EMBEDDING_REVISION,'max_length':1536,'quantization':'nf4'}
+    spec = {'model_id':EMBEDDING_ID,'revision':EMBEDDING_REVISION,'max_length':1536,'quantization':'fp16'}
     encoder = Encoder()
-    encoder.dimension = 4096
+    encoder.dimension = EMBEDDING_DIMENSION
     encoder.identity = {**spec,'input_role':'corpus','query_instruction':QUERY_INSTRUCTION,'fine_tuned':False,
-        'pooling':'last-attended-token-l2','truncation':False,'role':'second_dense','dimension':4096,
+        'pooling':'last-attended-token-l2','truncation':False,'role':'second_dense','dimension':EMBEDDING_DIMENSION,
         'precision':'torch.float16','device_class':'cuda','inference_code_sha256':sha256_file(qwen_models.__file__)}
-    encoder.encode = lambda texts, batch_size: np.pad(np.array([[1,0,0]]*len(texts),dtype=np.float32),((0,0),(0,4093)))
+    encoder.encode = lambda texts, batch_size: np.pad(np.array([[1,0,0]]*len(texts),dtype=np.float32),((0,0),(0,EMBEDDING_DIMENSION-3)))
     units = [{'id':1,'text':'HbA1c'}]
     manifest = embed_units(units, encoder, tmp_path)
     assert cached_qwen_embeddings(tmp_path, units, spec, 'corpus')[1] == manifest
@@ -425,7 +426,7 @@ def test_full_notebook_training_is_separate_no_action_and_pinned_models():
         notebook = json.loads((root/'notebooks'/name).read_text(encoding='utf-8'))
         source = '\n'.join(c['source'] for c in notebook['cells'] if c['cell_type'] == 'code')
         assert '.[notebook,retrieval,strong]' in source
-        assert 'full-master-plan-strong-v1' in source and 'git' in source
+        assert 'full-master-plan-strong-v2-15b' in source and 'git' in source
         assert 'ACTION =' not in source
         for cell in notebook['cells']:
             if cell['cell_type'] == 'code':
@@ -483,18 +484,18 @@ def test_main_colab_entrypoint_wiring_all_queries_and_cache_resume(tmp_path, cat
             pass
 
     class Secondary(Encoder):
-        dimension = 4096
+        dimension = EMBEDDING_DIMENSION
         def __init__(self, spec):
             super().__init__()
             self.identity = {**spec, 'pooling':'last-attended-token-l2','precision':'torch.float16', 'device_class':'cuda',
                 'truncation':False,'query_instruction':QUERY_INSTRUCTION,'fine_tuned':False,'role':'second_dense',
-                'dimension':4096,'inference_code_sha256':sha256_file(qwen_models.__file__), 'test_double':True}
+                'dimension':EMBEDDING_DIMENSION,'inference_code_sha256':sha256_file(qwen_models.__file__), 'test_double':True}
             self.oom_backoffs = 0
         def for_role(self, role):
             return RoleEncoder(self, role)
         def encode(self, texts, **kwargs):
             calls['secondary'] += 1
-            return np.pad(super().encode(texts, **kwargs),((0,0),(0,4093)))
+            return np.pad(super().encode(texts, **kwargs),((0,0),(0,EMBEDDING_DIMENSION-3)))
         def close(self):
             pass
 
@@ -529,6 +530,7 @@ def test_main_colab_entrypoint_wiring_all_queries_and_cache_resume(tmp_path, cat
     result = runtime.run_full_pipeline(data, checkout, code_commit='CPU-test', work_dir=tmp_path/'work')
     assert result['ready']['query_count'] == result['status']['query_count'] == 1200
     assert result['ready']['official_score'] is None
+    assert result['status']['model_parameter_budget']['total_parameters'] == 13_374_547_456
     assert result['status']['fine_tuning'] == 'WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS'
     before = dict(calls)
     repeated = runtime.run_full_pipeline(data, checkout, code_commit='CPU-test', work_dir=tmp_path/'work')

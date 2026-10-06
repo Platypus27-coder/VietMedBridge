@@ -1,7 +1,8 @@
 {
   "architecture": "master-plan-dual-dense-medical-sparse-pico-hyde-qwen-cascade-adaptive-source-parents",
+  "model_budget": {"max_parameters": 15000000000, "scope": "ALL_ACTIVE_MODELS_BEFORE_QUANTIZATION"},
   "dense": {"model_id": "BAAI/bge-m3", "revision": "5617a9f61b028005a4858fdac845db406aefb181", "max_length": 512},
-  "second_dense": {"model_id": "Qwen/Qwen3-Embedding-8B", "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af", "max_length": 1536, "quantization": "nf4"},
+  "second_dense": {"model_id": "Qwen/Qwen3-Embedding-0.6B", "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3", "max_length": 1536, "quantization": "fp16"},
   "reranker": {"model_id": "Qwen/Qwen3-Reranker-8B", "revision": "77d193c791ed757ca307ee72715aa132723da912", "max_length": 1024, "quantization": "nf4"},
   "translation": {"model_id": "Qwen/Qwen3-4B-Instruct-2507", "revision": "cdbee75f17c01a7cc42f958dc650907174af0554", "max_input_tokens": 1536, "max_new_tokens": 1024},
   "embedding": {"part_size": 256, "batch_size": 16},

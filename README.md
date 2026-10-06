@@ -171,6 +171,12 @@ Sinh riêng notebook retrieval, không thay đổi 00–03:
 
 ## Phạm vi hiện tại
 
+Notebook 04 hiện dùng tổng bốn model **13.374.547.456 parameters**, trước
+quantization: BGE-M3, Qwen Embedding 0.6B, Qwen Instruct 4B và Qwen Reranker 8B.
+Gate cộng tổng các model và adapter, giới hạn ≤15B theo yêu cầu của Sếp.
+Xem [cấu hình và cách chạy hiện tại](docs/FULL_PLAN.md); đây chưa phải xác nhận
+BTC về cách tính giới hạn tổng. Giữ DATA_ROOT, dùng run `stage-a-full-plan-v2-15b`.
+
 Đã có data pipeline và code baseline pretrained cho embedding/index/reranker/submission.
 GPU inference thực tế ở notebook 04 cần chạy trên Colab; chưa huấn luyện reranker
 và chưa triển khai scorer F2 chính thức. Child 180,

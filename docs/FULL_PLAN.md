@@ -2,10 +2,33 @@
 
 Nguồn quyết định là [master plan Stage 3](../R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
 [Notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
-dùng `configs/retrieval_full.json`, namespace `stage-a-full-plan-v1`. Tên file
+dùng `configs/retrieval_full.json`, namespace `stage-a-full-plan-v2-15b`. Tên file
 giữ nguyên để link cũ mở đúng notebook chính. Chọn runtime GPU mới rồi **Run all**;
 không cần ACTION hoặc chạy lại 00–03. Bootstrap clone repo, cài extras và nâng
-code lock một lần sang `full-master-plan-strong-v1`.
+code lock một lần sang `full-master-plan-strong-v2-15b`.
+
+## Giới hạn tổng model theo yêu cầu Sếp
+
+Bộ model v1 có tổng **20.346.066.432 parameters**; gate cũ chỉ kiểm từng
+model dưới 15B. Câu chữ trong plan chưa xác định giới hạn theo từng model hay
+toàn hệ thống; chưa có xác nhận BTC về cách cộng tổng. Theo yêu cầu Sếp,
+v2 áp **tổng mọi model đã dùng ≤15B**, trước quantization, kể cả nạp lần lượt:
+
+- BGE-M3: 567.754.752 parameters.
+- Qwen3-Embedding-0.6B: 595.776.512 parameters, 1.024 dimensions.
+- Qwen3-4B-Instruct-2507: 4.022.468.096 parameters.
+- Qwen3-Reranker-8B: 8.188.548.096 parameters.
+
+Tổng pretrained **13.374.547.456**; dư **1.625.452.544** cho adapter.
+BM25/FAISS không thêm neural-model parameters. Adapter không merge được
+đếm từ shapes trong safetensors đã kiểm hash; training kiểm tham số LoRA
+ngay sau tạo model. Gate chặn tổng vượt 15B trước chạy inference/training;
+báo cáo nằm tại `model_parameter_budget.json` và submission evidence.
+NF4/FP16 và giải phóng VRAM không làm thay đổi tổng tham số này.
+
+Run v2 tách khỏi v1. Giữ DATA_ROOT và candidate hiện có; Qwen vectors 8B
+không được reuse cho 0.6B. BGE vectors cũ vẫn được kiểm để reuse.
+Đổi model có thể thay đổi chất lượng truy hồi; cần GPU/dev measurements.
 
 Input là candidate `candidate-1cd220a4be956d5a.json` trong build
 `stage-a-data-v3-laodong`: 864 documents, 9.076 children, 8.760 unique dense
@@ -21,7 +44,7 @@ Corpus pilot chưa gồm crawl 100k và chưa đủ toàn dataset.
    luôn giữ; nhánh sai schema/số/Latin entity/comparator/constraint cue bị loại.
    PICO chỉ nhận substrings câu hỏi gốc. Surface checks chưa chứng nhận ngữ nghĩa
    dịch/HyDE; cần reviewed dev ablation.
-3. **Qwen3-Embedding-8B** tạo nhánh dense thứ hai. Query dùng instruction,
+3. **Qwen3-Embedding-0.6B** tạo nhánh dense thứ hai. Query dùng instruction,
    corpus không dùng instruction; last attended token được L2-normalize.
    Original/accepted subqueries/HyDE là các nhánh additive.
 4. **BM25 VI/EN/ZH** dùng PyVI, Jieba, original Latin/acronym tokens, CJK
@@ -49,7 +72,8 @@ xác nhận BTC đã duyệt.
 
 ## GPU và checkpoint
 
-Hai model 8B mặc định NF4 4-bit, SDPA, batch2; nạp/giải phóng lần lượt. T4 là
+Embedding 0.6B dùng fp16; reranker 8B dùng NF4 4-bit, SDPA, batch2;
+nạp/giải phóng lần lượt. T4 là
 cấu hình mục tiêu, L4/A100 có dư địa hơn. Chưa đo GPU mới nên không cam kết thời
 gian hoặc NF4 có chất lượng bằng fp16. Không tải weights local.
 Weights/HF cache ở `/content/hf_cache`, vector parts/checkpoints ở Drive.
@@ -105,7 +129,7 @@ QLoRA reranker rank16, weighted BCE yes/no logits, gradient checkpointing,
 batch1/accumulation8. Epoch checkpoints giữ adapter/optimizer/scheduler/RNG và
 hash manifest; resume kiểm data/config/files. Dev NDCG/MRR chọn finalist, rồi
 full retrieval + F2 cutoff sweep trên reviewed dev chọn adapter/policy. Trạng
-thái vẫn held-out pending. 04 tự đọc `training/stage-a-qlora-v1/selected_adapter`
+thái vẫn held-out pending. 04 tự đọc `training/stage-a-qlora-v2-15b/selected_adapter`
 và `calibrated_policy.json`, kiểm corpus/analyzer/model/scorer/query hashes,
 tạo namespace `-ft-` mới.
 
@@ -120,6 +144,9 @@ tạo namespace `-ft-` mới.
   QLoRA dùng một positive/bảy negatives. Nạp adapter bằng
   `TorchQwenEncoder(spec, adapter_path=...)`; encode lại corpus/query dưới model
   identity mới. Không tự áp adapter vào 04 trước retrieval/F2 benchmark.
+  API training nhận `model_budget=model_budget_report(config, registry, ...)`
+  gồm mọi adapter đang dùng. Embedding QLoRA cần spec NF4 trong một run mới;
+  inference 0.6B mặc định fp16.
 - `sharded_dense.build_dense_shards(...)`: verified NPY parts qua mmap, giới hạn
   rows mỗi FAISS shard, checksum/done để resume. `ShardedDenseIndex.search(...)`
   mở từng shard, gộp global top-k. Đây là exact-search toolkit có kiểm thử CPU;

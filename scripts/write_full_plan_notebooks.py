@@ -8,7 +8,7 @@ BOOT = (BOOTSTRAP
     .replace('"install", "-q", "-e"', '"install", "--disable-pip-version-check", "-e"')
     .replace("Giữ cùng DATA_ROOT trong cả bốn notebook.", "Giữ DATA_ROOT đã dùng ở notebook 00–03.")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        '''RETRIEVAL_WORKFLOW_API = "full-master-plan-strong-v1"
+        '''RETRIEVAL_WORKFLOW_API = "full-master-plan-strong-v2-15b"
 upgrade = lock.get("workflow_api") != RETRIEVAL_WORKFLOW_API
 reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"''')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -26,14 +26,19 @@ def main():
         Chọn **runtime GPU mới, T4 trở lên**, rồi Run all. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
 
-        Kiến trúc: **BGE-M3 + Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF
+        Kiến trúc: **BGE-M3 + Qwen3-Embedding-0.6B + BM25 VI/EN/ZH → weighted RRF
         → Qwen3-Reranker-8B document → local child retrieval/MaxP rerank
         → exact-source parent 512/640 → LCS dedup → ZIP đủ 1.200 query**.
         Qwen3-4B dịch query; PICO-lite/subqueries/HyDE chỉ additive cho query phức tạp.
         Các số/Latin entities/constraint cues được kiểm; original query luôn giữ.
         Sparse dùng PyVI, Jieba, CJK n-grams và title/heading/body/alias fields.
 
-        Model 8B nạp **NF4 4-bit**, lần lượt từng model. Đây là lựa chọn tài nguyên
+        Tổng bốn model **13.374.547.456 parameters**, trước lượng tử hóa.
+        Gate kiểm tổng **≤15B** cho mọi model đã dùng, kể cả chạy lần lượt;
+        adapter được cộng thêm khi fine-tune. Đây là giới hạn tổng Sếp yêu cầu,
+        chưa phải xác nhận BTC giải thích rule theo tổng.
+        Qwen embedding 0.6B dùng fp16; reranker 8B dùng **NF4 4-bit**.
+        Models nạp lần lượt. Đây là lựa chọn tài nguyên
         cho T4, chưa benchmark tương đương fp16. Weights/cache nằm ổ local Colab;
         vector parts, translation/expansion và scored stages checkpoint trên Drive.
         Khi Colab ngắt, Run all lại cùng cấu hình; không chạy hai runtime cùng run.
@@ -54,8 +59,9 @@ def main():
         hash/order/model trước reuse. Qwen vectors có corpus/query identities riêng.
 
         Sau checks nguồn/snapshot/query, GPU chạy phần thiếu:
-        BGE (nếu cần) → Qwen4B query understanding → Qwen8B embedding → Qwen8B rerank.
-        Lần đầu tải hai bộ weights 8B và chạy corpus embeddings sẽ tốn thời gian.
+        BGE (nếu cần) → Qwen4B query understanding → Qwen0.6B embedding → Qwen8B rerank.
+        Run v2-15b tách khỏi v1; Qwen vectors cũ của 8B không được reuse.
+        Giữ DATA_ROOT; corpus và BGE vectors hợp lệ vẫn được tận dụng.
         Runtime lưu từng phần; lỗi mạng/OOM giữ checkpoints đã hoàn tất.
         Glossary tùy chọn data/labels/medical_aliases.json cần reviewed=true,
         entries=[{aliases:[...], source:"..."}]; không có thì alias field rỗng,
@@ -67,7 +73,7 @@ def main():
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
-        RUN_NAME = "stage-a-full-plan-v1"
+        RUN_NAME = "stage-a-full-plan-v2-15b"
         EMBEDDING_CACHE_RUN = "stage-a-retrieval-v1"
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
@@ -148,7 +154,7 @@ def main():
         import json
         from vietmedbridge.training_workflow import run_training_workflow
         TRAINING_STATUS = run_training_workflow(DATA_ROOT, CHECKOUT,
-            work_dir=WORK_DIR, run_name="stage-a-qlora-v1")
+            work_dir=WORK_DIR, run_name="stage-a-qlora-v2-15b")
         print(json.dumps(TRAINING_STATUS, ensure_ascii=False, indent=2))
         '''),
         md('''

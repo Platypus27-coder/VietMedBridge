@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .artifacts import atomic_json, digest_json, publish_file, read_json, verify_file
 from .embeddings import embed_units, embedding_matrix, unit_signature
+from .model_budget import model_budget_report
 from .query_expansion import cached_expansions, expand_queries
 from .query_translation import cached_translations, translate_queries
 from .qwen_models import TorchQwenEncoder, TorchQwenReranker, cached_qwen_embeddings, review_model_registry
@@ -53,7 +54,7 @@ def _selected_adapter(source, destination):
     return manifest
 
 
-def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v1"):
+def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v2-15b"):
     root, checkout = Path(data_root), Path(checkout)
     run = root / "training" / run_name
     train_path, dev_path = root / "labels/retrieval_train.json", root / "labels/retrieval_dev.json"
@@ -66,7 +67,10 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
     from .dataset import parquet_path
 
     config = read_json(checkout / "configs/retrieval_full.json")
-    review_model_registry(config, read_json(checkout / "configs/strong_model_manifest.json"))
+    registry = read_json(checkout / "configs/strong_model_manifest.json")
+    review_model_registry(config, registry)
+    budget = model_budget_report(config, registry)
+    atomic_json(run / "model_parameter_budget.json", budget)
     contest = load_queries(parquet_path(root, "query.parquet"), expected_count=1200)
     train_doc, dev_doc = read_json(train_path), read_json(dev_path)
     train, dev = validate_query_split(train_doc, dev_doc, contest)
@@ -131,7 +135,8 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
                 "train_holds": train_bundle["holds"], "dev_holds": dev_bundle["holds"]}
             atomic_json(run / "status.json", status)
             return status
-        training = train_qlora(model, train_bundle, dev_bundle, run / "checkpoints", **config["training"])
+        training = train_qlora(model, train_bundle, dev_bundle, run / "checkpoints",
+            model_budget=budget, **config["training"])
     finally:
         model.close()
     dev_vectors, dev_manifest = slice_query_vectors(dev_queries, queries, query_vectors, qm)
@@ -140,6 +145,7 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
     finalists = sorted((run / "checkpoints").glob("checkpoint-*")) + [Path(training["adapter"])]
     trials = []
     for checkpoint in finalists:
+        model_budget_report(config, registry, adapter_paths=[checkpoint])
         reranker = TorchQwenReranker(config["reranker"], adapter_path=checkpoint)
         try:
             records, report = predict_strong(index, dev_queries, dev_vectors, reranker,
@@ -153,6 +159,8 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
             reranker.close()
     trials.sort(key=lambda t: (-t["best_dev_policy"]["combined_f2"], t["checkpoint"]))
     selected = _selected_adapter(trials[0]["checkpoint"], run / "selected_adapter")
+    selected_budget = model_budget_report(config, registry, adapter_paths=[run / "selected_adapter"])
+    atomic_json(run / "model_parameter_budget.json", selected_budget)
     best = trials[0]["best_dev_policy"]
     from .full_plan_runtime import calibration_context
     calibration = {"state": "DEV_SELECTED_HELD_OUT_PENDING", "split": "dev", "reviewed": True,
@@ -166,6 +174,7 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
     calibration["manifest_sha256"] = digest_json(calibration)
     atomic_json(run / "calibrated_policy.json", calibration)
     status = {"state": "TRAINED_DEV_F2_SELECTED_HELD_OUT_PENDING", "fine_tuned": True,
+        "model_parameter_budget": selected_budget,
         "adapter": str(run / "selected_adapter"), "dev_proxy_f2": best["combined_f2"],
         "official_btc_score": None, "corpus_promoted": False}
     atomic_json(run / "status.json", status)
