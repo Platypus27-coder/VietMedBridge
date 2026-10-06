@@ -1,0 +1,1 @@
+"""ViBioMIR fixed-frontier ingestion."""

@@ -1,0 +1,12 @@
+# Curated direct requirements; requirements-lock.txt records the tested environment.
+scrapy==2.13.4
+trafilatura==2.1.0
+pyarrow==20.0.0
+polars==1.30.0
+zstandard==0.23.0
+pymupdf==1.26.1
+orjson==3.10.18
+pyyaml==6.0.2
+tqdm==4.67.1
+pytest==8.3.5
+pytest-asyncio==0.26.0

@@ -4,6 +4,16 @@ Chuẩn bị dữ liệu cho truy hồi y sinh đa ngôn ngữ ViBioMIR. Phần 
 thập dữ liệu chạy trên Google Colab; snapshot, checkpoint và Parquet đầu ra lưu
 trong Google Drive.
 
+## Pipeline Scrapy / Trafilatura trên Windows và Kaggle
+
+Branch `caoban123` bổ sung pipeline trong [`pipelines/scrapy_trafilatura/`](pipelines/scrapy_trafilatura/README.md):
+snapshot ViBioMIR, inventory/ID mapping, crawl theo shard với Scrapy, raw cache,
+extraction Trafilatura/PyMuPDF, kiểm tra chất lượng và checkpoint để resume.
+Notebook Kaggle có tqdm, log mỗi 30 giây và thời hạn chung dành thời gian cho extraction/export.
+Xem [hướng dẫn cài đặt và chạy](pipelines/scrapy_trafilatura/README.md)
+và [bằng chứng triển khai](pipelines/scrapy_trafilatura/IMPLEMENTATION_STATUS.md).
+Chạy các lệnh của pipeline này từ thư mục `pipelines/scrapy_trafilatura`.
+
 ## Quy trình Colab đã chốt
 
 Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
