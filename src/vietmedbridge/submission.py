@@ -36,13 +36,16 @@ def validate_submission(records, queries, catalog, report, *, expected_count=120
                 raise ValueError("Submission chunk ID/text/schema mismatch.")
             parent = catalog.parents.get(origin["parent_id"])
             anchor = catalog.children.get(origin["anchor_child_id"])
-            if not parent or not anchor or anchor["parent_id"] != parent["chunk_id"] or parent["chunk_id"] in selected_parents:
+            valid_anchor = anchor and (anchor["parent_id"] == origin["parent_id"] or origin["parent_id"] in anchor.get("source_parent_alternatives", {}).values())
+            if not parent or not valid_anchor or parent["chunk_id"] in selected_parents:
                 raise ValueError("Invalid/duplicate source parent or child anchor.")
             selected_parents.add(parent["chunk_id"])
             if any(origin[k] != parent[k] for k in ("doc_id", "start_char", "end_char", "source_text_sha256")) or chunk["doc_id"] != parent["doc_id"]:
                 raise ValueError("Chunk provenance does not match frozen parent.")
             doc = catalog.documents[chunk["doc_id"]]
             source = doc["source_text"]
+            if not parent["start_char"] <= anchor["start_char"] < anchor["end_char"] <= parent["end_char"]:
+                raise ValueError("Source parent must contain its complete anchor child.")
             if hashlib.sha256(source.encode()).hexdigest() != origin["source_text_sha256"] or chunk["chunk_text"] != parent["text"] or chunk["chunk_text"] != source[origin["start_char"]:origin["end_char"]]:
                 raise ValueError("Submission text must be the exact frozen source slice.")
         predictions.append(p)
@@ -79,7 +82,8 @@ def export_submission(records, queries, catalog, report, output_dir, *, evidence
                 "prediction_signature": report["signature"], "query_count": len(predictions),
                 "evidence": evidence, "json_sha256": result_sha, "zip_sha256": zip_sha,
                 "state": "SCHEMA_AND_SOURCE_VALIDATED", "scope": "PILOT_LIMITED_CORPUS",
-                "evaluation": "NOT_EVALUATED_NO_REFERENCE_LABELS", "fine_tuned": False}
+                "evaluation": "NOT_EVALUATED_NO_REFERENCE_LABELS",
+                "fine_tuned": bool(evidence.get("reranker", {}).get("fine_tuned"))}
     manifest["manifest_sha256"] = digest_json(manifest)
     atomic_json(root / "submission_manifest.json", manifest)
     return manifest

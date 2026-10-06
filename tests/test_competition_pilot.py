@@ -104,8 +104,8 @@ def test_notebook_defaults_run_all_and_download_only_verified_zip():
     source = "\n".join(cells)
     for variable in ("MAX_NEW_EMBEDDING_PARTS", "MAX_NEW_TRANSLATIONS", "MAX_NEW_QUERIES"):
         assert f"{variable} = None" in source
-    assert "bind_pilot_run(RUN_DIR, plan_path=CHECKOUT / MASTER_PLAN" in source
-    assert "EXPORT, READY = finish_pilot" in source
+    assert "from vietmedbridge.full_plan_runtime import run_full_pipeline" in source
+    assert "run_full_pipeline(" in source
     assert 'verify_file(READY["zip_path"], READY["zip_sha256"])' in cells[-1]
     assert "QUERIES[:25]" not in source
     assert "max_new_queries=25" not in source

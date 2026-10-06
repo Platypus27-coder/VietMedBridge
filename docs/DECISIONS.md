@@ -1,5 +1,21 @@
 # Quyết định kỹ thuật của lớp data
 
+## Full master-plan architecture — 06/10/2026
+
+Notebook 04 dùng `retrieval_full.json` và `full_plan_runtime.py`. Sau baseline,
+bổ sung Qwen8B second dense/reranker, PyVI/Jieba fields và reviewed alias interface,
+complex-only PICO/subqueries/HyDE additive, source-derived 512/640 parents.
+Source slices được retokenize và trim context để không vượt budget, giữ trọn
+anchor; không sửa corpus frozen. Qwen reranker dùng official causal yes/no prompt
+và raw logit difference, không dùng SequenceClassification hoặc truncate query.
+
+Sếp xác nhận chưa có nhãn; không biến contest predictions thành train/dev gold.
+05 triển khai mining/QLoRA/NDCG/F2 checkpoint selection, resume optimizer/RNG;
+thiếu reviewed labels trả waiting trước GPU load. Embedding QLoRA, dev ablation
+và sharded exact FAISS có API có điều kiện. NF4 là lựa chọn tài nguyên, chưa
+có GPU quality benchmark. Quy trình/giới hạn được ghi ở [FULL_PLAN.md](FULL_PLAN.md).
+Các mục v2 bên dưới là lịch sử quyết định và comparator, không phải mô tả mặc định 04.
+
 ## Adapt kỹ thuật từ hai repo tham chiếu
 
 Repo Stage 1 đang ở commit `7aa3955569371c56016744e1dd758b0a656c0c89`.

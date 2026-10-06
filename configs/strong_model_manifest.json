@@ -1,0 +1,11 @@
+{
+  "reviewed_at": "2026-10-06",
+  "rule_source": "R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md A.5.2",
+  "eligibility_scope": "INTERNAL_PLAN_CHECK_NOT_BTC_APPROVAL",
+  "models": [
+    {"model_id": "BAAI/bge-m3", "revision": "5617a9f61b028005a4858fdac845db406aefb181", "parameters": 567754752, "parameter_evidence": "Measured AutoModel encoder in the existing Colab vector producer manifest", "license": "mit", "public_release": "2024-02-01", "release_date_scope": "PUBLIC_AVAILABILITY_BY_MODEL_CARD_NEWS_DATE", "revision_last_modified": "2024-07-03T14:50:10Z", "role": "primary_dense", "sources": ["https://huggingface.co/api/models/BAAI/bge-m3/revision/5617a9f61b028005a4858fdac845db406aefb181", "https://huggingface.co/BAAI/bge-m3"]},
+    {"model_id": "Qwen/Qwen3-4B-Instruct-2507", "revision": "cdbee75f17c01a7cc42f958dc650907174af0554", "parameters": 4022468096, "license": "apache-2.0", "public_release": "2025-09-17", "release_date_scope": "PINNED_REVISION_AVAILABLE_BY_HUB_METADATA_DATE", "revision_last_modified": "2025-09-17T06:56:53Z", "role": "query_translation_pico_subqueries_hyde", "sources": ["https://huggingface.co/api/models/Qwen/Qwen3-4B-Instruct-2507", "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507"]},
+    {"model_id": "Qwen/Qwen3-Embedding-8B", "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af", "parameters": 7567295488, "license": "apache-2.0", "public_release": "2025-06-05", "revision_last_modified": "2025-07-07T09:02:21Z", "role": "second_dense", "sources": ["https://huggingface.co/api/models/Qwen/Qwen3-Embedding-8B", "https://huggingface.co/Qwen/Qwen3-Embedding-8B", "https://qwenlm.github.io/blog/qwen3-embedding/"]},
+    {"model_id": "Qwen/Qwen3-Reranker-8B", "revision": "77d193c791ed757ca307ee72715aa132723da912", "parameters": 8188548096, "license": "apache-2.0", "public_release": "2025-06-05", "revision_last_modified": "2026-04-16T08:56:16Z", "role": "document_and_child_reranker", "sources": ["https://huggingface.co/api/models/Qwen/Qwen3-Reranker-8B", "https://huggingface.co/Qwen/Qwen3-Reranker-8B", "https://qwenlm.github.io/blog/qwen3-embedding/"]}
+  ]
+}

@@ -23,9 +23,9 @@ def bind_pilot_run(run_dir, *, plan_path, catalog, queries, config, code_commit)
         "catalog": catalog.identity, "queries_sha256": digest_json(queries),
         "config_sha256": digest_json(config), "expected_queries": 1200,
         "scope": "PARTIAL_CORPUS_END_TO_END_COMPETITION_PILOT",
-        "pipeline": "bge-dense-multilingual-sparse-translation-document-child-parent-lcs-submission",
+        "pipeline": config.get("architecture", "bge-dense-multilingual-sparse-translation-document-child-parent-lcs-submission"),
         "requires_full_corpus": False, "requires_reference_labels_to_export": False,
-        "fine_tuned": False, "corpus_quality_promoted": False}
+        "fine_tuned": bool(config.get("adapter_manifest_sha256")), "corpus_quality_promoted": False}
     signature = digest_json(identity)
     path = Path(run_dir) / "run_contract.json"
     if path.exists():
@@ -54,7 +54,8 @@ def finish_pilot(records, queries, catalog, report, run_dir, *, contract, tokeni
         "prediction_signature": report["signature"], "pilot_contract_signature": contract["signature"],
         "evaluation": "NOT_EVALUATED_NO_REFERENCE_LABELS", "official_score": None,
         "inference_scope": evidence.get("inference_scope", "UNSPECIFIED"),
-        "source_and_schema_validated": True, "full_corpus": False, "fine_tuned": False}
+        "source_and_schema_validated": True, "full_corpus": False,
+        "fine_tuned": bool(evidence.get("reranker", {}).get("fine_tuned"))}
     if reference_labels_path is not None and Path(reference_labels_path).is_file():
         try:
             labels = read_json(reference_labels_path)

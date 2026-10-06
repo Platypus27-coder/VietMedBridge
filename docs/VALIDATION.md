@@ -1,5 +1,42 @@
 # Kiểm chứng data pipeline v2
 
+## Full master-plan architecture — 06/10/2026
+
+- Regression CPU cuối: **159 passed, 9 skipped**. Skips thuộc browser/Crawl4AI
+  integration tùy chọn. Không tải weights hay inference model lớn local.
+- 22 tests full-plan kiểm dual FAISS, original/second-dense/medical sparse,
+  expansion guards/resume, exact-source parents, scored-stage integrity,
+  1.200-query export, dev ablations, reviewed negatives/leakage, adapter/file
+  hashes và shard search tương đương monolithic FAISS.
+- Test gọi đúng `run_full_pipeline` như notebook 04 với 1.200 queries; lần chạy
+  lại giữ ZIP hash và không encode/LLM/score lại. Tất cả model loaders ở test
+  dùng CPU doubles; không dùng ZIP này để submit hoặc chứng minh relevance.
+- Batch methods Qwen thật được gọi bằng tensor doubles để kiểm left-padding
+  last-token/L2 pooling, query instruction chỉ ở query, raw yes-minus-no logits
+  và `logits_to_keep=1`. CUDA kernels/model quality vẫn chưa kiểm trên Colab.
+- Source/tokenizer thật: toàn **9.076 children** derive 512/640 source parents,
+  giữ trọn anchor/spans. Tái hiện retokenization edge overflow; sau sửa trim
+  context, mọi parent slice nằm trong budget. Frozen files không bị rewrite.
+- Qwen tokenizers ở pinned revisions, không weights: corpus input dài nhất
+  **336 tokens**, instructed original query **410 tokens**; dùng query overhead
+  lớn nhất (ID 219) trên toàn children, pair dài nhất **733/1.024 tokens**.
+- PyVI/Jieba chạy thật với CPU dependencies: giữ `hba1c`, `xét_nghiệm`,
+  `bệnh_viện` và CJK unigram/bigram anchors. Glossary hiện **0 reviewed entries**.
+- **8 notebooks** active/optional qua nbformat, syntax và empty-output checks:
+  04 có 9 cells, 05 có 6 cells. 00–03 không đổi trong lượt triển khai này.
+- Metadata PyPI xác minh pinned Accelerate/bitsandbytes/PEFT/PyVI/Jieba tồn tại;
+  dependencies tách từ đã kiểm CPU. Theo
+  [bitsandbytes 0.49.2](https://huggingface.co/docs/bitsandbytes/v0.49.2/en/installation),
+  NF4 và Linux CUDA 13.0 builds hỗ trợ SM75; đây chưa là GPU smoke của pipeline.
+- Evidence local ignored: `artifacts/strong-model-review/source_smoke.json`,
+  `runtime_packages.json`, `regression-final.xml`. Model registry bind bốn
+  model/revisions vào gate parameters/date/license/source trước weights load.
+
+Chưa chạy Qwen8B inference/QLoRA thực trên Colab, chưa có reviewed train/dev
+labels hoặc BTC score. 05 trả waiting trước model load khi thiếu nhãn. Không
+claim F2 tốt hơn baseline, corpus đã promote hoặc full-scale index đã benchmark.
+Hướng dẫn hiện tại ở [FULL_PLAN.md](FULL_PLAN.md); các mục dưới ghi lại lịch sử.
+
 Kiểm chứng retrieval baseline ngày 05/10/2026 nằm trong
 [RETRIEVAL_BASELINE.md](RETRIEVAL_BASELINE.md): 21 tests liên quan pass, candidate
 thật được đọc bằng tokenizer pinned và notebook 04 được smoke test bằng model

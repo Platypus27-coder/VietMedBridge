@@ -26,18 +26,25 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
    section và parent/child chunks; chất lượng của 917 capture còn cần kiểm tra.
 4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
    Kiểm coverage, integrity, golden và source audit; candidate chỉ được promote sau human review.
-5. **04 — Retrieval baseline và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
+5. **04 — Kiến trúc retrieval đầy đủ và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
    **Chọn GPU, chạy từ đầu.** Mặc định đọc `stage-a-data-v3-laodong`, candidate
    `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
-   representations duy nhất. Bản v2 dùng Qwen3-4B dịch query VI→EN/ZH, BGE-M3
-   dense MaxP + BM25 đa ngôn ngữ → weighted RRF → document rerank → local child
-   rerank/MaxP → exact parent + token LCS dedup. Tái sử dụng vectors v1 đã kiểm;
-   checkpoint translation/document/child/query riêng. **Run all mặc định chạy hết
+   representations duy nhất. Bản đầy đủ dùng **BGE-M3 + Qwen3-Embedding-8B**,
+   BM25 VI/EN/ZH với PyVI/Jieba/soft medical fields → weighted RRF →
+   **Qwen3-Reranker-8B** document/child MaxP → exact-source parent 512/640
+   + token LCS dedup. Qwen3-4B dịch query, thêm PICO/subqueries/HyDE cho query
+   phức tạp khi qua guards. Hai model 8B dùng NF4, nạp lần lượt trên Colab.
+   Tái sử dụng BGE vectors v1 đã kiểm; checkpoint vector/LLM/scored stage/query.
+   **Run all mặc định chạy hết
    1.200 official queries** (`MAX_NEW_*=None`), validate source/schema rồi xuất
    `submission.zip`, manifest và file ghi điểm BTC. Không cần ACTION, đủ full corpus,
    reference labels hay fine-tune trước lần submit pretrained đầu tiên (§§26/55).
    Khi Colab ngắt, mở lại runtime GPU và Run all cùng RUN_NAME để resume.
-   Xem [hướng dẫn 04](docs/RETRIEVAL_BASELINE.md).
+   Xem [hướng dẫn full plan](docs/FULL_PLAN.md).
+6. **05 — Supervised training, chỉ khi có reviewed train/dev labels:**
+   [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
+   Mining 1 positive + 7 negatives → QLoRA → dev NDCG/MRR → finalist F2 cutoff
+   → selected adapter cho 04. Hiện chưa có nhãn; Sếp chạy 04 pretrained trước.
 
 Ưu tiên hiện tại là thử đường chạy retrieval/submission trên candidate này trước,
 rồi tích hợp bản crawl 100k. Submission tìm trên corpus pilot nhỏ; score BTC chưa
@@ -50,8 +57,9 @@ giai đoạn này. Các lỗi vẫn có outcome theo official ID trong ledger đ
 Sau khi baseline đạt khoảng 1 triệu URL, team sẽ quay lại phân tích và xử lý phần còn thiếu.
 
 Các notebook trong luồng hiện tại: 00 audit dataset, 01 baseline crawl, 02 extract/chunk,
-03 validate/freeze, 04 retrieval/submission. 00–03 chạy CPU; 04 cần GPU cho embedding
-và reranker; bản 04 mới cần GPU cho LLM dịch query. Các model được nạp lần lượt.
+03 validate/freeze, 04 retrieval/submission; 05 là training có điều kiện.
+00–03 chạy CPU; 04 cần GPU cho embeddings, query LLM và reranker.
+05 cần GPU khi đã có nhãn. Các model được nạp lần lượt.
 Crawl baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION.
 Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
 chứng sau. `stage-a-v3` được giữ làm kết quả thí nghiệm, không là input mặc định của build.

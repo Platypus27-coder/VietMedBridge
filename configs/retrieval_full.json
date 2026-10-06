@@ -1,0 +1,29 @@
+{
+  "architecture": "master-plan-dual-dense-medical-sparse-pico-hyde-qwen-cascade-adaptive-source-parents",
+  "dense": {"model_id": "BAAI/bge-m3", "revision": "5617a9f61b028005a4858fdac845db406aefb181", "max_length": 512},
+  "second_dense": {"model_id": "Qwen/Qwen3-Embedding-8B", "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af", "max_length": 1536, "quantization": "nf4"},
+  "reranker": {"model_id": "Qwen/Qwen3-Reranker-8B", "revision": "77d193c791ed757ca307ee72715aa132723da912", "max_length": 1024, "quantization": "nf4"},
+  "translation": {"model_id": "Qwen/Qwen3-4B-Instruct-2507", "revision": "cdbee75f17c01a7cc42f958dc650907174af0554", "max_input_tokens": 1536, "max_new_tokens": 1024},
+  "embedding": {"part_size": 256, "batch_size": 16},
+  "qwen_embedding": {"part_size": 128, "batch_size": 2},
+  "reranker_batch_size": 2,
+  "expansion_enabled": true,
+  "lexical_segmentation": true,
+  "retrieval": {
+    "doc_candidate_k": 200, "sparse_top_k": 200, "detail_doc_k": 30,
+    "children_per_doc": 5, "summary_children": 2, "rrf_k": 60,
+    "dense_weight": 1.0, "second_dense_weight": 0.8,
+    "vi_weight": 0.8, "en_weight": 0.6, "zh_weight": 0.6,
+    "subquery_weight": 0.3, "hyde_weight": 0.3, "auxiliary_rerank_weight": 0.0,
+    "rerank_fusion": "reranker", "retrieval_share": 0.5,
+    "doc_min_k": 3, "doc_top_k": 10, "chunk_min_k": 2, "chunk_top_k": 8,
+    "max_chunks_per_doc": 2, "dedup_threshold": 0.8,
+    "doc_score_margin": null, "chunk_score_margin": null,
+    "doc_score_floor": null, "chunk_score_floor": null, "window_overlap_tokens": 32,
+    "parent_short_tokens": 512, "parent_long_tokens": 640, "adaptive_parents": true
+  },
+  "training": {"epochs": 2, "learning_rate": 0.00002, "seed": 42},
+  "pilot_limits": {"max_documents": 2000, "max_children": 50000},
+  "expected_queries": 1200,
+  "scope": "Full executable research architecture on available corpus; supervised stages require independent reviewed labels; quality and scale still require measurement"
+}

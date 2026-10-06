@@ -1,5 +1,9 @@
 # End-to-end competition pilot trên Colab — 06/10/2026
 
+**Tài liệu dưới đây ghi lại baseline/cascade v2.1 để đối chiếu.** Notebook 04
+hiện đã chuyển sang full architecture `stage-a-full-plan-v1`; hướng dẫn chạy
+hiện tại, model roles và supervised workflow nằm ở [FULL_PLAN.md](FULL_PLAN.md).
+
 Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](../R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md),
 đặc biệt baseline §§26/55. Supplement bổ sung QA; plan data v2 của team không
 thay thế master plan. Mục tiêu hiện tại: dùng candidate đã có, chạy pretrained

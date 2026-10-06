@@ -71,7 +71,10 @@ def select_parents(catalog, ranking, config, tokenizer, query_id):
     candidates, tokens, seen, per_doc = [], [], set(), Counter()
     for row in ranking["children"]:
         child = catalog.children[row["child_id"]]
-        parent = catalog.parents[child["parent_id"]]
+        parent_id = row.get("parent_id", child["parent_id"])
+        if parent_id != child["parent_id"] and parent_id not in child.get("source_parent_alternatives", {}).values():
+            raise ValueError("Selected parent is not a source-derived alternative for its anchor.")
+        parent = catalog.parents[parent_id]
         doc_id = child["doc_id"]
         if doc_id not in allowed or parent["chunk_id"] in seen or per_doc[doc_id] >= config.max_chunks_per_doc:
             continue
