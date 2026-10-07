@@ -7,8 +7,10 @@ trong Google Drive.
 ## Quy trình Colab đã chốt
 
 Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
-Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-end tới submission.
-Đã có candidate frozen thì mở thẳng 04. Không chạy các notebook
+Luồng crawl mới gồm **00 → 01 → 02 → 03**. Với bản crawl 100k đã có, dùng lại
+snapshot 00 và mở **02 → 03 trên CPU**, không crawl lại 01. Notebook 04 chạy
+full inference/submission cho corpus pilot; candidate lớn đi vào benchmark tài nguyên
+có giới hạn trước khi tích hợp catalog/index trên disk. Không chạy các notebook
 01b–01g trong lượt crawl baseline quy mô lớn.
 
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
@@ -21,13 +23,20 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
    Lượt đầu giữ Stage A 1.000 ID; để tăng phạm vi, dùng `MODE="range"` với range
    và `RUN_NAME` riêng, ổn định cho từng milestone. `MAX_NEW_SHARDS` giới hạn mỗi
    phiên; không để hai runtime ghi cùng shard.
-3. **02 — Trích văn bản và chia đoạn:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb).
-   Mặc định đọc `stage-a-v2`, tạo build mới `stage-a-data-v2-restored` với tài liệu,
-   section và parent/child chunks; chất lượng của 917 capture còn cần kiểm tra.
+3. **02 — Nhập crawl có sẵn và chia đoạn:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_extract_and_chunk.ipynb).
+   Mặc định nhập archive 100k ở `data/incoming`, tạo `team-100k-data-v1`.
+   Nhận tar, thư mục metadata hoặc `.tar.parts`; tự ghép và kiểm checksum khi cần.
+   Giữ original official IDs/aliases, source text, offsets, failures; checkpoint mỗi
+   2.048 ID. Để đọc crawl chuẩn cũ, chọn `INPUT_KIND="crawl"` và BUILD_RUN riêng.
 4. **03 — Kiểm tra, audit và freeze:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/03_colab_validate_and_freeze.ipynb).
-   Kiểm coverage, integrity, golden và source audit; candidate chỉ được promote sau human review.
+   Tự nhận build hoàn tất từ 02, kiểm coverage/integrity/golden và source audit;
+   freeze rồi chia input embedding đã dedup trên disk. Chưa encode vector hoặc
+   hoàn tất retrieval index; candidate chỉ được promote sau các gate review.
 5. **04 — Kiến trúc retrieval đầy đủ và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
-   **Chọn GPU, chạy từ đầu.** Mặc định đọc `stage-a-data-v3-laodong`, candidate
+   **Chọn GPU, chạy từ đầu.** Tự nhận candidate từ 03; trên 2.000 documents hoặc
+   50.000 children chỉ benchmark 64 input texts bằng BGE/Qwen/reranker, checkpoint
+   từng model, chưa tạo submission. Không âm thầm quay về corpus 864 documents.
+   Khi chưa có handoff mới, mặc định đọc `stage-a-data-v3-laodong`, candidate
    `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
    representations duy nhất. Bản hiện tại dùng **BGE-M3 child/document dense + Qwen3-Embedding-8B**,
    BM25 VI/EN/ZH với PyVI/Jieba/soft medical fields → weighted RRF →
@@ -36,7 +45,7 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
    phức tạp khi qua guards. Hai model 8B dùng NF4, nạp lần lượt trên Colab.
    Theo xác nhận của Sếp từ BTC, gate giữ **≤15B từng model**, gồm adapter của model đó.
    Tái sử dụng BGE vectors v1 đã kiểm; checkpoint vector/LLM/scored stage/query.
-   **Run all mặc định chạy hết
+   **Với corpus nằm trong giới hạn pilot, Run all chạy hết
    1.200 official queries** (`MAX_NEW_*=None`), validate source/schema rồi xuất
    `submission.zip`, manifest và file ghi điểm BTC. Không cần ACTION, đủ full corpus,
    reference labels hay fine-tune trước lần submit pretrained đầu tiên (§§26/55).
@@ -52,9 +61,11 @@ Luồng data gồm **00 → 01 → 02 → 03**, sau đó **04** chạy end-to-en
    Lưu file đã duyệt về đúng đường dẫn Drive rồi Run all để tiếp tục.
    Xem [quy trình review và giới hạn bằng chứng](docs/FULL_PLAN.md).
 
-Ưu tiên hiện tại là thử đường chạy retrieval/submission trên candidate này trước,
-rồi tích hợp bản crawl 100k. Submission tìm trên corpus pilot nhỏ; score BTC chưa
-có và chưa fine-tune model. Các URLs thiếu vẫn được lưu để xử lý sau.
+Ưu tiên hiện tại là tận dụng bản crawl 100k và đo tài nguyên trước khi encode lớn.
+Submission BGE baseline trên 864 documents đã có FINAL SCORE **0.0003**:
+doc F2 0.0004, chunk F2 0.0001; chưa đủ nhãn để quy hết nguyên nhân cho coverage.
+Corpus pilot chỉ chiếm khoảng 0,01966% official URLs. Không chạy thêm training 05
+để thay cho việc mở rộng corpus. Xem [nhập bản crawl độc lập](docs/EXTERNAL_CRAWL_IMPORT.md).
 
 Đích hiện tại là xây baseline crawl đến khoảng 1 triệu URL qua các gate đã chốt:
 Stage A 1.000 → Stage B1 10.000 → Stage B2 100.000 → Stage C 1.000.000.
@@ -71,9 +82,9 @@ Crawl baseline dùng HTTPx, không cần cài Chromium hoặc chọn ACTION.
 Scrapling/Crawl4AI và các công cụ recovery vẫn được giữ để kiểm
 chứng sau. `stage-a-v3` được giữ làm kết quả thí nghiệm, không là input mặc định của build.
 
-Sếp đã hoàn tất `stage-a-v2` thì mở notebook 02 bản mới và chạy tiếp; không cần chạy
-lại 00 hay crawl lại 01. 02 và 03 cùng dùng `stage-a-data-v2-restored`. Bootstrap nâng
-code lock một lần sang workflow HTTPx rồi ghim commit; nếu runtime đã import code cũ,
+Sếp đã có snapshot 00 thì mở notebook 02 bản mới để nhập archive 100k; không cần
+chạy lại 00 hay crawl lại 01. 02 và 03 cùng dùng `team-100k-data-v1`. Bootstrap dùng
+code lock data-processing riêng; nếu runtime đã import code cũ,
 restart session một lần trước khi chạy Bootstrap. Báo cáo golden được chạy lại bằng
 code hiện tại, không tự duyệt milestone.
 

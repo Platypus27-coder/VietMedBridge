@@ -1299,3 +1299,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    from write_external_notebooks import write_data_notebooks
+    write_data_notebooks()

@@ -119,15 +119,15 @@ def health_report(build_dir: str | Path, *, official_links: str | Path,
                     approx_quantile({column},0.95) AS p95, approx_quantile({column},0.99) AS p99 FROM {table}""")[0]
             # Stable, diverse selection plus very short/long/noisy cases. Never pull all text into RAM.
             audit = _rows(con, f"""WITH ranked AS (
-                SELECT *, row_number() OVER (PARTITION BY domain, language, quality_tier ORDER BY doc_id) AS r,
+                SELECT doc_id, row_number() OVER (PARTITION BY domain, language, quality_tier ORDER BY doc_id) AS r,
                     row_number() OVER (ORDER BY char_count DESC, doc_id) AS longest,
                     row_number() OVER (ORDER BY char_count, doc_id) AS shortest
-                FROM documents)
-                SELECT doc_id, url, title, language, quality_tier, quality_flags, source_text_sha256,
-                    substr(source_text, 1, 6000) AS preview, char_count, raw_file
-                FROM ranked
+                FROM documents), selected AS (SELECT doc_id FROM ranked
                 ORDER BY CASE WHEN r=1 OR longest<=5 OR shortest<=5 THEN 0 ELSE 1 END,
-                    least(longest, shortest), hash(doc_id) LIMIT {int(audit_size)}""")
+                    least(longest, shortest), hash(doc_id) LIMIT {int(audit_size)})
+                SELECT d.doc_id, url, title, language, quality_tier, quality_flags, source_text_sha256,
+                    substr(source_text, 1, 6000) AS preview, char_count, raw_file
+                FROM selected JOIN documents d USING(doc_id) ORDER BY d.doc_id""")
             entries = []
             for doc in audit:
                 child = _rows(con, f"SELECT start_char, end_char FROM children WHERE doc_id={int(doc['doc_id'])} ORDER BY chunk_order LIMIT 1")
@@ -182,6 +182,8 @@ def health_report(build_dir: str | Path, *, official_links: str | Path,
 def freeze_candidate(build_dir: str | Path, health: dict, *, golden_report: dict) -> dict:
     root = Path(build_dir)
     build = read_json(root / "build.json")
+    if build.get("input_kind") == "EXTERNAL_EXTRACTION" and not build.get("selected_range_complete"):
+        raise ValueError("Complete every external import shard before freezing the 100k candidate.")
     if build["snapshot_sha256"] != digest_json({"signature": build["signature"], "parts": build["parts"]}):
         raise ValueError("Build snapshot identity changed.")
     if health["snapshot_sha256"] != build["snapshot_sha256"] or not health["integrity"]["passed"]:

@@ -20,11 +20,18 @@ reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or 
 def main():
     save("04_colab_retrieval_baseline.ipynb", [
         md('''
-        # VietMedBridge — 04: Kiến trúc đầy đủ → submission 1.200 query
+        # VietMedBridge — 04: Pilot inference / benchmark tài nguyên cho corpus lớn
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
         Chọn **runtime GPU mới, T4 trở lên**, rồi Run all. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
+
+        Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
+        Corpus vượt giới hạn pilot (2.000 documents hoặc 50.000 children) chỉ chạy
+        benchmark có giới hạn: 64 input texts, BGE → Qwen embedding → Qwen reranker.
+        Model download/load được đo riêng; checkpoint từng model. Không encode
+        toàn corpus lớn, không xuất ZIP hoặc âm thầm quay về corpus 864 documents.
+        Báo cáo này giúp chọn ngân sách trước bước tích hợp catalog/index trên disk.
 
         Kiến trúc: **BGE-M3 child/document dense + Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF
         → Qwen3-Reranker-8B document → local child retrieval/MaxP rerank
@@ -42,14 +49,21 @@ def main():
         vector parts, translation/expansion và scored stages checkpoint trên Drive.
         Khi Colab ngắt, Run all lại cùng cấu hình; không chạy hai runtime cùng run.
 
-        Dùng corpus hiện có (864 documents/9.076 children), chưa cần full corpus.
+        Với corpus nhỏ: chạy full inference và xuất submission như trước.
         Có code train/dev mining, QLoRA, checkpoint selection, dev F2 cutoff và
         ablation trong module/05. **Hiện chưa có train/dev labels** nên 04 dùng
         pretrained models và cutoff chưa tune; không giả lập fine-tune hoặc điểm.
         Nếu đã chạy 05 với nhãn độc lập hợp lệ, 04 tự đọc adapter/dev policy đã chọn,
         tạo namespace -ft- mới. Nguồn/candidate cũ và các kết quả baseline được giữ.
+
+        V4: reuse verified corpus/document vectors từ cả 04 và 05. Chỉ encode
+        inputs còn thiếu. Batch Qwen tự chọn theo VRAM và giảm nếu OOM.
+        Theo dõi runtime_profile.json/execution_policy.json trong thư mục run;
+        mỗi embedding pass cũng ghi thời gian encode, số parts mới/đã cache.
+        Kiến trúc, model revisions và depth ứng viên giữ nguyên.
         '''),
-        md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"), code(BOOT),
+        md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v5-scale-benchmark")),
         md('''
         ## 2. Chạy kiến trúc đầy đủ — CPU/GPU lần lượt
 
@@ -69,6 +83,8 @@ def main():
         code('''
         import json
         from vietmedbridge.full_plan_runtime import run_full_pipeline
+        from vietmedbridge.scale_benchmark import load_handoff, run_scale_benchmark
+        from vietmedbridge.artifacts import read_json
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
@@ -78,12 +94,27 @@ def main():
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
 
-        RESULT = run_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
-            work_dir=WORK_DIR, build_run=BUILD_RUN, candidate_name=CANDIDATE_NAME,
-            run_name=RUN_NAME, embedding_cache_run=EMBEDDING_CACHE_RUN,
-            max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
-            max_new_translations=MAX_NEW_TRANSLATIONS, max_new_queries=MAX_NEW_QUERIES)
-        READY = RESULT["ready"]
+        LARGE_CANDIDATE = False
+        if (DATA_ROOT / "active_data_candidate.json").is_file():
+            active = read_json(DATA_ROOT / "active_data_candidate.json")
+            _, candidate, _ = load_handoff(DATA_ROOT)
+            BUILD_RUN, CANDIDATE_NAME = active["build_run"], active["candidate_name"]
+            limits = read_json(CHECKOUT / "configs/retrieval_full.json")["pilot_limits"]
+            LARGE_CANDIDATE = (candidate["counts"]["documents"] > limits["max_documents"]
+                or candidate["counts"]["children"] > limits["max_children"])
+            RUN_NAME = BUILD_RUN + "-full-plan-v1"
+        if LARGE_CANDIDATE:
+            BENCHMARK = run_scale_benchmark(DATA_ROOT, CHECKOUT, sample_size=64)
+            READY = {"state": BENCHMARK["state"], "query_count": 0, "submission_created": False}
+            RESULT = {"ready": READY, "status": BENCHMARK, "samples": [],
+                      "diagnostics_path": BENCHMARK["report_path"]}
+        else:
+            RESULT = run_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
+                work_dir=WORK_DIR, build_run=BUILD_RUN, candidate_name=CANDIDATE_NAME,
+                run_name=RUN_NAME, embedding_cache_run=EMBEDDING_CACHE_RUN,
+                max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
+                max_new_translations=MAX_NEW_TRANSLATIONS, max_new_queries=MAX_NEW_QUERIES)
+            READY = RESULT["ready"]
         print(json.dumps(RESULT["status"], ensure_ascii=False, indent=2))
         print(json.dumps(READY, ensure_ascii=False, indent=2))
         '''),
@@ -116,10 +147,14 @@ def main():
         code('''
         from google.colab import files
         from vietmedbridge.artifacts import verify_file
-        if READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
+        if LARGE_CANDIDATE:
+            print("Đã lưu benchmark tài nguyên. Chưa tạo submission cho corpus lớn.")
+            print(RESULT["diagnostics_path"])
+        elif READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
             raise RuntimeError("Hoàn tất pipeline và đủ 1.200 query trước download.")
-        verify_file(READY["zip_path"], READY["zip_sha256"])
-        files.download(READY["zip_path"])
+        else:
+            verify_file(READY["zip_path"], READY["zip_sha256"])
+            files.download(READY["zip_path"])
         '''),
     ])
     save("05_colab_supervised_training.ipynb", [
@@ -141,7 +176,7 @@ def main():
         ACCEPT/REJECT + reviewer + query + exact evidence_quote. Dev/held-out yêu cầu
         independently_written=true sau khi người review tự viết câu hỏi.
         Lưu file đã duyệt về đúng review_path trên Drive và Run all lại.
-        Tối thiểu 32 train/8 dev/8 held-out được accept, hết PENDING mới xuất labels.
+        Human review: tối thiểu 32 train/8 dev/8 held-out được accept, hết PENDING mới xuất labels.
         Không tự bật reviewed hoặc exhaustive_chunks cho model predictions.
 
         Nếu Sếp giao Codex duyệt bộ pilot: file có review_mode=AI_ASSISTED_PILOT,
@@ -159,11 +194,21 @@ def main():
         dev F2. Tự chạy dev ablations, rồi chấm held-out với adapter/cutoff đã
         freeze; không chọn model bằng held-out score và không promote corpus.
         04 tự nhận selected_adapter/calibrated_policy trong namespace mới.
+
+        V6: corpus embeddings được tìm và kiểm hash giữa 04/05 và các experiment;
+        không tính lại corpus chỉ vì đổi tập query. Mining cũ được kiểm và replay
+        trước khi nạp GPU. Mining mới dùng retrieval rộng, không chạy cascade 8B
+        để tạo file chờ nhãn. Qwen reranker 8B vẫn dùng cho QLoRA/dev/held-out/04.
+        Batch inference theo VRAM, có OOM backoff. Final adapter trùng checkpoint
+        cuối được đánh giá một lần. Tám research ablations được để sau kết quả
+        đầu tiên; API run_training_workflow(..., run_ablations=True) vẫn hỗ trợ.
+        Thời gian từng bước ghi training/<run>/runtime_profile.json; từng embedding
+        pass ghi runtime_profile.json bên cạnh parts. Các source/weights/hash cũ giữ nguyên.
         '''),
         md("## 1. Bootstrap — CPU"),
         code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json")
             .replace("retrieval_runtime.json", "training_runtime.json")
-            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v5-ai-reviewed-pilot")),
+            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v6-shared-cache-review")),
         md("## 2. Chuẩn bị nhãn — GPU chỉ khi còn thiếu draft train"),
         code('''
         import json
@@ -188,9 +233,17 @@ def main():
         category có thể để trống (unclassified). Không suy diễn missing = negative.
         Lưu file về đúng review_path trên Drive rồi Run all lại. Vectors và scored
         stages được reuse; dữ liệu training thay đổi có checkpoint namespace mới.
+
+        Nếu Sếp giao Codex duyệt, upload review_ai_pilot.json vào /content;
+        cell sau tự nhập vào đúng review_path, giữ backup và quyết định team.
+        Giữ checkpoint/run cũ. Khi còn chờ review, không cần giữ runtime GPU.
         '''),
         code('''
         from vietmedbridge.training_workflow import run_training_workflow
+        from vietmedbridge.negative_review import install_ai_candidate_review
+        NEGATIVE_REVIEW_UPLOAD = Path("/content/review_ai_pilot.json")
+        if NEGATIVE_REVIEW_UPLOAD.is_file():
+            print(json.dumps(install_ai_candidate_review(NEGATIVE_REVIEW_UPLOAD, DATA_ROOT), ensure_ascii=False, indent=2))
         if PREPARATION["state"] == "READY_FOR_HARD_NEGATIVE_REVIEW":
             TRAINING_STATUS = run_training_workflow(DATA_ROOT, CHECKOUT,
                 work_dir=WORK_DIR, run_name="stage-a-qlora-v3-per-model-15b")
