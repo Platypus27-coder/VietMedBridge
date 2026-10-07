@@ -62,15 +62,45 @@ mỗi text representation giống hệt chỉ encode một lần; mọi official
 `active_data_candidate.json` nối đúng candidate tới bước GPU, tránh dùng nhầm 864
 documents cũ.
 
-## 04: benchmark có giới hạn trước full scale
+## 04: BGE + BM25 để có submission trên corpus lớn
 
-Khi candidate vượt pilot 2.000 documents/50.000 children, 04 tự chuyển sang đo
-64 inputs trên tối đa tám input parts; model nạp lần lượt BGE → Qwen embedding
-8B → Qwen reranker 8B. Đo download/load riêng, warmup, hai lượt inference, VRAM,
-OOM backoffs và child-embedding time projection. Checkpoint từng model.
+Benchmark T4 đã hoàn tất trên candidate `ce6987985fb015ca`: BGE batch 4 khoảng
+46,2 texts/s, Qwen embedding 8B khoảng 6,65 texts/s, Qwen reranker khoảng 4,19
+pairs/s; không OOM. Child-only projections lần lượt 3,45h và 23,97h, không gồm
+I/O, document dense, query LLM, sparse/index hay toàn cascade. Mẫu 64 không là
+cam kết thời gian hoặc bằng chứng relevance.
 
-Đây là mẫu timing, không phải thời gian bảo đảm cho corpus hoặc điểm relevance.
-Không đo query LLM, document dense, sparse index/ANN/fusion hay full query cascade.
-Chưa xuất submission 100k: phần catalog/index disk-backed cần tích hợp tiếp theo
-ngân sách thực đo. 04 giữ nguyên full pretrained submission cho corpus pilot.
-05 supervised chỉ chạy khi có nhãn review độc lập phù hợp.
+04 bản tiếp theo tự chạy **large baseline** nếu candidate vượt pilot 2.000 docs/
+50.000 children. Giữ DATA_ROOT, chọn GPU T4 trở lên và Run all; không ACTION,
+không chạy lại 02–03. Workflow API mới tự nâng retrieval code lock một lần.
+Runtime đã import code cũ thì restart session trước khi Bootstrap.
+
+1. SQLite local lưu source và mappings official ID/child/parent/unit. BM25 dùng
+   FTS5 contentless để không nhân bản toàn bộ token text, ba language partitions,
+   PyVI/Jieba/CJK tokens và title/headings/body/medical alias fields.
+2. BGE encode **tất cả 573.854 unique input texts**, lưu vector float32 theo 141
+   parts của 03. Sort độ dài trong mỗi part rồi restore input order. Batch 32 tự
+   giảm khi OOM; chưa đo tốc độ batch này trên GPU thật. Vectors riêng khoảng
+   2,35 GB, cộng SQLite và local vector cache. Không tải weights Qwen.
+3. Encode đủ 1.200 original queries, unload BGE, dense search toàn corpus theo
+   blocks trên GPU. Giữ top 2.048 child representations/query, bảo toàn mọi official
+   aliases rồi lấy tối đa 200 document candidates; đây không phải document-dense.
+4. Fuse với BM25 bằng weighted RRF. Local child dense/lexical ranking, lấy frozen
+   source parents từ 03 và LCS dedup. Không neural reranker/LLM translation hoặc
+   parent 640 mới trong lượt baseline. Cutoffs chưa được tune bằng nhãn.
+5. Validate mọi query ID, document ID, source hash, anchor, parent offsets/text và
+   ZIP trước xuất `results.json` ở root của `submission.zip`; lưu evidence bên ngoài.
+
+Run nằm ở `data/retrieval/team-100k-data-v1-bge-bm25-v1-<candidate-prefix>/`.
+Vector checkpoint + query checkpoint lưu Drive, checksum trước reuse. Ngắt phiên
+thì Run all lại cùng config. Search result được cache khi quét hoàn tất; ngắt giữa
+lượt search thì quét lại, không encode lại. Catalog CPU publish atomic; ngắt trước
+khi hoàn tất catalog thì xây lại riêng catalog. Không hai runtime ghi cùng run.
+
+Đây là baseline partial corpus để lấy điểm sớm, **không phải full master plan**,
+không tự promote quality/relevance hoặc giả fine-tune. Giữ nguyên full pretrained
+architecture cho corpus pilot. Qwen embedding/query LLM/reranker/document dense/
+adaptive parents sẽ là run nâng cấp riêng; vectors BGE đã kiểm vẫn được giữ.
+05 supervised chỉ chạy khi có nhãn review độc lập phù hợp. Large baseline đã
+kiểm thử source/resume/export bằng CPU model doubles; chưa chạy end-to-end 100k
+trên GPU thật. Điểm BTC vẫn phải lấy từ ZIP chạy thật, không từ test/benchmark.

@@ -9,8 +9,8 @@ trong Google Drive.
 Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
 Luồng crawl mới gồm **00 → 01 → 02 → 03**. Với bản crawl 100k đã có, dùng lại
 snapshot 00 và mở **02 → 03 trên CPU**, không crawl lại 01. Notebook 04 chạy
-full inference/submission cho corpus pilot; candidate lớn đi vào benchmark tài nguyên
-có giới hạn trước khi tích hợp catalog/index trên disk. Không chạy các notebook
+BGE + BM25 trên disk để xuất submission cho candidate lớn; giữ full inference
+cho corpus pilot. Không chạy các notebook
 01b–01g trong lượt crawl baseline quy mô lớn.
 
 1. **00 — Tải và audit dataset:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/00_colab_dataset_audit.ipynb).
@@ -34,8 +34,13 @@ có giới hạn trước khi tích hợp catalog/index trên disk. Không chạ
    hoàn tất retrieval index; candidate chỉ được promote sau các gate review.
 5. **04 — Kiến trúc retrieval đầy đủ và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
    **Chọn GPU, chạy từ đầu.** Tự nhận candidate từ 03; trên 2.000 documents hoặc
-   50.000 children chỉ benchmark 64 input texts bằng BGE/Qwen/reranker, checkpoint
-   từng model, chưa tạo submission. Không âm thầm quay về corpus 864 documents.
+   50.000 children chạy baseline BGE child dense + BM25 VI/EN/ZH trên SQLite,
+   weighted RRF, frozen source parents + LCS dedup và ZIP đủ 1.200 query.
+   Encode theo các input parts của 03, batch 32 tự giảm nếu OOM, checkpoint mỗi phần.
+   Dense search quét toàn bộ vector parts theo blocks trên GPU; source/index ở disk.
+   Đây là baseline lấy điểm, **chưa phải full plan**: không nạp Qwen embedding,
+   query LLM, neural reranker, document dense hoặc adaptive parents. Không âm thầm
+   quay về corpus 864 documents. Xem [chi tiết large baseline](docs/EXTERNAL_CRAWL_IMPORT.md).
    Khi chưa có handoff mới, mặc định đọc `stage-a-data-v3-laodong`, candidate
    `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
    representations duy nhất. Bản hiện tại dùng **BGE-M3 child/document dense + Qwen3-Embedding-8B**,
@@ -61,7 +66,11 @@ có giới hạn trước khi tích hợp catalog/index trên disk. Không chạ
    Lưu file đã duyệt về đúng đường dẫn Drive rồi Run all để tiếp tục.
    Xem [quy trình review và giới hạn bằng chứng](docs/FULL_PLAN.md).
 
-Ưu tiên hiện tại là tận dụng bản crawl 100k và đo tài nguyên trước khi encode lớn.
+Ưu tiên hiện tại là tận dụng bản crawl 100k để có submission BGE + BM25 trước.
+Benchmark thật trên T4: BGE batch 4 ~46,2 texts/s (child projection ~3,45 giờ),
+Qwen embedding 8B batch 4 ~6,65 texts/s (~24 giờ). Mẫu 64 texts không bảo đảm
+thời gian hoặc điểm; batch 32 mới chưa benchmark thực tế. Checkpoint corpus lớn
+độc lập với pilot, source/build 02–03 không cần làm lại.
 Submission BGE baseline trên 864 documents đã có FINAL SCORE **0.0003**:
 doc F2 0.0004, chunk F2 0.0001; chưa đủ nhãn để quy hết nguyên nhân cho coverage.
 Corpus pilot chỉ chiếm khoảng 0,01966% official URLs. Không chạy thêm training 05

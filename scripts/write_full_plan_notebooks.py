@@ -20,20 +20,31 @@ reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or 
 def main():
     save("04_colab_retrieval_baseline.ipynb", [
         md('''
-        # VietMedBridge — 04: Pilot inference / benchmark tài nguyên cho corpus lớn
+        # VietMedBridge — 04: BGE + BM25 trên corpus lớn / full inference cho pilot
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
         Chọn **runtime GPU mới, T4 trở lên**, rồi Run all. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
 
         Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
-        Corpus vượt giới hạn pilot (2.000 documents hoặc 50.000 children) chỉ chạy
-        benchmark có giới hạn: 64 input texts, BGE → Qwen embedding → Qwen reranker.
-        Model download/load được đo riêng; checkpoint từng model. Không encode
-        toàn corpus lớn, không xuất ZIP hoặc âm thầm quay về corpus 864 documents.
-        Báo cáo này giúp chọn ngân sách trước bước tích hợp catalog/index trên disk.
+        Corpus vượt giới hạn pilot (2.000 documents hoặc 50.000 children) chạy
+        **baseline lấy điểm: BGE-M3 toàn bộ child inputs + BM25 VI/EN/ZH trên disk
+        → weighted RRF → frozen source parents + LCS dedup → ZIP đủ 1.200 query**.
+        Tự nhận team-100k-data-v1, không quay về corpus 864 documents cũ.
+        BGE lưu vector theo 141 phần input của 03, sort theo độ dài khi encode rồi
+        khôi phục đúng thứ tự. Batch khởi đầu 32, tự giảm khi OOM. Tìm dense quét
+        toàn bộ vector parts theo blocks trên GPU; source/BM25 ở SQLite local,
+        checkpoint đầy đủ và ZIP nằm trên Drive. Không nạp toàn corpus vào RAM.
 
-        Kiến trúc: **BGE-M3 child/document dense + Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF
+        Benchmark T4 của Sếp: BGE batch 4 ~46 texts/s (child projection ~3,45h),
+        Qwen embedding batch 4 ~6,65 texts/s (~24h). Đây chỉ là mẫu 64 texts;
+        batch 32 chưa có phép đo thực tế, không bảo đảm thời gian hoặc điểm.
+        Corpus lớn dùng BGE + BM25 trước; **chưa phải full master plan**:
+        Qwen embedding, query LLM, neural reranker, document-dense và adaptive
+        parents được hoãn. Dùng frozen parents đã kiểm source từ 03.
+        Không cần chạy lại 02–03 hoặc chạy 05 cho lượt baseline này.
+
+        Kiến trúc full cho pilot nhỏ: **BGE-M3 child/document dense + Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF
         → Qwen3-Reranker-8B document → local child retrieval/MaxP rerank
         → exact-source parent 512/640 → LCS dedup → ZIP đủ 1.200 query**.
         Qwen3-4B dịch query; PICO-lite/subqueries/HyDE chỉ additive cho query phức tạp.
@@ -56,16 +67,16 @@ def main():
         Nếu đã chạy 05 với nhãn độc lập hợp lệ, 04 tự đọc adapter/dev policy đã chọn,
         tạo namespace -ft- mới. Nguồn/candidate cũ và các kết quả baseline được giữ.
 
-        V4: reuse verified corpus/document vectors từ cả 04 và 05. Chỉ encode
+        Với pilot: reuse verified corpus/document vectors từ cả 04 và 05. Chỉ encode
         inputs còn thiếu. Batch Qwen tự chọn theo VRAM và giảm nếu OOM.
         Theo dõi runtime_profile.json/execution_policy.json trong thư mục run;
         mỗi embedding pass cũng ghi thời gian encode, số parts mới/đã cache.
-        Kiến trúc, model revisions và depth ứng viên giữ nguyên.
+        Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v5-scale-benchmark")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v6-large-baseline")),
         md('''
-        ## 2. Chạy kiến trúc đầy đủ — CPU/GPU lần lượt
+        ## 2. Chạy baseline corpus lớn hoặc full pilot — CPU/GPU lần lượt
 
         Giữ MAX_NEW_*=None để chạy hết. Đổi model/data/policy cần RUN_NAME mới;
         các run cũ không bị ghi đè. Vector BGE của stage-a-retrieval-v1 được kiểm
@@ -76,6 +87,11 @@ def main():
         Run v3-per-model-15b tách khỏi v1/v2; không trộn Qwen vectors 0.6B và 8B.
         Giữ DATA_ROOT; corpus và BGE vectors hợp lệ vẫn được tận dụng.
         Runtime lưu từng phần; lỗi mạng/OOM giữ checkpoints đã hoàn tất.
+        Với candidate lớn: chỉ BGE + BM25; MAX_NEW_EMBEDDING_PARTS và
+        MAX_NEW_QUERIES có thể giới hạn mỗi phiên, mặc định None chạy hết.
+        Ngắt runtime thì mở cùng notebook và Run all để resume vector/query.
+        Catalog CPU xuất bản atomic; nếu ngắt trước hoàn tất catalog thì dựng
+        lại riêng bước CPU đó. Không chạy hai runtime ghi cùng run.
         Glossary tùy chọn data/labels/medical_aliases.json cần reviewed=true,
         entries=[{aliases:[...], source:"..."}]; không có thì alias field rỗng,
         biomedical Latin/acronym tokens vẫn được giữ.
@@ -83,7 +99,8 @@ def main():
         code('''
         import json
         from vietmedbridge.full_plan_runtime import run_full_pipeline
-        from vietmedbridge.scale_benchmark import load_handoff, run_scale_benchmark
+        from vietmedbridge.scale_benchmark import load_handoff
+        from vietmedbridge.scale_baseline import run_large_baseline
         from vietmedbridge.artifacts import read_json
 
         BUILD_RUN = "stage-a-data-v3-laodong"
@@ -93,6 +110,7 @@ def main():
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
+        BGE_BATCH_SIZE = 32  # execution only; tự giảm nếu OOM, không đổi source/model
 
         LARGE_CANDIDATE = False
         if (DATA_ROOT / "active_data_candidate.json").is_file():
@@ -104,10 +122,10 @@ def main():
                 or candidate["counts"]["children"] > limits["max_children"])
             RUN_NAME = BUILD_RUN + "-full-plan-v1"
         if LARGE_CANDIDATE:
-            BENCHMARK = run_scale_benchmark(DATA_ROOT, CHECKOUT, sample_size=64)
-            READY = {"state": BENCHMARK["state"], "query_count": 0, "submission_created": False}
-            RESULT = {"ready": READY, "status": BENCHMARK, "samples": [],
-                      "diagnostics_path": BENCHMARK["report_path"]}
+            RESULT = run_large_baseline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
+                work_dir=WORK_DIR, batch_size=BGE_BATCH_SIZE,
+                max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS, max_new_queries=MAX_NEW_QUERIES)
+            READY = RESULT["ready"]
         else:
             RESULT = run_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
                 work_dir=WORK_DIR, build_run=BUILD_RUN, candidate_name=CANDIDATE_NAME,
@@ -121,8 +139,10 @@ def main():
         md('''
         ## 3. Xem source samples và báo cáo — CPU
 
-        Chunks bên dưới là source slices. diagnostics.json có language coverage,
-        branch contributions, output counts và logit distributions. Không có nhãn
+        Chunks bên dưới là source slices. Với corpus lớn, baseline_status.json
+        ghi đúng BGE + BM25, số documents/children và các phần full plan đang hoãn;
+        runtime_profile.json ghi thời gian từng stage. Với full pilot, diagnostics.json
+        có language coverage, branch contributions, output counts và logit distributions. Không có nhãn
         thì không tính F2 giả. full_plan_status.json phân biệt code đã thực thi với
         supervised/scale gates còn cần dữ liệu và đo đạc. Corpus nhỏ và chất lượng
         nguồn vẫn giới hạn recall.
@@ -147,11 +167,9 @@ def main():
         code('''
         from google.colab import files
         from vietmedbridge.artifacts import verify_file
-        if LARGE_CANDIDATE:
-            print("Đã lưu benchmark tài nguyên. Chưa tạo submission cho corpus lớn.")
-            print(RESULT["diagnostics_path"])
-        elif READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
-            raise RuntimeError("Hoàn tất pipeline và đủ 1.200 query trước download.")
+        if READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
+            print("Đã lưu checkpoint:", READY)
+            print("Run all lại cùng cấu hình để hoàn tất trước download.")
         else:
             verify_file(READY["zip_path"], READY["zip_sha256"])
             files.download(READY["zip_path"])

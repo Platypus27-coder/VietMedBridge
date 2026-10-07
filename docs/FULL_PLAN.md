@@ -5,7 +5,14 @@ Nguồn quyết định là [master plan Stage 3](../R2AI_STAGE3_FULL_COMPETITIO
 dùng `configs/retrieval_full.json`, namespace `stage-a-full-plan-v3-per-model-15b`. Tên file
 giữ nguyên để link cũ mở đúng notebook chính. Chọn runtime GPU mới rồi **Run all**;
 không cần ACTION hoặc chạy lại 00–03. Bootstrap clone repo, cài extras và nâng
-code lock một lần sang `full-master-plan-strong-v3-per-model-15b`.
+code lock một lần sang `full-master-plan-strong-v6-large-baseline`.
+
+**Lượt 100k hiện tại:** 04 tự nhận candidate từ 03 và dùng
+`configs/retrieval_large_baseline.json`: BGE trên mọi child input + SQLite BM25
+VI/EN/ZH → weighted RRF → frozen source parents/LCS → submission 1.200 query.
+Đây là baseline lấy điểm trước; chưa dùng Qwen/query LLM/reranker, document-dense
+hoặc adaptive parents. Full architecture mô tả bên dưới vẫn dành cho corpus pilot.
+Xem [quy trình corpus lớn và checkpoint](EXTERNAL_CRAWL_IMPORT.md).
 
 ## Giới hạn từng model đã được Sếp xác nhận với BTC
 
@@ -211,7 +218,9 @@ tạo namespace `-ft-` mới.
 - `sharded_dense.build_dense_shards(...)`: verified NPY parts qua mmap, giới hạn
   rows mỗi FAISS shard, checksum/done để resume. `ShardedDenseIndex.search(...)`
   mở từng shard, gộp global top-k. Đây là exact-search toolkit có kiểm thử CPU;
-  chưa là full-scale backend của 04. 04 giới hạn 2.000 documents/50.000 children.
+  chưa là full-scale backend của full architecture. Full architecture giữ giới hạn
+  2.000 documents/50.000 children; large baseline dùng GPU search theo vector parts
+  và SQLite BM25 thay cho catalog/FAISS toàn corpus trong RAM.
   ANN và budget benchmark tại 100k/1M cần đo sau khi import crawl qua data pipeline.
 
 Master §§7/8/13/17/27/39/56 có module cho kiến trúc/supervised/ablation trên đây;

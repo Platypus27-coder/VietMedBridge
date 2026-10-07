@@ -1,0 +1,21 @@
+{
+  "architecture": "bge-child-dense-disk-multilingual-bm25-rrf-frozen-source-parent",
+  "expected_queries": 1200,
+  "dense": {"model_id": "BAAI/bge-m3", "revision": "5617a9f61b028005a4858fdac845db406aefb181", "max_length": 512},
+  "lexical_segmentation": true,
+  "retrieval": {
+    "dense_top_k": 2048,
+    "document_candidates": 200,
+    "sparse_top_k": 200,
+    "dense_weight": 1.0,
+    "vi_weight": 0.8,
+    "en_weight": 0.6,
+    "zh_weight": 0.6,
+    "rrf_k": 60,
+    "doc_top_k": 10,
+    "chunk_top_k": 8,
+    "max_chunks_per_doc": 2,
+    "dedup_threshold": 0.8
+  },
+  "scope": "First partial-corpus submission on all imported documents; no Qwen embedding, query translation, neural reranker, document-dense, adaptive parents or fine-tuning; not the complete master-plan architecture"
+}
