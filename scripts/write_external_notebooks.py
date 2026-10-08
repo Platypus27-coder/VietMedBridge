@@ -4,7 +4,7 @@ from write_notebooks import BOOTSTRAP, code, md, save
 BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
     .replace("runtime.json","data_processing_runtime.json")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        'DATA_WORKFLOW_API = "external-extraction-import-v3"\n'
+        'DATA_WORKFLOW_API = "external-extraction-import-v4"\n'
         'upgrade = lock.get("workflow_api") != DATA_WORKFLOW_API\n'
         'reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -119,7 +119,9 @@ def write_data_notebooks():
         if BUILD.get("source_audit"):
             print("Input audit:", BUILD["source_audit"]["state"])
             print("Coverage gaps:", json.dumps(BUILD["source_audit"]["coverage_gaps"], ensure_ascii=False))
-            print("Gap review file:", BUILD_DIR / BUILD["source_audit"]["coverage_gaps"]["artifact"]["path"])
+            gap_artifact = BUILD["source_audit"]["coverage_gaps"]["artifact"]
+            if gap_artifact:
+                print("Gap review file:", BUILD_DIR / gap_artifact["path"])
         if BUILD["selected_range_complete"]:
             atomic_json(DATA_ROOT / "active_data_build.json", {
                 "build_run": BUILD_RUN, "crawl_run": BUILD.get("crawl_run"),

@@ -254,8 +254,10 @@ def _incoming(con, local, metadata, official_links, *, report_dir):
         LEFT JOIN crawl c USING(crawl_url_id) LEFT JOIN extracted e USING(crawl_url_id)
         WHERE c.crawl_url_id IS NULL OR (c.status='SUCCESS_RAW' AND e.crawl_url_id IS NULL)
         ORDER BY m.input_row"""
-    gaps_artifact = _export_audit_csv(con, gaps_query, local, report_dir, "external_coverage_gaps.csv")
-    coverage_gaps = gap_counts | {"artifact": gaps_artifact}
+    gap_rows = sum(gap_counts.values())
+    gaps_artifact = (_export_audit_csv(con, gaps_query, local, report_dir, "external_coverage_gaps.csv")
+                     if gap_rows else None)
+    coverage_gaps = gap_counts | {"official_ids": gap_rows, "artifact": gaps_artifact}
     gap_keys = {"frontier_missing_crawl", "missing_extraction"}
     fatal_checks = {name: value for name, value in checks.items() if name not in gap_keys and value}
     audit = {
