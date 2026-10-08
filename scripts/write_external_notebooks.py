@@ -1,10 +1,10 @@
-"""Update the existing 02/03 entrypoints for the team's 100k handoff."""
+"""Generate the multi-archive 02/03 Colab intake and freeze workflow."""
 from write_notebooks import BOOTSTRAP, code, md, save
 
 BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
     .replace("runtime.json","data_processing_runtime.json")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        'DATA_WORKFLOW_API = "external-extraction-import-v5-cumulative-candidate-lineage"\n'
+        'DATA_WORKFLOW_API = "external-extraction-import-v6-multi-archive-batches"\n'
         'upgrade = lock.get("workflow_api") != DATA_WORKFLOW_API\n'
         'reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -16,11 +16,14 @@ BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
 def write_data_notebooks():
     save("02_colab_extract_and_chunk.ipynb",[
         md('''
-        # VietMedBridge — 02: Nhập bản crawl → source + parent/child chunks
+        # VietMedBridge — 02: Nhập cả batch crawl → source + parent/child chunks
 
-        **Runtime CPU, Run all.** Chọn nguồn ở form của cell cấu hình; nếu có nhiều
-        archive, notebook hiện danh sách để chọn. Tên BUILD_RUN tự sinh ổn định theo
-        archive và cấu hình, có thể nhập tay vào form để resume một run cũ.
+        **Runtime CPU, Run all.** `EXTERNAL_SOURCE` có thể là một file `.tar` hoặc
+        thư mục batch chứa nhiều file `vibiomir_shard_*.tar`. Notebook nhập hết các
+        archive trong thư mục theo thứ tự, mỗi archive có checkpoint/build riêng.
+        Để tiếp tục sau restart, Run all lại với cùng batch folder.
+        Tên build tự sinh ổn định theo từng archive; `BUILD_RUN` chỉ cần khi muốn
+        đặt prefix riêng cho batch.
         Hỗ trợ `vibiomir_shard_*.tar`, thư mục đã giải nén và `.tar.parts`.
         Frontier bên trong tar có thể mang số shard khác `00000`.
         Bản chia phần được tự ghép trên ổ local Colab và kiểm SHA-256 đúng bản gốc.
@@ -31,26 +34,25 @@ def write_data_notebooks():
         để truy hồi sau; URL mapping sai vẫn chặn import và có báo cáo riêng.
         Nguồn lỗi/challenge/redirect về trang chủ được ghi failures; LOW quality được giữ kèm flags.
 
-        Mặc định tìm archive trong `VietMedBridge/data/incoming`,
-        `VietMedBridge/data/data_temp` hoặc `VietMedBridge/data_temp` trên Drive.
-        Đặt EXTERNAL_SOURCE nếu archive nằm nơi khác. Sau khi ghép (nếu cần), copy bốn file metadata
+        Mặc định trỏ tới batch mới `data/incoming/team-crawl-archives-2026-10-08`.
+        Có thể điền đường dẫn thư mục batch khác; không điền lại một archive cũ.
+        Sau khi ghép (nếu cần), copy bốn file metadata
         từ archive sang ổ local Colab để đọc; raw archive vẫn giữ làm nguồn kiểm tra.
         Metadata binding và exact-source spans không chứng nhận chất lượng y khoa.
 
         Ghi theo shard 2.048 ID, checkpoint trên Drive. Khi ngắt, Run all với cùng
-        đường dẫn input/BUILD_RUN/config để tiếp tục. Một runtime ghi một build.
+        batch folder/config để resume từng archive và từng shard. Một runtime ghi một batch.
         Không tạo embedding, không cần GPU. Sau COMPLETE, chạy notebook 03.
         '''),code(BOOT),md("## 1. Chọn nguồn và tokenizer"),code('''
         from vietmedbridge.artifacts import read_json, atomic_json
         from vietmedbridge.dataset import load_snapshot, parquet_path
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
         from vietmedbridge.external_import import (
-            external_build_run_name, find_external_source, import_external_corpus,
-            list_external_sources,
+            external_build_run_name, import_external_corpus, list_external_source_batches,
         )
 
         INPUT_KIND = "external" #@param ["external", "crawl"]
-        EXTERNAL_SOURCE = "" #@param {type:"string"}
+        EXTERNAL_SOURCE = str(DATA_ROOT / "incoming/team-crawl-archives-2026-10-08") #@param {type:"string"}
         BUILD_RUN = "" #@param {type:"string"}
         CRAWL_RUN = "stage-a-v2"  # chỉ dùng với INPUT_KIND="crawl"
         SHARD_SIZE = 2048
@@ -65,88 +67,137 @@ def write_data_notebooks():
             atomic_json(tokenizer_lock_path, TOKENIZER_SPEC)
         CHUNK_CONFIG = ChunkConfig(**PIPELINE_CONFIG["chunking"])
         if INPUT_KIND == "external":
-            if EXTERNAL_SOURCE.strip():
-                SOURCE = find_external_source(DATA_ROOT, EXTERNAL_SOURCE.strip())
-            else:
-                sources = list_external_sources(DATA_ROOT)
-                if not sources:
-                    SOURCE = None
-                elif len(sources) == 1:
-                    SOURCE = sources[0]
-                else:
-                    print("Tìm thấy các nguồn crawl:")
-                    for index, path in enumerate(sources, 1):
-                        size = path.stat().st_size if path.is_file() else 0
-                        print(f"  {index}. {path}" + (f" ({size:,} bytes)" if size else ""))
-                    choice = input("Nhập số thứ tự nguồn muốn xử lý: ").strip()
-                    try:
-                        selected = int(choice) - 1
-                    except ValueError as exc:
-                        raise ValueError("Hãy nhập một số thứ tự trong danh sách nguồn.") from exc
-                    if not 0 <= selected < len(sources):
-                        raise ValueError("Số thứ tự nguồn nằm ngoài danh sách.")
-                    SOURCE = sources[selected]
-            if SOURCE is None:
+            if EXTERNAL_SOURCE.strip() and not Path(EXTERNAL_SOURCE).exists():
+                raise FileNotFoundError(f"Không tìm thấy batch folder/archive: {EXTERNAL_SOURCE}")
+            EXTERNAL_SOURCES = list_external_source_batches(
+                DATA_ROOT, EXTERNAL_SOURCE.strip() or None)
+            if not EXTERNAL_SOURCES:
                 raise FileNotFoundError(
-                    "Chưa thấy archive trên Drive. Điền đường dẫn vào trường EXTERNAL_SOURCE "
-                    "hoặc thư mục giải nén. Vị trí mặc định: "
-                    + str(DATA_ROOT / "incoming/vibiomir_shard_00000.tar"))
-            if not BUILD_RUN.strip():
-                BUILD_RUN = external_build_run_name(
-                    SOURCE, tokenizer_spec=TOKENIZER_SPEC, chunking=CHUNK_CONFIG,
-                    shard_size=SHARD_SIZE)
-            print("Existing crawl:", SOURCE)
+                    "Không tìm thấy archive trong folder. EXTERNAL_SOURCE phải là file .tar "
+                    "hoặc folder chứa các archive .tar.")
+            if BUILD_RUN.strip() and len(EXTERNAL_SOURCES) == 1:
+                BUILD_RUNS = [BUILD_RUN.strip()]
+            else:
+                import re
+                prefix = re.sub(r"[^A-Za-z0-9_.-]+", "-", BUILD_RUN.strip()).strip("-_.")
+                BUILD_RUNS = []
+                for source in EXTERNAL_SOURCES:
+                    auto_name = external_build_run_name(
+                        source, tokenizer_spec=TOKENIZER_SPEC, chunking=CHUNK_CONFIG,
+                        shard_size=SHARD_SIZE)
+                    if prefix:
+                        label = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(source).stem).strip("-_.")[:48]
+                        auto_name = f"{prefix}-{label}-{auto_name.rsplit('-', 1)[-1]}"
+                    BUILD_RUNS.append(auto_name)
+            print(f"Batch sources: {len(EXTERNAL_SOURCES)} archive(s)")
+            print(f"Total archive bytes: {sum(path.stat().st_size for path in EXTERNAL_SOURCES if path.is_file()):,}")
+            for source, run_name in zip(EXTERNAL_SOURCES, BUILD_RUNS):
+                size = source.stat().st_size if source.is_file() else 0
+                print(f"  {source.name} | {size:,} bytes | build={run_name}")
         elif INPUT_KIND != "crawl":
             raise ValueError("INPUT_KIND phải là external hoặc crawl.")
         elif not BUILD_RUN.strip():
             BUILD_RUN = "team-100k-data-v1"
-        print("Build:", BUILD_RUN, "| tokenizer:", TOKENIZER_SPEC)
+        if INPUT_KIND == "crawl":
+            print("Build:", BUILD_RUN, "| tokenizer:", TOKENIZER_SPEC)
         '''),md("## 2. Nhập/chia chunk theo shard — CPU"),code('''
+        from vietmedbridge.artifacts import utc_now
+        BATCH_PATH = DATA_ROOT / "active_data_batch.json"
+        previous_batch = read_json(BATCH_PATH) if BATCH_PATH.exists() else {}
+        previous_by_key = {
+            (item.get("source_path"), item.get("build_run")): item
+            for item in previous_batch.get("builds", [])
+        }
         if INPUT_KIND == "external":
-            BUILD = import_external_corpus(
-                SOURCE, OFFICIAL_LINKS, DATA_ROOT / "processed", TOKENIZER, TOKENIZER_SPEC,
-                run_name=BUILD_RUN, config=CHUNK_CONFIG, shard_size=SHARD_SIZE,
-                max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR)
+            batch_builds = []
+            for source, run_name in zip(EXTERNAL_SOURCES, BUILD_RUNS):
+                key = (str(source), run_name)
+                prior = previous_by_key.get(key, {})
+                batch_builds.append({**prior, "source_path": str(source), "build_run": run_name,
+                                     "state": "PENDING"})
+            BATCH = {"schema_version": 1, "input_kind": "external", "state": "IMPORTING",
+                     "builds": batch_builds, "updated_at": None}
+            atomic_json(BATCH_PATH, BATCH)
+            for index, item in enumerate(BATCH["builds"], 1):
+                item["state"] = "IMPORTING"
+                atomic_json(BATCH_PATH, BATCH)
+                BUILD = import_external_corpus(
+                    Path(item["source_path"]), OFFICIAL_LINKS, DATA_ROOT / "processed", TOKENIZER, TOKENIZER_SPEC,
+                    run_name=item["build_run"], config=CHUNK_CONFIG, shard_size=SHARD_SIZE,
+                    max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR)
+                item.update({"state": "COMPLETE" if BUILD["selected_range_complete"] else "INCOMPLETE",
+                    "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
+                    "requested_input_records": BUILD["requested_input_records"], "counts": BUILD["counts"]})
+                atomic_json(BATCH_PATH, BATCH)
+                print(f"Archive {index}/{len(BATCH['builds'])}: {item['source_path']} -> {item['state']}")
+                if not BUILD["selected_range_complete"]:
+                    raise RuntimeError("Batch chưa đủ shard. Run all lại với cùng folder để resume.")
+            BATCH["state"] = "COMPLETE"
+            BATCH["updated_at"] = utc_now()
+            atomic_json(BATCH_PATH, BATCH)
+            BUILDS = [{"build_run": item["build_run"], "build": read_json(
+                DATA_ROOT / "processed" / item["build_run"] / "build.json")} for item in BATCH["builds"]]
+            BUILD_RUN = BUILDS[-1]["build_run"]
+            BUILD = BUILDS[-1]["build"]
         else:
             from vietmedbridge.build import build_corpus
             BUILD = build_corpus(DATA_ROOT / "crawl" / CRAWL_RUN, DATA_ROOT / "processed",
                 TOKENIZER, TOKENIZER_SPEC, run_name=BUILD_RUN, config=CHUNK_CONFIG,
                 max_shards=MAX_NEW_SHARDS, official_links=OFFICIAL_LINKS, work_dir=WORK_DIR)
+            BUILDS = [{"build_run": BUILD_RUN, "build": BUILD}]
+            BATCH = {"schema_version": 1, "input_kind": "crawl", "state":
+                "COMPLETE" if BUILD["selected_range_complete"] else "INCOMPLETE",
+                "builds": [{"build_run": BUILD_RUN, "state": "COMPLETE" if BUILD["selected_range_complete"] else "INCOMPLETE",
+                            "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"]}]}
+            atomic_json(BATCH_PATH, BATCH)
         BUILD_DIR = DATA_ROOT / "processed" / BUILD_RUN
-        print(json.dumps({k: BUILD[k] for k in (
-            "state", "counts", "selected_shards", "requested_input_records", "selected_range_complete"
-        )}, ensure_ascii=False, indent=2))
-        if BUILD.get("source_audit"):
-            print("Input audit:", BUILD["source_audit"]["state"])
-            print("Coverage gaps:", json.dumps(BUILD["source_audit"]["coverage_gaps"], ensure_ascii=False))
-            gap_artifact = BUILD["source_audit"]["coverage_gaps"]["artifact"]
-            if gap_artifact:
-                print("Gap review file:", BUILD_DIR / gap_artifact["path"])
-        if BUILD["selected_range_complete"]:
+        TOTAL_COUNTS = {key: sum(item["build"].get("counts", {}).get(key, 0) for item in BUILDS)
+                        for key in sorted({name for item in BUILDS for name in item["build"].get("counts", {})})}
+        print(json.dumps({"state": BATCH["state"], "archives": len(BUILDS),
+            "requested_input_records": sum(item["build"].get("requested_input_records", 0) for item in BUILDS),
+            "counts": TOTAL_COUNTS, "build_runs": [item["build_run"] for item in BUILDS]},
+            ensure_ascii=False, indent=2))
+        for item in BUILDS:
+            build_dir = DATA_ROOT / "processed" / item["build_run"]
+            source_audit = item["build"].get("source_audit")
+            if source_audit:
+                print(item["build_run"], "input audit:", source_audit["state"])
+                print("Coverage gaps:", json.dumps(source_audit["coverage_gaps"], ensure_ascii=False))
+                gap_artifact = source_audit["coverage_gaps"]["artifact"]
+                if gap_artifact:
+                    print("Gap review file:", build_dir / gap_artifact["path"])
+        if BATCH["state"] == "COMPLETE":
             atomic_json(DATA_ROOT / "active_data_build.json", {
                 "build_run": BUILD_RUN, "crawl_run": BUILD.get("crawl_run"),
                 "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
                 "input_kind": BUILD.get("input_kind", "CRAWL"), "state": BUILD["state"]})
-            print("Hoàn tất input range. Chạy notebook 03 trên CPU.")
+            print("Hoàn tất toàn batch. Chạy notebook 03 trên CPU.")
         else:
-            raise RuntimeError("Import chưa đủ range. Run all cùng config để tiếp tục trước notebook 03.")
+            raise RuntimeError("Input range chưa hoàn tất. Run all cùng config để resume.")
         '''),md("## 3. Kiểm tra một tài liệu và thời gian thực đo"),code('''
         import pyarrow.parquet as pq
         from vietmedbridge.build import verify_spans
-        for part in BUILD["parts"]:
-            path = BUILD_DIR / part["files"]["documents"]["path"]
-            if pq.ParquetFile(path).metadata.num_rows == 0:
-                continue
-            doc = next(pq.ParquetFile(path).iter_batches(batch_size=1)).to_pylist()[0]
-            children = pq.read_table(BUILD_DIR / part["files"]["children"]["path"], filters=[("doc_id", "=", doc["doc_id"])]).to_pylist()
-            parents = pq.read_table(BUILD_DIR / part["files"]["parents"]["path"], filters=[("doc_id", "=", doc["doc_id"])]).to_pylist()
-            verify_spans(doc, children, parents)
-            print("Source:", doc["doc_id"], doc["title"], "| children:", len(children))
-            print(children[0]["text"][:800] if children else "NO CHILDREN")
-            break
-        timing = BUILD_DIR / "import_runtime.json"
-        if timing.exists():
-            print(json.dumps(read_json(timing), ensure_ascii=False, indent=2))
+        for build_item in BUILDS:
+            build_dir = DATA_ROOT / "processed" / build_item["build_run"]
+            current_build = build_item["build"]
+            found_sample = False
+            for part in current_build["parts"]:
+                path = build_dir / part["files"]["documents"]["path"]
+                if pq.ParquetFile(path).metadata.num_rows == 0:
+                    continue
+                doc = next(pq.ParquetFile(path).iter_batches(batch_size=1)).to_pylist()[0]
+                children = pq.read_table(build_dir / part["files"]["children"]["path"], filters=[("doc_id", "=", doc["doc_id"])]).to_pylist()
+                parents = pq.read_table(build_dir / part["files"]["parents"]["path"], filters=[("doc_id", "=", doc["doc_id"])]).to_pylist()
+                verify_spans(doc, children, parents)
+                print("Source:", build_item["build_run"], doc["doc_id"], doc["title"], "| children:", len(children))
+                print(children[0]["text"][:800] if children else "NO CHILDREN")
+                found_sample = True
+                break
+            timing = build_dir / "import_runtime.json"
+            if timing.exists():
+                print(build_item["build_run"], json.dumps(read_json(timing), ensure_ascii=False, indent=2))
+            if not found_sample:
+                print(build_item["build_run"], "no parsed document in sample scan")
         print("Failures được bảo toàn trong các shard, cùng ID BTC.")
         '''),md('''
         Outcome đủ range bao gồm nguồn lỗi, không có nghĩa 100% URL đã có nội dung tốt.
@@ -157,15 +208,17 @@ def write_data_notebooks():
         md('''
         # VietMedBridge — 03: Kiểm toàn bộ dữ liệu → freeze → chia input embedding
 
-        **Runtime CPU, Run all sau notebook 02.** Tự lấy đúng build từ active_data_build.json.
+        **Runtime CPU, Run all sau notebook 02.** Tự lấy mọi build trong
+        active_data_batch.json; nếu chỉ có build cũ thì dùng active_data_build.json.
         Kiểm mọi official ID/URL, source hash, offsets, parent/child và bảo toàn IDs lỗi.
         Global dedup giữ toàn bộ aliases; input model giống hệt chỉ cần encode một lần.
         Chuẩn bị input embedding thành các file nhỏ trên disk, chưa nạp model GPU.
 
-        Candidate freeze là mốc dữ liệu có integrity, không tự duyệt relevance hoặc
-        human QA. Source audit/golden thật vẫn cần team review; không tạo nhãn thi.
+        Mỗi archive được freeze/checkpoint riêng; batch resume tiếp build chưa xong.
+        Candidate freeze là mốc integrity, không tự duyệt relevance hoặc human QA.
+        Source audit/golden thật vẫn cần team review; không tạo nhãn thi.
         '''),code(BOOT),md("## 1. Đọc build hoàn tất và chạy regression của chunker"),code('''
-        from vietmedbridge.artifacts import read_json, atomic_json
+        from vietmedbridge.artifacts import read_json, atomic_json, digest_json, code_fingerprint
         from vietmedbridge.dataset import load_snapshot, parquet_path
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
         from vietmedbridge.golden import run_golden_suite
@@ -173,42 +226,97 @@ def write_data_notebooks():
         from vietmedbridge.index_inputs import prepare_index_inputs, publish_data_handoff
 
         BUILD_RUN_OVERRIDE = None  # dùng để chủ động đọc build cũ
-        active_path = DATA_ROOT / "active_data_build.json"
-        active = read_json(active_path) if active_path.exists() else {}
-        BUILD_RUN = BUILD_RUN_OVERRIDE or active.get("build_run", "stage-a-data-v2-restored")
-        BUILD_DIR = DATA_ROOT / "processed" / BUILD_RUN
-        BUILD = read_json(BUILD_DIR / "build.json")
-        if not BUILD.get("selected_range_complete"):
-            raise RuntimeError("Build còn thiếu shard. Resume notebook 02 trước.")
-        if not BUILD_RUN_OVERRIDE and active and active["snapshot_sha256"] != BUILD["snapshot_sha256"]:
-            raise ValueError("Active build pointer và snapshot không khớp.")
+        batch_path = DATA_ROOT / "active_data_batch.json"
+        if BUILD_RUN_OVERRIDE:
+            build_refs = [{"build_run": BUILD_RUN_OVERRIDE}]
+            BATCH = {"schema_version": 1, "state": "COMPLETE", "builds": build_refs}
+        else:
+            BATCH = read_json(batch_path) if batch_path.exists() else {}
+            if BATCH.get("state") != "COMPLETE" or not BATCH.get("builds"):
+                raise RuntimeError("Notebook 02 chưa hoàn tất toàn batch. Chạy 02 trước.")
+            build_refs = BATCH["builds"]
+        ACTIVE_BUILDS = []
+        for item in build_refs:
+            run_name = item["build_run"]
+            build_dir = DATA_ROOT / "processed" / run_name
+            build = read_json(build_dir / "build.json")
+            if not build.get("selected_range_complete"):
+                raise RuntimeError(f"Build {run_name} còn shard thiếu; resume notebook 02.")
+            if item.get("snapshot_sha256") and item["snapshot_sha256"] != build["snapshot_sha256"]:
+                raise ValueError(f"Batch pointer và snapshot {run_name} không khớp.")
+            config = read_json(build_dir / "config.json")
+            ACTIVE_BUILDS.append({"build_run": run_name, "build_dir": build_dir,
+                                  "build": build, "config": config, "batch_item": item})
+        BUILD_RUN = ACTIVE_BUILDS[-1]["build_run"]
+        BUILD_DIR = ACTIVE_BUILDS[-1]["build_dir"]
+        BUILD = ACTIVE_BUILDS[-1]["build"]
         SNAPSHOT = load_snapshot(DATA_ROOT)
         OFFICIAL_LINKS = parquet_path(DATA_ROOT, "links_corpus.parquet")
-        CONFIG = read_json(BUILD_DIR / "config.json")
+        CONFIG = ACTIVE_BUILDS[0]["config"]
+        for item in ACTIVE_BUILDS[1:]:
+            if item["config"]["tokenizer"] != CONFIG["tokenizer"] or item["config"]["chunks"] != CONFIG["chunks"]:
+                raise ValueError("Các archive có tokenizer/chunk policy khác nhau; không được gộp âm thầm.")
         TOKENIZER, TOKENIZER_SPEC = load_bge_tokenizer(CONFIG["tokenizer"]["revision"])
         CHUNK_CONFIG = ChunkConfig(**CONFIG["chunks"])
         GOLDEN = run_golden_suite(CHECKOUT / "tests/golden/cases.json", TOKENIZER, TOKENIZER_SPEC, CHUNK_CONFIG)
         if not GOLDEN["passed"]:
             raise RuntimeError("Golden regression fail; chưa freeze candidate.")
         atomic_json(DATA_ROOT / "reports/golden_latest.json", GOLDEN)
-        print("Build:", BUILD_RUN, "| requested IDs:", BUILD["requested_input_records"])
-        '''),md("## 2. Health report và source audit — CPU"),code('''
-        CRAWL_DIR = DATA_ROOT / "crawl" / BUILD["crawl_run"] if BUILD.get("crawl_run") else None
-        HEALTH = health_report(BUILD_DIR, official_links=OFFICIAL_LINKS, crawl_dir=CRAWL_DIR,
-            work_dir=WORK_DIR, audit_size=PIPELINE_CONFIG["audit_size"])
-        print(json.dumps({k: HEALTH[k] for k in ("coverage", "documents", "chunks", "dedup")}, ensure_ascii=False, indent=2))
-        from IPython.display import HTML, display
-        display(HTML((BUILD_DIR / HEALTH["files"]["audit"]["path"]).read_text()))
-        print("Human QA pending:", BUILD_DIR / HEALTH["files"]["golden_candidates"]["path"])
-        '''),md("## 3. Freeze và chia input index theo phần — CPU"),code('''
-        CANDIDATE = freeze_candidate(BUILD_DIR, HEALTH, golden_report=GOLDEN)
-        CANDIDATE_NAME = f"candidate-{CANDIDATE['candidate_manifest_sha256'][:16]}.json"
-        INPUTS = prepare_index_inputs(BUILD_DIR, CANDIDATE_NAME, TOKENIZER,
-            work_dir=WORK_DIR, part_size=4096)
-        HANDOFF = publish_data_handoff(DATA_ROOT, BUILD_RUN, CANDIDATE, INPUTS)
-        print(json.dumps(HANDOFF, ensure_ascii=False, indent=2))
-        print("Model input parts:", BUILD_DIR / "index_inputs/units.json")
-        print("Tiếp theo: notebook 04 tự nhận candidate để benchmark GPU có giới hạn.")
+        print("Batch builds:", len(ACTIVE_BUILDS), "| requested IDs:",
+              sum(item["build"]["requested_input_records"] for item in ACTIVE_BUILDS))
+        '''),md("## 2. Kiểm, freeze và chuẩn bị input toàn batch — CPU"),code('''
+        HANDOFFS = []
+        for index, item in enumerate(ACTIVE_BUILDS, 1):
+            run_name, build_dir, build = item["build_run"], item["build_dir"], item["build"]
+            batch_item = item["batch_item"]
+            candidate = None
+            candidate_name = batch_item.get("candidate_name")
+            if candidate_name:
+                candidate_path = build_dir / candidate_name
+                if candidate_path.is_file():
+                    saved = read_json(candidate_path)
+                    saved_sha = digest_json({key:value for key,value in saved.items()
+                                             if key != "candidate_manifest_sha256"})
+                    if (saved.get("candidate_manifest_sha256") == saved_sha
+                        and saved.get("snapshot_sha256") == build["snapshot_sha256"]
+                        and saved.get("golden", {}).get("code_sha256") == code_fingerprint()):
+                        candidate = saved
+            if candidate is None:
+                for path in sorted(build_dir.glob("candidate-*.json")):
+                    saved = read_json(path)
+                    saved_sha = digest_json({key:value for key,value in saved.items()
+                                             if key != "candidate_manifest_sha256"})
+                    if (saved.get("state") == "FROZEN_CANDIDATE"
+                        and saved.get("candidate_manifest_sha256") == saved_sha
+                        and saved.get("snapshot_sha256") == build["snapshot_sha256"]
+                        and saved.get("golden", {}).get("code_sha256") == code_fingerprint()):
+                        candidate, candidate_name = saved, path.name
+                        break
+            if candidate is None:
+                crawl_dir = DATA_ROOT / "crawl" / build["crawl_run"] if build.get("crawl_run") else None
+                health = health_report(build_dir, official_links=OFFICIAL_LINKS, crawl_dir=crawl_dir,
+                    work_dir=WORK_DIR, audit_size=PIPELINE_CONFIG["audit_size"])
+                candidate = freeze_candidate(build_dir, health, golden_report=GOLDEN)
+                candidate_name = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
+            INPUTS = prepare_index_inputs(build_dir, candidate_name, TOKENIZER,
+                work_dir=WORK_DIR, part_size=4096)
+            HANDOFF = publish_data_handoff(DATA_ROOT, run_name, candidate, INPUTS)
+            batch_item.update({"state":"FROZEN", "candidate_name":candidate_name,
+                "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
+                "index_inputs_manifest_sha256":INPUTS["manifest_sha256"]})
+            atomic_json(batch_path, BATCH)
+            HANDOFFS.append(HANDOFF)
+            print(f"Freeze {index}/{len(ACTIVE_BUILDS)}: {run_name} | documents="
+                  f"{candidate['counts']['documents']:,} | children={candidate['counts']['children']:,}")
+        BATCH["freeze_state"] = "COMPLETE"
+        atomic_json(batch_path, BATCH)
+        print(json.dumps({"state":"BATCH_FROZEN", "builds":len(HANDOFFS),
+            "documents":sum(item["documents"] for item in HANDOFFS),
+            "children":sum(item["children"] for item in HANDOFFS),
+            "lineage_state":read_json(DATA_ROOT / "candidate_lineage.json")["state"],
+            "lineage_candidates":len(read_json(DATA_ROOT / "candidate_lineage.json")["sources"])},
+            ensure_ascii=False, indent=2))
+        print("Model input parts và checkpoints đã lưu riêng trong từng build. Tiếp theo chạy notebook 04.")
         '''),md('''
         Candidate lớn không được nạp vào catalog RAM của pilot. Notebook 04 sẽ
         đọc một mẫu từ các input parts để đo BGE/Qwen/reranker và ghi chi phí,

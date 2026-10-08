@@ -65,6 +65,49 @@ def list_external_sources(data_root):
     return sorted(dict.fromkeys(path.resolve() for path in found), key=lambda path: str(path).casefold())
 
 
+def list_external_source_batches(data_root, explicit=None):
+    """Return all archives in one selected folder, or all discoverable handoffs.
+
+    A folder with an archive manifest or extraction manifest is one source. A
+    regular folder is treated as a batch folder and its tar files are returned
+    individually, in stable shard-name order.
+    """
+    roots = [Path(explicit).expanduser().resolve()] if explicit else [
+        Path(data_root) / "incoming", Path(data_root) / "data_temp", Path(data_root).parent / "data_temp"]
+
+    def is_single_source(path):
+        return path.is_dir() and ((path / "archive_manifest.json").is_file()
+            or (path / MEMBERS["extracted"]).is_file())
+
+    def discover(folder, depth):
+        folder = Path(folder)
+        if not folder.is_dir():
+            return [folder] if folder.is_file() else []
+        if is_single_source(folder):
+            return [folder]
+        found = []
+        try:
+            children = sorted(folder.iterdir(), key=lambda item: item.name.casefold())
+        except OSError:
+            return []
+        for child in children:
+            if child.is_file() and child.name.lower().endswith(".tar"):
+                found.append(child)
+            elif child.is_dir():
+                if is_single_source(child):
+                    found.append(child)
+                elif depth > 0:
+                    found.extend(discover(child, depth - 1))
+        return found
+
+    found = []
+    for root in roots:
+        if root.exists():
+            found.extend(discover(root, 1 if explicit else 1))
+    unique = dict.fromkeys(path.resolve() for path in found)
+    return sorted(unique, key=lambda path: (path.name.casefold(), str(path).casefold()))
+
+
 def find_external_source(data_root, explicit=None):
     """Resolve an exact source or the sole discovered handoff."""
     if explicit:

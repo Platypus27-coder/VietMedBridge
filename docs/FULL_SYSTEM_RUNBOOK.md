@@ -62,7 +62,9 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
 
 ## Khi đợt dữ liệu mới về
 
-1. Chạy 02 cho nguồn mới rồi 03 để kiểm và freeze. 03 tự ghi candidate mới nối
+1. Với batch folder mới, nhập đường dẫn folder một lần ở `EXTERNAL_SOURCE` trong 02;
+   notebook tự xử lý mọi archive `.tar` bên trong và checkpoint riêng từng archive.
+   Sau đó chạy 03 một lần để kiểm/freeze toàn batch. 03 tự ghi các candidate mới nối
    tiếp candidate đang active vào `data/candidate_lineage.json`; không cần chép hash.
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
 2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều

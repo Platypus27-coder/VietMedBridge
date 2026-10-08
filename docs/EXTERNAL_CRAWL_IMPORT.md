@@ -5,6 +5,12 @@ Giữ DATA_ROOT đã dùng: `/content/drive/MyDrive/VietMedBridge/data`.
 
 ## Nguồn trên Drive
 
+Batch mới Sếp vừa đưa lên nằm trong `data/incoming/team-crawl-archives-2026-10-08/`
+và có sáu archive: `vibiomir_shard_00001.tar` đến `vibiomir_shard_00006.tar`,
+tổng khoảng 19,05 GB. Cùng shard `00000` đã xử lý trước đó, đây là batch khoảng
+700k URL cần dùng cho pipeline. 02 được cấu hình trỏ thẳng vào folder này và
+chạy tuần tự cả sáu archive; không chọn lại riêng shard `00001`.
+
 Archive gốc `vibiomir_shard_00000.tar` có 3.187.025.920 bytes, SHA-256:
 `cfb0dd6cfcb1cc6f8665717942b076a0e71011736d29e4a175064fc7b168929a`.
 Cổng upload connector giới hạn 100 MiB; bản chia phần dùng 96 MiB mỗi phần:
@@ -33,10 +39,10 @@ phải số documents vượt kiểm chất lượng mới hoặc số có relev
 
 ## 02: import/chunk có checkpoint
 
-Mặc định `INPUT_KIND="external"`, shard 2.048 official IDs. Auto discovery liệt kê
-nguồn trong `data/incoming`, `data/data_temp` và `VietMedBridge/data_temp`; nếu có
-nhiều archive, chọn số tương ứng trong notebook. BUILD_RUN tự sinh ổn định theo
-archive/chunk policy; form cho phép nhập tên cũ khi cần resume.
+Mặc định `INPUT_KIND="external"`, shard 2.048 official IDs. `EXTERNAL_SOURCE`
+nhận file tar hoặc folder batch; folder sẽ nhập hết file tar theo thứ tự.
+`BUILD_RUN` trống sẽ tự sinh tên riêng ổn định cho từng archive. `active_data_batch.json`
+checkpoint toàn danh sách; Run all lại cùng folder để resume archive/shard đang dở.
 
 Kiểm SHA snapshot official, URL → ID/alias, liên kết raw SHA/snapshot và số ký tự.
 Giữ nguyên source_text, chia bằng tokenizer BGE cố định, kiểm mọi span. Frontier URL
@@ -58,9 +64,11 @@ Thay code/source/policy thì dùng build run mới để không trộn checkpoin
 
 ## 03: kiểm snapshot, freeze và chuẩn bị input trên disk
 
-Tự đọc active_data_build.json từ 02. Kiểm whole-snapshot source hashes, official
-membership, parent/child/section offsets và counts. Health giữ global content/
-representation aliases. Freeze là candidate integrity, không tự duyệt y khoa,
+Tự đọc mọi build hoàn tất từ `active_data_batch.json` của 02, kể cả sau khi Colab
+ngắt. Kiểm whole-snapshot source hashes, official membership, parent/child/section
+offsets và counts cho từng archive, rồi freeze và chuẩn bị index inputs từng build.
+Candidate lineage tự nối từng batch với candidate cũ; không cần chạy 03 sáu lần.
+Health giữ global content/representation aliases. Freeze là candidate integrity, không tự duyệt y khoa,
 relevance, raw replay hoặc milestone quy mô.
 
 `processed/team-100k-data-v1/index_inputs/units.json` liệt kê các Parquet phần nhỏ,
