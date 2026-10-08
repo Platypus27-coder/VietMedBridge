@@ -4,7 +4,7 @@ from write_notebooks import BOOTSTRAP, code, md, save
 BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
     .replace("runtime.json","data_processing_runtime.json")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        'DATA_WORKFLOW_API = "external-extraction-import-v4"\n'
+        'DATA_WORKFLOW_API = "external-extraction-import-v5-cumulative-candidate-lineage"\n'
         'upgrade = lock.get("workflow_api") != DATA_WORKFLOW_API\n'
         'reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',

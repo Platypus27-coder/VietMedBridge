@@ -68,7 +68,7 @@ def compose_candidates(data_root, sources, tokenizer, *, run_name, golden_report
             artifact_paths(output,candidate,kind)
         for part in inputs["parts"]:
             verify_file(output / "index_inputs" / part["path"],part["sha256"])
-        return publish_data_handoff(root,run_name,candidate,inputs)
+        return publish_data_handoff(root,run_name,candidate,inputs,lineage_mode="replace")
     with local_workspace(work_dir) as temporary, _connection(temporary) as con:
         for kind in KINDS:
             selects = []
@@ -157,6 +157,6 @@ def compose_candidates(data_root, sources, tokenizer, *, run_name, golden_report
         atomic_json(frozen_path,candidate)
     inputs = prepare_index_inputs(output,f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json",tokenizer,work_dir=work_dir)
     # Change the active pointer only after all source, span and input checks pass.
-    handoff = publish_data_handoff(root,run_name,candidate,inputs)
+    handoff = publish_data_handoff(root,run_name,candidate,inputs,lineage_mode="replace")
     atomic_json(output / "union_handoff.json",handoff)
     return handoff

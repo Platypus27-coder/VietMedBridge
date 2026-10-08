@@ -32,6 +32,9 @@ def main():
         + BM25 VI/EN/ZH với query dịch → RRF → Qwen document/child MaxP reranking
         → source parents 512/640 → LCS dedup → ZIP đủ 1.200 query.
         Tự nhận active candidate của 03, gồm team-100k-data-v1 hiện có.
+        Khi có batch mới, 03 tự ghi candidate cũ + mới vào lineage trên Drive;
+        coordinator 04 tự ghép chúng trước inference, không cần sửa danh sách code.
+        Chạy coordinator một lần trước khi ba worker bắt đầu.
         Cache vectors gắn với nội dung/model, giữ official ID/alias riêng. Data mới
         dùng lại vectors của nội dung cũ; vectors baseline 100k được kiểm và đăng ký
         vào cache, không copy thêm một ma trận corpus. Cache không xóa được khi còn
@@ -88,7 +91,7 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v7-disk-full-system")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v8-auto-cumulative-candidates")),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
@@ -117,29 +120,33 @@ def main():
         from vietmedbridge.full_plan_runtime import run_full_pipeline
         from vietmedbridge.scale_benchmark import load_handoff
         from vietmedbridge.full_scale_runtime import run_scale_full_pipeline
-        from vietmedbridge.artifacts import read_json
+        from vietmedbridge.artifacts import read_json, digest_json
+        from vietmedbridge.index_inputs import read_candidate_lineage
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
         RUN_NAME = "stage-a-full-plan-v3-per-model-15b"
         EMBEDDING_CACHE_RUN = "stage-a-retrieval-v1"
-        # Đợt data đầu tiên để []; khi có đợt mới, liệt kê candidate cũ + mới.
-        # Mỗi tuple là (build_run, candidate_filename) đã freeze ở 03.
-        CORPUS_SOURCES = []
-        CORPUS_UNION_RUN = "team-cumulative-v1"  # tên mới cho mỗi tập nguồn mới
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
         TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
 
-        if CORPUS_SOURCES:
+        # Notebook 03 appends each newly frozen candidate to this Drive manifest.
+        # The coordinator composes the old corpus plus new batch automatically.
+        LINEAGE_SOURCES = read_candidate_lineage(DATA_ROOT)
+        if len(LINEAGE_SOURCES) > 1:
             if TEAM_WORKER_ID is not None:
-                raise ValueError("Chỉ coordinator ghép data một lần; workers để CORPUS_SOURCES=[].")
+                raise ValueError("Có data mới chờ ghép. Coordinator chạy 04 một lần với TEAM_WORKER_ID=None trước workers.")
             from vietmedbridge.corpus_union import compose_candidates
             from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
             from vietmedbridge.dataset import parquet_path
             from vietmedbridge.golden import run_golden_suite
+            CORPUS_SOURCES = [(item["build_run"], item["candidate_name"]) for item in LINEAGE_SOURCES]
+            lineage_key = digest_json([item["candidate_manifest_sha256"] for item in LINEAGE_SOURCES])
+            CORPUS_UNION_RUN = f"cumulative-{lineage_key[:16]}"
+            print("Tự ghép các candidate đã freeze:", json.dumps(CORPUS_SOURCES, ensure_ascii=False))
             first_config = read_json(DATA_ROOT / "processed" / CORPUS_SOURCES[0][0] / "config.json")
             tokenizer, tokenizer_spec = load_bge_tokenizer(first_config["tokenizer"]["revision"])
             golden = run_golden_suite(CHECKOUT / "tests/golden/cases.json", tokenizer,

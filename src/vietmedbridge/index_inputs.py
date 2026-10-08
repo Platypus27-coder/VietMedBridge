@@ -13,6 +13,7 @@ from .representation import BUILDER_VERSION, build_dense_text, representation_ha
 from .validation import open_views
 
 UNIT_SCHEMA = pa.schema([("id",pa.string()),("text",pa.large_string())])
+LINEAGE_SCHEMA_VERSION = 1
 
 
 def _part_path(root, relative):
@@ -100,13 +101,88 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
     return report
 
 
-def publish_data_handoff(data_root, build_run, candidate, inputs):
+def _candidate_reference(build_run, candidate_name, manifest_sha256):
+    if not all(isinstance(value, str) and value for value in (build_run, candidate_name, manifest_sha256)):
+        raise ValueError("Candidate lineage reference is incomplete.")
+    if Path(build_run).name != build_run or Path(candidate_name).name != candidate_name:
+        raise ValueError("Candidate lineage reference must use local names.")
+    return {"build_run": build_run, "candidate_name": candidate_name,
+            "candidate_manifest_sha256": manifest_sha256}
+
+
+def _read_lineage_file(path):
+    if not path.is_file():
+        return None
+    saved = read_json(path)
+    payload = {key: value for key, value in saved.items() if key != "lineage_sha256"}
+    if (saved.get("schema_version") != LINEAGE_SCHEMA_VERSION
+        or digest_json(payload) != saved.get("lineage_sha256")
+        or not isinstance(saved.get("sources"), list) or not saved["sources"]):
+        raise ValueError("Candidate lineage manifest is invalid; preserve it for inspection before rebuilding.")
+    refs, seen = [], set()
+    for item in saved["sources"]:
+        ref = _candidate_reference(item.get("build_run"), item.get("candidate_name"),
+                                   item.get("candidate_manifest_sha256"))
+        if ref["candidate_manifest_sha256"] not in seen:
+            refs.append(ref)
+            seen.add(ref["candidate_manifest_sha256"])
+    return refs
+
+
+def read_candidate_lineage(data_root):
+    """Return ordered frozen candidates to include in the next cumulative corpus."""
+    root = Path(data_root)
+    refs = _read_lineage_file(root / "candidate_lineage.json")
+    if refs is not None:
+        return refs
+    active_path = root / "active_data_candidate.json"
+    if not active_path.is_file():
+        return []
+    active = read_json(active_path)
+    return [_candidate_reference(active.get("build_run"), active.get("candidate_name"),
+                                 active.get("candidate_manifest_sha256"))]
+
+
+def publish_data_handoff(data_root, build_run, candidate, inputs, *, lineage_mode="append"):
     if inputs["candidate_manifest_sha256"] != candidate["candidate_manifest_sha256"]:
         raise ValueError("Candidate/index-input handoff mismatch.")
+    if lineage_mode not in ("append", "replace"):
+        raise ValueError("lineage_mode must be append or replace.")
+    root = Path(data_root)
+    candidate_name = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
+    current_ref = _candidate_reference(build_run, candidate_name, candidate["candidate_manifest_sha256"])
     value = {"build_run":build_run,"candidate_name":f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json",
         "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
         "index_inputs_manifest_sha256":inputs["manifest_sha256"],"documents":candidate["counts"]["documents"],
         "children":candidate["counts"]["children"],"unique_dense_inputs":inputs["input_count"],
         "state":"DATA_READY_RESOURCE_BENCHMARK_REQUIRED","updated_at":utc_now()}
-    atomic_json(Path(data_root)/"active_data_candidate.json",value)
+    lineage_path = root / "candidate_lineage.json"
+    if lineage_mode == "replace":
+        refs = [current_ref]
+    else:
+        refs = _read_lineage_file(lineage_path) or []
+        active_path = root / "active_data_candidate.json"
+        if active_path.is_file():
+            active = read_json(active_path)
+            active_ref = _candidate_reference(active.get("build_run"), active.get("candidate_name"),
+                                              active.get("candidate_manifest_sha256"))
+            if all(ref["candidate_manifest_sha256"] != active_ref["candidate_manifest_sha256"] for ref in refs):
+                refs.append(active_ref)
+        if all(ref["candidate_manifest_sha256"] != current_ref["candidate_manifest_sha256"] for ref in refs):
+            refs.append(current_ref)
+        if not refs:
+            refs = [current_ref]
+    lineage = {"schema_version":LINEAGE_SCHEMA_VERSION,"sources":refs,
+        "state":"PENDING_UNION" if len(refs) > 1 else "SINGLE_SOURCE","updated_at":utc_now()}
+    lineage["lineage_sha256"] = digest_json(lineage)
+    if lineage_mode == "replace":
+        # If interrupted before lineage replacement, the pending source list
+        # causes the coordinator to resume this same deterministic union.
+        atomic_json(root / "active_data_candidate.json",value)
+        atomic_json(lineage_path,lineage)
+    else:
+        # Record both candidates before moving the active pointer. If interrupted,
+        # the old pointer remains usable and the union can still be resumed.
+        atomic_json(lineage_path,lineage)
+        atomic_json(root / "active_data_candidate.json",value)
     return value

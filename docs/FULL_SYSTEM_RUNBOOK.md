@@ -8,13 +8,12 @@ không nâng code lock xử lý dữ liệu 02–03 đang chạy dở.
 
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
 Chọn GPU, giữ đúng `DATA_ROOT`, chạy Bootstrap ở runtime mới. Workflow API
-`full-master-plan-strong-v7-disk-full-system` nâng code lock một lần. Không cần
+`full-master-plan-strong-v8-auto-cumulative-candidates` nâng code lock một lần. Không cần
 chạy lại 02–03 cho candidate `ce6987985fb015ca` đã hoàn tất.
 
 Trong cell cấu hình:
 
 - Ba thành viên cùng đặt `TEAM_SIZE=3`; `TEAM_WORKER_ID` lần lượt là `0`, `1`, `2`.
-- `CORPUS_SOURCES=[]` khi dùng nguyên candidate đang active.
 - Các tài khoản phải cùng đọc/ghi **một thư mục dữ liệu được chia sẻ**, không phải
   ba bản sao riêng của `MyDrive/VietMedBridge/data`. Sửa `DATA_ROOT` theo vị trí
   mount thực tế nếu cần. Giữ cùng phiên bản code, model và thư viện.
@@ -63,15 +62,14 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
 
 ## Khi đợt dữ liệu mới về
 
-1. Chạy 02 cho nguồn mới với `BUILD_RUN` mới; sau đó chạy 03 để kiểm và freeze.
+1. Chạy 02 cho nguồn mới rồi 03 để kiểm và freeze. 03 tự ghi candidate mới nối
+   tiếp candidate đang active vào `data/candidate_lineage.json`; không cần chép hash.
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
-2. Trong 04, coordinator điền `CORPUS_SOURCES` bằng các tuple
-   `(build_run, candidate_filename)`: candidate tích lũy trước đó và candidate mới.
-   Đặt `CORPUS_UNION_RUN` mới cho tập nguồn mới. Có thể lấy tên candidate chính xác
-   từ output 03 hoặc `active_data_candidate.json`; không tự đoán hash.
-3. Chạy cell cấu hình một lần để ghép và xuất bản candidate tích lũy. Workers để
-   `CORPUS_SOURCES=[]`, rồi đọc cùng active candidate sau khi ghép hoàn tất.
-4. Chạy 04 theo phân công. Nội dung và encoder không đổi sẽ dùng lại vectors;
+2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
+   candidate, notebook tự ghép chúng, kiểm tra xung đột và chuyển active pointer
+   sang corpus tích lũy. Sau đó ba worker mới chạy 04 theo ID 0/1/2.
+   Nếu không dùng chia worker, Run all của coordinator tiếp tục thẳng inference.
+3. Nội dung và encoder không đổi sẽ dùng lại vectors;
    nội dung mới mới cần encode. BM25/mappings được xây cho candidate mới, và truy vấn
    phải xếp hạng lại vì candidate pool đã thay đổi.
 
@@ -82,7 +80,8 @@ hoặc source spans sẽ báo xung đột; không âm thầm chọn một bản.
 cùng official snapshot, tokenizer và chunking policy.
 
 Mỗi output part có checkpoint; active pointer chỉ đổi sau khi toàn bộ union đã
-qua integrity, freeze và chuẩn bị input. Ghép tạo thêm bản processed data, vì vậy
+qua integrity, freeze và chuẩn bị input. Sau khi gộp thành công, lineage được thu
+gọn về candidate tích lũy duy nhất để batch kế tiếp nối vào đó. Ghép tạo thêm bản processed data, vì vậy
 cần tính dung lượng lưu trữ. Raw paths trong provenance vẫn chỉ về nguồn ban đầu;
 không xóa raw nguồn nếu cần audit/replay. Các vector được tham chiếu từ baseline
 cũ vẫn cần file baseline đó; `model_cache` không phải bản sao lưu vector.
