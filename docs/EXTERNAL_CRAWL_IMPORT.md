@@ -33,13 +33,17 @@ phải số documents vượt kiểm chất lượng mới hoặc số có relev
 
 ## 02: import/chunk có checkpoint
 
-Mặc định `INPUT_KIND="external"`, `BUILD_RUN="team-100k-data-v1"`,
-`EXTERNAL_SOURCE=None`, shard 2.048 official IDs. Auto discovery chỉ tìm trong
-`data/incoming`, `data/data_temp` và `VietMedBridge/data_temp`; nhiều nguồn thì cần
-đặt một EXTERNAL_SOURCE cụ thể.
+Mặc định `INPUT_KIND="external"`, shard 2.048 official IDs. Auto discovery liệt kê
+nguồn trong `data/incoming`, `data/data_temp` và `VietMedBridge/data_temp`; nếu có
+nhiều archive, chọn số tương ứng trong notebook. BUILD_RUN tự sinh ổn định theo
+archive/chunk policy; form cho phép nhập tên cũ khi cần resume.
 
 Kiểm SHA snapshot official, URL → ID/alias, liên kết raw SHA/snapshot và số ký tự.
-Giữ nguyên source_text, chia bằng tokenizer BGE cố định, kiểm mọi span. Không
+Giữ nguyên source_text, chia bằng tokenizer BGE cố định, kiểm mọi span. Frontier URL
+không có crawl row hoặc crawl thành công nhưng thiếu extraction row được giữ thành
+failure rõ ràng; audit ghi từng official ID bị ảnh hưởng vào
+`external_coverage_gaps.csv`. URL mismatch, raw binding mismatch và sai snapshot
+vẫn chặn import. Không
 giả định ID liên tục. Nguồn lỗi/challenge/redirect/trích rỗng vào failures; LOW
 quality được giữ kèm flags. Mỗi input ID có ledger và đúng một outcome.
 

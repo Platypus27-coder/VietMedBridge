@@ -4,7 +4,7 @@ from write_notebooks import BOOTSTRAP, code, md, save
 BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
     .replace("runtime.json","data_processing_runtime.json")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        'DATA_WORKFLOW_API = "external-extraction-import-v2"\n'
+        'DATA_WORKFLOW_API = "external-extraction-import-v3"\n'
         'upgrade = lock.get("workflow_api") != DATA_WORKFLOW_API\n'
         'reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -16,16 +16,20 @@ BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
 def write_data_notebooks():
     save("02_colab_extract_and_chunk.ipynb",[
         md('''
-        # VietMedBridge — 02: Nhập bản crawl 100k → source + parent/child chunks
+        # VietMedBridge — 02: Nhập bản crawl → source + parent/child chunks
 
-        **Runtime CPU, Run all.** Đọc một archive `vibiomir_shard_*.tar` hoặc thư mục
-        đã giải nén, hoặc thư mục `.tar.parts` có archive_manifest.json. Frontier
-        bên trong tar có thể mang số shard khác `00000`; mỗi archive vẫn dùng một BUILD_RUN riêng.
+        **Runtime CPU, Run all.** Chọn nguồn ở form của cell cấu hình; nếu có nhiều
+        archive, notebook hiện danh sách để chọn. Tên BUILD_RUN tự sinh ổn định theo
+        archive và cấu hình, có thể nhập tay vào form để resume một run cũ.
+        Hỗ trợ `vibiomir_shard_*.tar`, thư mục đã giải nén và `.tar.parts`.
+        Frontier bên trong tar có thể mang số shard khác `00000`.
         Bản chia phần được tự ghép trên ổ local Colab và kiểm SHA-256 đúng bản gốc.
         Tái sử dụng văn bản EXTRACT_SUCCESS; không tải lại các website.
         Archive và snapshot BTC phải cùng SHA-256. Map bằng official URL, giữ toàn bộ
-        official ID/alias và một outcome cho từng ID. Nguồn lỗi/challenge/redirect về
-        trang chủ được ghi failures để xử lý sau. LOW quality được giữ kèm flags.
+        official ID/alias và một outcome cho từng ID. ID thiếu dòng crawl/extraction
+        được ghi thành failure với reason rõ ràng và đưa vào `external_coverage_gaps.csv`
+        để truy hồi sau; URL mapping sai vẫn chặn import và có báo cáo riêng.
+        Nguồn lỗi/challenge/redirect về trang chủ được ghi failures; LOW quality được giữ kèm flags.
 
         Mặc định tìm archive trong `VietMedBridge/data/incoming`,
         `VietMedBridge/data/data_temp` hoặc `VietMedBridge/data_temp` trên Drive.
@@ -40,11 +44,14 @@ def write_data_notebooks():
         from vietmedbridge.artifacts import read_json, atomic_json
         from vietmedbridge.dataset import load_snapshot, parquet_path
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
-        from vietmedbridge.external_import import find_external_source, import_external_corpus
+        from vietmedbridge.external_import import (
+            external_build_run_name, find_external_source, import_external_corpus,
+            list_external_sources,
+        )
 
-        INPUT_KIND = "external"  # dùng "crawl" cho các crawl run chuẩn cũ
-        EXTERNAL_SOURCE = None  # hoặc đường dẫn tới một file vibiomir_shard_*.tar
-        BUILD_RUN = "team-100k-data-v1"
+        INPUT_KIND = "external" #@param ["external", "crawl"]
+        EXTERNAL_SOURCE = "" #@param {type:"string"}
+        BUILD_RUN = "" #@param {type:"string"}
         CRAWL_RUN = "stage-a-v2"  # chỉ dùng với INPUT_KIND="crawl"
         SHARD_SIZE = 2048
         MAX_NEW_SHARDS = None  # None = xử lý hết; giữ cùng config khi resume
@@ -58,15 +65,41 @@ def write_data_notebooks():
             atomic_json(tokenizer_lock_path, TOKENIZER_SPEC)
         CHUNK_CONFIG = ChunkConfig(**PIPELINE_CONFIG["chunking"])
         if INPUT_KIND == "external":
-            SOURCE = find_external_source(DATA_ROOT, EXTERNAL_SOURCE)
+            if EXTERNAL_SOURCE.strip():
+                SOURCE = find_external_source(DATA_ROOT, EXTERNAL_SOURCE.strip())
+            else:
+                sources = list_external_sources(DATA_ROOT)
+                if not sources:
+                    SOURCE = None
+                elif len(sources) == 1:
+                    SOURCE = sources[0]
+                else:
+                    print("Tìm thấy các nguồn crawl:")
+                    for index, path in enumerate(sources, 1):
+                        size = path.stat().st_size if path.is_file() else 0
+                        print(f"  {index}. {path}" + (f" ({size:,} bytes)" if size else ""))
+                    choice = input("Nhập số thứ tự nguồn muốn xử lý: ").strip()
+                    try:
+                        selected = int(choice) - 1
+                    except ValueError as exc:
+                        raise ValueError("Hãy nhập một số thứ tự trong danh sách nguồn.") from exc
+                    if not 0 <= selected < len(sources):
+                        raise ValueError("Số thứ tự nguồn nằm ngoài danh sách.")
+                    SOURCE = sources[selected]
             if SOURCE is None:
                 raise FileNotFoundError(
-                    "Chưa thấy archive 100k trên Drive. Đặt EXTERNAL_SOURCE bằng đường dẫn tar "
+                    "Chưa thấy archive trên Drive. Điền đường dẫn vào trường EXTERNAL_SOURCE "
                     "hoặc thư mục giải nén. Vị trí mặc định: "
                     + str(DATA_ROOT / "incoming/vibiomir_shard_00000.tar"))
+            if not BUILD_RUN.strip():
+                BUILD_RUN = external_build_run_name(
+                    SOURCE, tokenizer_spec=TOKENIZER_SPEC, chunking=CHUNK_CONFIG,
+                    shard_size=SHARD_SIZE)
             print("Existing crawl:", SOURCE)
         elif INPUT_KIND != "crawl":
             raise ValueError("INPUT_KIND phải là external hoặc crawl.")
+        elif not BUILD_RUN.strip():
+            BUILD_RUN = "team-100k-data-v1"
         print("Build:", BUILD_RUN, "| tokenizer:", TOKENIZER_SPEC)
         '''),md("## 2. Nhập/chia chunk theo shard — CPU"),code('''
         if INPUT_KIND == "external":
@@ -83,6 +116,10 @@ def write_data_notebooks():
         print(json.dumps({k: BUILD[k] for k in (
             "state", "counts", "selected_shards", "requested_input_records", "selected_range_complete"
         )}, ensure_ascii=False, indent=2))
+        if BUILD.get("source_audit"):
+            print("Input audit:", BUILD["source_audit"]["state"])
+            print("Coverage gaps:", json.dumps(BUILD["source_audit"]["coverage_gaps"], ensure_ascii=False))
+            print("Gap review file:", BUILD_DIR / BUILD["source_audit"]["coverage_gaps"]["artifact"]["path"])
         if BUILD["selected_range_complete"]:
             atomic_json(DATA_ROOT / "active_data_build.json", {
                 "build_run": BUILD_RUN, "crawl_run": BUILD.get("crawl_run"),

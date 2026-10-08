@@ -48,13 +48,8 @@ def _name(value):
     return value
 
 
-def find_external_source(data_root, explicit=None):
-    """Search only known handoff locations; ambiguous inputs require a path."""
-    if explicit:
-        source = Path(explicit)
-        if not source.exists():
-            raise FileNotFoundError(f"External source not found: {source}")
-        return source
+def list_external_sources(data_root):
+    """List known external handoffs in stable order for a notebook selector."""
     root = Path(data_root)
     found = []
     for directory in (root / "incoming", root / "data_temp", root.parent / "data_temp"):
@@ -62,14 +57,25 @@ def find_external_source(data_root, explicit=None):
             continue
         if (directory / MEMBERS["extracted"]).is_file():
             found.append(directory)
-        found.extend(directory.glob("vibiomir_shard_*.tar"))
+        found.extend(path for path in directory.glob("vibiomir_shard_*.tar") if path.is_file())
         for child in directory.iterdir():
             if child.is_dir() and ((child / MEMBERS["extracted"]).is_file()
                                    or (child / "archive_manifest.json").is_file()):
                 found.append(child)
-    found = list(dict.fromkeys(p.resolve() for p in found))
+    return sorted(dict.fromkeys(path.resolve() for path in found), key=lambda path: str(path).casefold())
+
+
+def find_external_source(data_root, explicit=None):
+    """Resolve an exact source or the sole discovered handoff."""
+    if explicit:
+        source = Path(explicit)
+        if not source.exists():
+            raise FileNotFoundError(f"External source not found: {source}")
+        return source
+    found = list_external_sources(data_root)
     if len(found) > 1:
-        raise ValueError("Multiple external crawl inputs found. Set EXTERNAL_SOURCE to one exact path.")
+        choices = "\n".join(f" - {path}" for path in found)
+        raise ValueError("Multiple external crawl inputs found; choose one explicitly:\n" + choices)
     return found[0] if found else None
 
 
@@ -90,13 +96,8 @@ def _directory_members(source):
     return members
 
 
-def stage_external_metadata(source, output_dir, *, work_dir):
-    """Cache selected metadata on local disk and persist its checksums on Drive."""
-    source, target = Path(source).resolve(), Path(output_dir)
-    target.mkdir(parents=True, exist_ok=True)
-    local = Path(work_dir) / ("external-source-" + digest_json(str(source))[:16])
-    local.mkdir(parents=True, exist_ok=True)
-    marker = target / "source.json"
+def _source_identity(source):
+    source = Path(source).resolve()
     source_stat = {"path": str(source), "is_directory": source.is_dir()}
     if source.is_file():
         source_stat.update(bytes=source.stat().st_size, mtime_ns=source.stat().st_mtime_ns)
@@ -107,12 +108,35 @@ def stage_external_metadata(source, output_dir, *, work_dir):
     else:
         members = _directory_members(source)
         if members == MEMBERS:
-            # Preserve the source signature used by existing shard-00000 directory runs.
+            # Keep the signature used by existing shard-00000 directory checkpoints.
             source_stat["members"] = {kind: {"bytes": (source/member).stat().st_size,
                 "mtime_ns": (source/member).stat().st_mtime_ns} for kind, member in members.items()}
         else:
             source_stat["members"] = {kind: {"path": member, "bytes": (source/member).stat().st_size,
                 "mtime_ns": (source/member).stat().st_mtime_ns} for kind, member in members.items()}
+    return source_stat
+
+
+def external_build_run_name(source, *, tokenizer_spec, chunking, shard_size,
+                            max_source_chars=2_000_000):
+    """Return a stable run name so notebook users do not edit code between archives."""
+    source = Path(source).resolve()
+    label = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.name).strip("-_.")[:40] or "archive"
+    chunking = asdict(chunking) if hasattr(chunking, "__dataclass_fields__") else chunking
+    identity = {"source": _source_identity(source), "tokenizer": tokenizer_spec,
+        "chunking": chunking, "shard_size": shard_size, "max_source_chars": max_source_chars,
+        "code_sha256": code_fingerprint(), "runtime": runtime_versions()}
+    return f"external-{label}-{digest_json(identity)[:12]}"
+
+
+def stage_external_metadata(source, output_dir, *, work_dir):
+    """Cache selected metadata on local disk and persist its checksums on Drive."""
+    source, target = Path(source).resolve(), Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    local = Path(work_dir) / ("external-source-" + digest_json(str(source))[:16])
+    local.mkdir(parents=True, exist_ok=True)
+    marker = target / "source.json"
+    source_stat = _source_identity(source)
     if marker.exists():
         saved = read_json(marker)
         # A renamed/replaced archive must not silently reuse unrelated metadata.
@@ -165,7 +189,20 @@ def stage_external_metadata(source, output_dir, *, work_dir):
     return local, saved
 
 
-def _incoming(con, local, metadata, official_links):
+def _export_audit_csv(con, query, local, report_dir, name):
+    local_path = Path(local) / f".{time.time_ns()}-{name}.tmp"
+    try:
+        rows = con.execute(f"SELECT count(*) FROM ({query}) audit_rows").fetchone()[0]
+        con.sql(query).write_csv(str(local_path), header=True)
+        destination = Path(report_dir) / name
+        checksum = publish_file(local_path, destination)
+        return {"path": name, "rows": rows, "sha256": checksum,
+                "bytes": destination.stat().st_size}
+    finally:
+        local_path.unlink(missing_ok=True)
+
+
+def _incoming(con, local, metadata, official_links, *, report_dir):
     descriptor = read_json(local / metadata["files"]["dataset"]["name"])
     corpus_sha = sha256_file(official_links)
     sources = [s for s in descriptor.get("sources", []) if s.get("kind") == "links_path"]
@@ -179,7 +216,9 @@ def _incoming(con, local, metadata, official_links):
         checks["duplicate_" + kind] = con.execute(
             f"SELECT count(*)-count(DISTINCT crawl_url_id) FROM {kind}").fetchone()[0]
     checks["frontier_missing_crawl"] = con.execute("""SELECT count(*) FROM frontier f LEFT JOIN crawl c USING(crawl_url_id)
-        WHERE c.crawl_url_id IS NULL OR f.fetch_url IS DISTINCT FROM c.fetch_url""").fetchone()[0]
+        WHERE c.crawl_url_id IS NULL""").fetchone()[0]
+    checks["frontier_crawl_url_mismatch"] = con.execute("""SELECT count(*) FROM frontier f JOIN crawl c USING(crawl_url_id)
+        WHERE f.fetch_url IS DISTINCT FROM c.fetch_url""").fetchone()[0]
     checks["crawl_outside_frontier"] = con.execute("""SELECT count(*) FROM crawl c LEFT JOIN frontier f USING(crawl_url_id)
         WHERE f.crawl_url_id IS NULL""").fetchone()[0]
     checks["invalid_extraction_binding"] = con.execute("""SELECT count(*) FROM extracted e LEFT JOIN crawl c USING(crawl_url_id)
@@ -197,15 +236,51 @@ def _incoming(con, local, metadata, official_links):
     checks["duplicate_official_id"] = con.execute("SELECT count(*)-count(DISTINCT doc_id) FROM mapped").fetchone()[0]
     checks["snapshot_binding_mismatch"] = con.execute("SELECT count(*) FROM crawl WHERE snapshot_id IS DISTINCT FROM ?",
         [descriptor["snapshot_id"]]).fetchone()[0]
-    if any(checks.values()):
-        raise ValueError(f"External input integrity failed: {checks}")
     # Sort only IDs, never the complete corpus's text/markdown in memory.
     con.execute("""CREATE TABLE incoming_ids AS SELECT row_number() OVER(ORDER BY doc_id)-1 AS input_row,
         doc_id,url,crawl_url_id FROM mapped""")
-    return {"passed": True, "checks": checks, "official_links_sha256": corpus_sha,
-            "official_ids": con.execute("SELECT count(*) FROM incoming_ids").fetchone()[0],
-            "unique_urls": con.execute("SELECT count(*) FROM frontier").fetchone()[0],
-            "external_snapshot_id": descriptor["snapshot_id"]}
+    gap_counts = {
+        "missing_crawl_official_ids": con.execute("""SELECT count(*) FROM incoming_ids m
+            LEFT JOIN crawl c USING(crawl_url_id) WHERE c.crawl_url_id IS NULL""").fetchone()[0],
+        "missing_extraction_official_ids": con.execute("""SELECT count(*) FROM incoming_ids m
+            JOIN crawl c USING(crawl_url_id) LEFT JOIN extracted e USING(crawl_url_id)
+            WHERE c.status='SUCCESS_RAW' AND e.crawl_url_id IS NULL""").fetchone()[0],
+    }
+    gaps_query = """SELECT m.input_row,m.doc_id,m.url,m.crawl_url_id,
+        CASE WHEN c.crawl_url_id IS NULL THEN 'MISSING_CRAWL_RESULT'
+             ELSE 'MISSING_EXTRACTION_RESULT' END AS reason_code,
+        c.status AS crawl_status,c.final_url,c.raw_path,c.raw_sha256,c.raw_size_bytes
+        FROM incoming_ids m JOIN frontier f USING(crawl_url_id)
+        LEFT JOIN crawl c USING(crawl_url_id) LEFT JOIN extracted e USING(crawl_url_id)
+        WHERE c.crawl_url_id IS NULL OR (c.status='SUCCESS_RAW' AND e.crawl_url_id IS NULL)
+        ORDER BY m.input_row"""
+    gaps_artifact = _export_audit_csv(con, gaps_query, local, report_dir, "external_coverage_gaps.csv")
+    coverage_gaps = gap_counts | {"artifact": gaps_artifact}
+    gap_keys = {"frontier_missing_crawl", "missing_extraction"}
+    fatal_checks = {name: value for name, value in checks.items() if name not in gap_keys and value}
+    audit = {
+        "passed": not fatal_checks,
+        "state": ("INTEGRITY_VALID_WITH_COVERAGE_GAPS" if any(gap_counts.values())
+                  else "INTEGRITY_VALID"),
+        "checks": checks,
+        "coverage_gaps": coverage_gaps,
+        "official_links_sha256": corpus_sha,
+        "official_ids": con.execute("SELECT count(*) FROM incoming_ids").fetchone()[0],
+        "unique_urls": con.execute("SELECT count(*) FROM frontier").fetchone()[0],
+        "external_snapshot_id": descriptor["snapshot_id"],
+    }
+    if fatal_checks:
+        mismatch_query = """SELECT f.crawl_url_id,f.fetch_url AS frontier_fetch_url,
+            c.fetch_url AS crawl_manifest_fetch_url
+            FROM frontier f JOIN crawl c USING(crawl_url_id)
+            WHERE f.fetch_url IS DISTINCT FROM c.fetch_url ORDER BY f.crawl_url_id"""
+        if checks["frontier_crawl_url_mismatch"]:
+            audit["integrity_issues"] = _export_audit_csv(
+                con, mismatch_query, local, report_dir, "external_integrity_issues.csv")
+        atomic_json(Path(report_dir) / "external_input_audit.json", audit)
+        raise ValueError(f"External input integrity failed: {fatal_checks}. "
+                         f"Audit: {Path(report_dir) / 'external_input_audit.json'}")
+    return audit
 
 
 def _hold(row, max_source_chars):
@@ -269,9 +344,9 @@ def import_external_corpus(source, official_links, output_root, tokenizer, token
         with _connection(temporary) as con:
             con.execute("SET threads=1")
             con.execute("SET preserve_insertion_order=false")
-            source_audit = _incoming(con, local, metadata, official_links)
+            source_audit = _incoming(con, local, metadata, official_links, report_dir=target)
             atomic_json(target / "external_input_audit.json", source_audit)
-            identity = {"source_input_signature": metadata["input_signature"], "source_kind": "external-extraction-v1",
+            identity = {"source_input_signature": metadata["input_signature"], "source_kind": "external-extraction-v2",
                 "external_snapshot_id": source_audit["external_snapshot_id"], "tokenizer": tokenizer_spec,
                 "chunks": asdict(config), "schema_version": SCHEMA_VERSION, "shard_size": shard_size,
                 "max_source_chars": max_source_chars, "official_links_sha256": source_audit["official_links_sha256"],
@@ -312,12 +387,15 @@ def import_external_corpus(source, official_links, output_root, tokenizer, token
                             rows.clear()
 
                 try:
-                    batches = con.execute("""SELECT m.input_row,m.doc_id,m.url,c.status,c.final_url,c.content_type,
+                    batches = con.execute("""SELECT m.input_row,m.doc_id,m.url,
+                        coalesce(c.status,'MISSING_CRAWL_RESULT') AS status,c.final_url,c.content_type,
                         c.raw_path,c.raw_sha256,c.raw_size_bytes,c.elapsed_ms,c.http_status,c.crawl_timestamp,
-                        e.extract_status,e.text,e.title,e.language,e.language_method,e.language_confidence,
+                        coalesce(e.extract_status,CASE WHEN c.status='SUCCESS_RAW'
+                            THEN 'MISSING_EXTRACTION_RESULT' END) AS extract_status,
+                        e.text,e.title,e.language,e.language_method,e.language_confidence,
                         e.extractor,e.extractor_version,e.source_issue,e.text_markdown
                         FROM (SELECT * FROM incoming_ids WHERE input_row>=? AND input_row<?) m
-                        JOIN crawl c USING(crawl_url_id) LEFT JOIN extracted e USING(crawl_url_id)
+                        LEFT JOIN crawl c USING(crawl_url_id) LEFT JOIN extracted e USING(crawl_url_id)
                         ORDER BY m.input_row""",
                         [first,first+records]).fetch_record_batch(128)
                     for batch in batches:
@@ -357,7 +435,8 @@ def import_external_corpus(source, official_links, output_root, tokenizer, token
                                 buffers["failures"].append({"doc_id": row["doc_id"], "url": row["url"], "phase": phase,
                                     "reason": reason, "reason_code": reason.split(":",1)[0], "domain": domain,
                                     "body_sha256": row["raw_sha256"], "content_type": row["content_type"] or "unknown",
-                                    "raw_file": str(source) + "#" + (row["raw_path"] or "")})
+                                    "raw_file": (str(source) + "#" + row["raw_path"])
+                                        if row["raw_path"] else None})
                                 counts["failures"] += 1; counts[phase+"_failed"] += 1
                             if len(buffers["ledger"]) >= 128 or buffered_chars >= 8_000_000:
                                 flush(); buffered_chars = 0
