@@ -67,8 +67,10 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
 2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
    candidate, notebook tự ghép chúng, kiểm tra xung đột và chuyển active pointer
-   sang corpus tích lũy. Sau đó ba worker mới chạy 04 theo ID 0/1/2.
-   Nếu không dùng chia worker, Run all của coordinator tiếp tục thẳng inference.
+   sang corpus tích lũy. Khi coordinator báo `WAITING_FOR_BGE_CORPUS_PARTS`, ba
+   worker chạy 04 theo ID 0/1/2. Sau khi đủ phần, coordinator Run all lại để
+   tổng hợp và tiếp tục inference. Nếu không dùng chia worker, đặt `TEAM_SIZE=1`;
+   Run all của coordinator tự xử lý toàn bộ.
 3. Nội dung và encoder không đổi sẽ dùng lại vectors;
    nội dung mới mới cần encode. BM25/mappings được xây cho candidate mới, và truy vấn
    phải xếp hạng lại vì candidate pool đã thay đổi.
