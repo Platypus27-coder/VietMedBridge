@@ -146,11 +146,14 @@ class VectorParts:
 
 
 def search_parts(store, query_vectors, output_dir, *, k=2048, query_batch_size=128,
-                 work_dir=None, device="cuda"):
+                 work_dir=None, device="cuda", checkpoint_every=8, max_new_parts=None):
     """Exact child cosine top-k. GPU/CPU blocks scan every frozen input part once."""
     validate_vectors(query_vectors,len(query_vectors),store.manifest["dimension"])
     if type(k) is not int or k < 1 or type(query_batch_size) is not int or query_batch_size < 1:
         raise ValueError("Invalid search limits.")
+    if type(checkpoint_every) is not int or checkpoint_every < 1 or (max_new_parts is not None and
+        (type(max_new_parts) is not int or max_new_parts < 0)):
+        raise ValueError("Invalid dense search checkpoint limits.")
     k = min(k,store.manifest["input_count"])
     root = Path(output_dir)
     identity = {"embeddings":store.manifest["manifest_sha256"],
@@ -177,7 +180,45 @@ def search_parts(store, query_vectors, output_dir, *, k=2048, query_batch_size=1
         return np.load(root / saved["scores"]["path"],allow_pickle=False),np.load(root / saved["positions"]["path"],allow_pickle=False),saved
     scores = np.full((len(query_vectors),k),-np.inf,np.float32)
     positions = np.full((len(query_vectors),k),-1,np.int64)
+    completed,new_parts = 0,0
+    progress_path = root / "progress.json"
+    if progress_path.exists():
+        progress = read_json(progress_path)
+        if (progress.get("signature") != signature or digest_json({k:v for k,v in progress.items() if k != "manifest_sha256"}) != progress.get("manifest_sha256")
+            or type(progress.get("completed_parts")) is not int or not 0 <= progress["completed_parts"] <= len(store.manifest["parts"])):
+            raise ValueError("Dense search progress checkpoint changed.")
+        completed = progress["completed_parts"]
+        for key in ("scores","positions"):
+            verify_file(bound(root,progress[key]["path"]),progress[key]["sha256"])
+        scores = np.load(bound(root,progress["scores"]["path"]),allow_pickle=False)
+        positions = np.load(bound(root,progress["positions"]["path"]),allow_pickle=False)
+        scanned = sum(p["rows"] for p in store.manifest["parts"][:completed])
+        if (scores.shape != (len(query_vectors),k) or positions.shape != scores.shape
+            or scores.dtype != np.float32 or positions.dtype != np.int64 or np.isnan(scores).any()
+            or np.any(positions < -1) or np.any(positions >= scanned)
+            or np.any(np.isfinite(scores) != (positions >= 0))):
+            raise ValueError("Invalid dense search progress arrays.")
+        print(f"Dense search resume: {completed}/{len(store.manifest['parts'])} parts already scanned",flush=True)
+
+    def save_progress(count):
+        # Two alternating slots retain the last committed pair during interruption.
+        previous = read_json(progress_path).get("slot",1) if progress_path.exists() else 1
+        slot = 1-previous
+        saved = {"signature":signature,"completed_parts":count,"slot":slot}
+        with local_workspace(work_dir) as temporary:
+            for key,values in (("scores",scores),("positions",positions)):
+                local = Path(temporary) / f"progress-{slot}-{key}.npy"
+                np.save(local,values,allow_pickle=False)
+                saved[key] = {"path":local.name,"sha256":publish_file(local,root / local.name)}
+        saved["manifest_sha256"] = digest_json(saved)
+        atomic_json(progress_path,saved)
+
     for index,p in enumerate(store.manifest["parts"]):
+        if index < completed:
+            continue
+        if max_new_parts is not None and new_parts >= max_new_parts:
+            save_progress(index)
+            return scores,positions,{"state":"IN_PROGRESS","signature":signature,"completed_parts":index}
         values = np.asarray(store.part(index))
         block = torch.from_numpy(values.copy()).to("cuda") if device == "cuda" else values
         for start in range(0,len(query_vectors),query_batch_size):
@@ -207,6 +248,9 @@ def search_parts(store, query_vectors, output_dir, *, k=2048, query_batch_size=1
             scores[old],positions[old] = np.take_along_axis(ss,order,axis=1),np.take_along_axis(ii,order,axis=1)
         if device == "cuda":
             del block
+        new_parts += 1
+        if (index+1) % checkpoint_every == 0:
+            save_progress(index+1)
         print(f"Dense search: {index+1}/{len(store.manifest['parts'])} parts, all {len(query_vectors)} queries",flush=True)
     if np.any(positions < 0) or not np.isfinite(scores).all():
         raise ValueError("Incomplete corpus-wide dense search.")

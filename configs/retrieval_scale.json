@@ -1,0 +1,9 @@
+{
+  "backend": "disk-full-plan-content-cache-v1",
+  "bge_batch_size": 32,
+  "local_vector_cache_bytes_per_branch": 4294967296,
+  "dense_top_k": 4096,
+  "source_pool_documents": 1024,
+  "worker_count_default": 3,
+  "scope": "Full inference architecture; original, translated lexical, second dense, document dense, conservative expansion, document/child Qwen reranking and exact adaptive source parents. Supervised steps require reviewed independent labels. Each model <=15B. Resource use and relevance need real GPU measurement."
+}

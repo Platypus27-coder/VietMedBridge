@@ -31,7 +31,9 @@ def calibration_context(config, analyzer):
         ("dense", "second_dense", "translation", "retrieval", "expansion_enabled")},
         "analyzer": analyzer.identity,
         "scoring_code": {name: sha256_file(Path(__file__).with_name(name)) for name in
-            ("retrieval_eval.py", "retrieval_policy.py", "strong_retrieval.py")}}
+            ("retrieval_eval.py", "retrieval_policy.py", "strong_retrieval.py")},
+        **({"scale_execution":config["scale_execution"],"disk_scoring_code":sha256_file(Path(__file__).with_name("disk_full.py"))}
+            if "scale_execution" in config else {})}
 
 
 def reviewed_calibration(root, catalog, queries, spec, *, context):

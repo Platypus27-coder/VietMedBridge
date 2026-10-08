@@ -271,8 +271,16 @@ def install_ai_pilot_review(upload_path, data_root, *, run_name="stage-a-source-
     """Install an explicit AI pilot export without overwriting a team's review edits."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name):
         raise ValueError("Unsafe preparation run name.")
-    target = Path(data_root) / "labels/preparation" / run_name / "source_review.json"
-    incoming, existing = read_json(upload_path), read_json(target)
+    directory = Path(data_root) / "labels/preparation"
+    target = directory / run_name / "source_review.json"
+    incoming = read_json(upload_path)
+    if not target.is_file() or read_json(target).get("source_plan_sha256") != incoming.get("source_plan_sha256"):
+        matches = [p for p in directory.glob("*/source_review.json")
+            if read_json(p).get("source_plan_sha256") == incoming.get("source_plan_sha256")]
+        if len(matches) != 1:
+            raise ValueError("Uploaded review belongs to another source plan or matches several runs.")
+        target = matches[0]
+    existing = read_json(target)
     if incoming.get("review_mode") != "AI_ASSISTED_PILOT" or incoming.get("review_authorization") != "USER_DELEGATED_TO_CODEX_2026_10_06":
         raise ValueError("Expected the explicitly user-delegated AI pilot review export.")
     if incoming.get("source_plan_sha256") != existing.get("source_plan_sha256"):
@@ -415,28 +423,43 @@ def prepare_training_data(data_root, checkout, *, run_name="stage-a-source-train
     review_model_registry(config, registry)
     budget = model_budget_report(config, registry)
     tokenizer = AutoTokenizer.from_pretrained(config["dense"]["model_id"], revision=config["dense"]["revision"], trust_remote_code=False)
-    catalog = load_catalog(root / "processed/stage-a-data-v3-laodong", "candidate-1cd220a4be956d5a.json", tokenizer, **config["pilot_limits"])
-    snapshot = read_json(root / "raw/snapshot.json")
-    if snapshot["files"]["links_corpus.parquet"]["sha256"] != catalog.build_config["official_links_sha256"]:
-        raise ValueError("Training corpus differs from official snapshot.")
-    plan = plan_training_sources(catalog, contest, policy)
-    output = root / "labels/preparation" / run_name
-    plan = reuse_completed_review_plan(output, plan)
-    bind_source_plan(output, plan)
-    atomic_json(output / "model_parameter_budget.json", budget)
-    spec = {**config["translation"], "max_new_tokens": policy["teacher_max_new_tokens"]}
-    missing = any(not (output / "drafts" / (s["item_id"] + ".json")).exists() for s in plan["samples"] if s["split"] == "train")
-    teacher = TorchQueryTranslator(spec) if missing and max_new_samples != 0 else None
-    if teacher is not None:
-        teacher.identity = {**teacher.identity, "role": "source_to_training_query_drafts_only"}
+    from .full_scale_runtime import is_large_handoff,load_scale_catalog,training_source_pool
+    large = is_large_handoff(root,config)
+    if large:
+        import tempfile
+        catalog,_ = load_scale_catalog(root,checkout,Path(tempfile.gettempdir()) / "vmb_source_review",tokenizer)
+        scale = read_json(checkout / "configs/retrieval_scale.json")
+        source_pool = training_source_pool(catalog,scale["source_pool_documents"])
+    else:
+        catalog = load_catalog(root / "processed/stage-a-data-v3-laodong", "candidate-1cd220a4be956d5a.json", tokenizer, **config["pilot_limits"])
+        source_pool = catalog
     try:
-        status = generate_training_drafts(output, plan, spec, contest, teacher, max_new_samples=max_new_samples)
-    finally:
+        snapshot = read_json(root / "raw/snapshot.json")
+        if snapshot["files"]["links_corpus.parquet"]["sha256"] != catalog.build_config["official_links_sha256"]:
+            raise ValueError("Training corpus differs from official snapshot.")
+        plan = plan_training_sources(source_pool, contest, policy)
+        if large:
+            run_name += "-"+catalog.candidate["candidate_manifest_sha256"][:10]
+        output = root / "labels/preparation" / run_name
+        plan = reuse_completed_review_plan(output, plan)
+        bind_source_plan(output, plan)
+        atomic_json(output / "model_parameter_budget.json", budget)
+        spec = {**config["translation"], "max_new_tokens": policy["teacher_max_new_tokens"]}
+        missing = any(not (output / "drafts" / (s["item_id"] + ".json")).exists() for s in plan["samples"] if s["split"] == "train")
+        teacher = TorchQueryTranslator(spec) if missing and max_new_samples != 0 else None
         if teacher is not None:
-            teacher.close()
-    if status["state"] != "COMPLETE":
-        return status | {"preparation_dir": str(output), "model_parameter_budget": budget}
-    export_source_review(output, plan)
-    result = publish_reviewed_labels(output, plan, catalog, contest, root / "labels")
-    atomic_json(output / "preparation_status.json", result)
-    return result | {"preparation_dir": str(output), "model_parameter_budget": budget}
+            teacher.identity = {**teacher.identity, "role": "source_to_training_query_drafts_only"}
+        try:
+            status = generate_training_drafts(output, plan, spec, contest, teacher, max_new_samples=max_new_samples)
+        finally:
+            if teacher is not None:
+                teacher.close()
+        if status["state"] != "COMPLETE":
+            return status | {"preparation_dir": str(output), "model_parameter_budget": budget}
+        export_source_review(output, plan)
+        result = publish_reviewed_labels(output, plan, catalog, contest, root / "labels")
+        atomic_json(output / "preparation_status.json", result)
+        return result | {"preparation_dir": str(output), "model_parameter_budget": budget}
+    finally:
+        if large:
+            catalog.close()

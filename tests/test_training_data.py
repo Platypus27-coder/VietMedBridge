@@ -193,9 +193,10 @@ def test_ai_pilot_rejects_false_human_claims_and_still_requires_minimums_and_exa
     assert not (tmp_path/'labels/retrieval_train.json').exists()
 
 
-def test_ai_review_upload_keeps_backup_sources_and_conflicting_team_edits(tmp_path,sources,policy):
+@pytest.mark.parametrize("preparation_name",["stage-a-source-training-v2-heldout","stage-a-source-training-v2-heldout-new-corpus"])
+def test_ai_review_upload_keeps_backup_sources_and_conflicting_team_edits(tmp_path,sources,policy,preparation_name):
     data = tmp_path/'data'
-    review_dir = data/'labels/preparation/stage-a-source-training-v2-heldout'
+    review_dir = data/'labels/preparation'/preparation_name
     plan, original = reviewed_setup(review_dir,sources,policy)
     incoming = deepcopy(original)
     incoming.update(review_mode='AI_ASSISTED_PILOT',review_authorization='USER_DELEGATED_TO_CODEX_2026_10_06')

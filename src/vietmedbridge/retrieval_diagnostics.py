@@ -27,7 +27,8 @@ def diagnose(records, queries, index, output_path, *, labels=None):
             branches.update(row["branches"].keys())
         scores.extend(r["reranker_score"] for r in record["ranking"]["children"])
     report = {"query_count": len(records), "eligible_documents": len(index.doc_ids), "held_documents": index.exclusions,
-        "source_languages": dict(Counter(index.languages[d] for d in index.doc_ids)),
+        "source_languages": (index.source_language_counts if hasattr(index,"source_language_counts")
+            else dict(Counter(index.languages[d] for d in index.doc_ids))),
         "selected_document_languages": dict(languages), "candidate_branch_occurrences": dict(branches),
         "document_count_histogram": dict(Counter(docs_per_query)), "chunk_count_histogram": dict(Counter(chunks_per_query)),
         "reranker_logit_percentiles": np.percentile(scores, [0, 25, 50, 75, 100]).tolist() if scores else None,

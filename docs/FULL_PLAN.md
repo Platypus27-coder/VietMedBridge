@@ -2,17 +2,16 @@
 
 Nguồn quyết định là [master plan Stage 3](../R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
 [Notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
-dùng `configs/retrieval_full.json`, namespace `stage-a-full-plan-v3-per-model-15b`. Tên file
-giữ nguyên để link cũ mở đúng notebook chính. Chọn runtime GPU mới rồi **Run all**;
-không cần ACTION hoặc chạy lại 00–03. Bootstrap clone repo, cài extras và nâng
-code lock một lần sang `full-master-plan-strong-v6-large-baseline`.
+dùng `configs/retrieval_full.json` cho cả pilot và corpus lớn. Workflow API
+`full-master-plan-strong-v7-disk-full-system` nối architecture đầy đủ vào disk
+catalog, vector cache theo nội dung, ba worker embedding và checkpoint giữa lượt
+search. Không cần chạy lại 02–03 cho candidate 100k đã freeze.
 
-**Lượt 100k hiện tại:** 04 tự nhận candidate từ 03 và dùng
-`configs/retrieval_large_baseline.json`: BGE trên mọi child input + SQLite BM25
-VI/EN/ZH → weighted RRF → frozen source parents/LCS → submission 1.200 query.
-Đây là baseline lấy điểm trước; chưa dùng Qwen/query LLM/reranker, document-dense
-hoặc adaptive parents. Full architecture mô tả bên dưới vẫn dành cho corpus pilot.
-Xem [quy trình corpus lớn và checkpoint](EXTERNAL_CRAWL_IMPORT.md).
+Hướng dẫn hiện hành: [FULL_SYSTEM_RUNBOOK.md](FULL_SYSTEM_RUNBOOK.md).
+Baseline BGE + BM25 100k trước đây đã được Sếp submit đạt **0.0081**. Các artifacts
+baseline được giữ để đối chiếu và dùng lại vectors; 04 hiện chạy full architecture.
+05 dùng candidate lớn đang active cho source review, mining và training. Nhãn đã
+review vẫn là đầu vào bắt buộc cho huấn luyện/dev/held-out.
 
 ## Giới hạn từng model đã được Sếp xác nhận với BTC
 
@@ -36,17 +35,18 @@ Run v3 tách khỏi v1/v2. Giữ DATA_ROOT và candidate; không trộn vectors 
 hoặc thay provenance. BGE vectors cũ vẫn được kiểm để reuse. Hai model 8B dùng
 NF4, nạp lần lượt; tài nguyên và chất lượng vẫn cần đo trên GPU/dev.
 
-Input là candidate `candidate-1cd220a4be956d5a.json` trong build
-`stage-a-data-v3-laodong`: 864 documents, 9.076 children, 8.760 unique dense
-representations. Quarantine giữ 9 documents khỏi retrieval và giữ nguyên ledger.
-Corpus pilot chưa gồm crawl 100k và chưa đủ toàn dataset.
+Input chính là `active_data_candidate.json` từ 03 hoặc bước ghép các candidate.
+Với data hiện có, candidate 100k chứa 90.669 documents và 584.677 children,
+573.854 unique dense inputs. Khi chưa có active handoff, fallback pilot cũ là
+`stage-a-data-v3-laodong/candidate-1cd220a4be956d5a.json`.
+Cả hai hiện vẫn là partial corpus.
 
 ## Luồng inference và vai trò model
 
 1. **BGE-M3** encode original queries/child representations. Cache Colab cũ chỉ
    reuse khi exact inputs/order/model/budget/pooling/code và hashes khớp.
-   Có nhánh document dense riêng: title + bounded source opening, FAISS theo
-   official doc IDs. Khi nguồn không có abstract riêng, opening không được
+   Có nhánh document dense riêng: title + bounded source opening theo official doc IDs; pilot dùng FAISS,
+   corpus lớn tìm cosine theo vector blocks. Khi nguồn không có abstract riêng, opening không được
    gọi là abstract đã trích. Representations fit 512 tokens kể cả special tokens;
    chúng chỉ dùng search, output vẫn lấy source parents.
 2. **Qwen3-4B-Instruct-2507** dịch query sang EN/ZH. Với câu hỏi phức tạp, model
@@ -155,7 +155,8 @@ GPU QLoRA hay held-out score thật/official score ở local.
 
 `configs/training_data.json` là policy chuẩn bị draft; nó không thay đổi frozen
 candidate hoặc cấu hình inference 04. 05 nâng code lock sang
-`full-master-plan-supervised-v4-per-model-15b`; 04 giữ `full-master-plan-strong-v3-per-model-15b`.
+`full-master-plan-supervised-v7-disk-full-system`; 04 dùng
+`full-master-plan-strong-v7-disk-full-system`.
 API `run_training_workflow` gọi trực tiếp khi thiếu file vẫn trả
 `WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS`; notebook gọi preparation trước.
 Không lấy predictions của 1.200 contest queries làm gold.

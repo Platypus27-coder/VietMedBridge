@@ -16,12 +16,21 @@ def install_ai_candidate_review(upload_path, data_root, *, run_name="stage-a-qlo
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name):
         raise ValueError("Unsafe candidate-review run name.")
     base = Path(data_root) / "training" / run_name
-    pointer = read_json(base / "candidate_review_current.json")
+    incoming = read_json(upload_path)
+    pointer_path = base / "candidate_review_current.json"
+    if not pointer_path.is_file() or read_json(pointer_path).get("source_sha256") != incoming.get("source_sha256"):
+        matches = [p for p in (base / "corpora").glob("*/candidate_review_current.json")
+            if read_json(p).get("source_sha256") == incoming.get("source_sha256")]
+        if len(matches) != 1:
+            raise ValueError("Uploaded candidate review belongs to another source snapshot or matches several runs.")
+        pointer_path = matches[0]
+        base = pointer_path.parent
+    pointer = read_json(pointer_path)
     directory = (base / pointer["directory"]).resolve()
     if not directory.is_relative_to(base.resolve()):
         raise ValueError("Candidate review pointer escapes its run.")
     target = directory / "review.json"
-    existing, incoming = read_json(target), read_json(upload_path)
+    existing = read_json(target)
     sources = _check(read_json(directory / "sources.json"))
     if (incoming.get("review_mode") != "AI_ASSISTED_PILOT"
         or incoming.get("review_authorization") != "USER_DELEGATED_TO_CODEX_2026_10_06"

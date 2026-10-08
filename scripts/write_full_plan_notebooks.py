@@ -20,7 +20,7 @@ reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or 
 def main():
     save("04_colab_retrieval_baseline.ipynb", [
         md('''
-        # VietMedBridge — 04: BGE + BM25 trên corpus lớn / full inference cho pilot
+        # VietMedBridge — 04: Full retrieval system trên frozen corpus
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
         Chọn **runtime GPU mới, T4 trở lên**, rồi Run all. Giữ DATA_ROOT cũ;
@@ -28,21 +28,35 @@ def main():
 
         Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
         Corpus vượt giới hạn pilot (2.000 documents hoặc 50.000 children) chạy
-        **baseline lấy điểm: BGE-M3 toàn bộ child inputs + BM25 VI/EN/ZH trên disk
-        → weighted RRF → frozen source parents + LCS dedup → ZIP đủ 1.200 query**.
-        Tự nhận team-100k-data-v1, không quay về corpus 864 documents cũ.
-        BGE lưu vector theo 141 phần input của 03, sort theo độ dài khi encode rồi
-        khôi phục đúng thứ tự. Batch khởi đầu 32, tự giảm khi OOM. Tìm dense quét
-        toàn bộ vector parts theo blocks trên GPU; source/BM25 ở SQLite local,
-        checkpoint đầy đủ và ZIP nằm trên Drive. Không nạp toàn corpus vào RAM.
+        **đầy đủ các nhánh trên disk**: BGE child/document dense + Qwen embedding
+        + BM25 VI/EN/ZH với query dịch → RRF → Qwen document/child MaxP reranking
+        → source parents 512/640 → LCS dedup → ZIP đủ 1.200 query.
+        Tự nhận active candidate của 03, gồm team-100k-data-v1 hiện có.
+        Cache vectors gắn với nội dung/model, giữ official ID/alias riêng. Data mới
+        dùng lại vectors của nội dung cũ; vectors baseline 100k được kiểm và đăng ký
+        vào cache, không copy thêm một ma trận corpus. Cache không xóa được khi còn
+        manifest tham chiếu. Model đổi hoặc source text đổi thì tính phần tương ứng.
+        Query translations/expansions cũng được cache độc lập với corpus.
+        Mỗi block vector, scored stage và query có checkpoint. Dense search lưu
+        top-k giữa lượt, ngắt phiên rồi resume thay vì quét lại toàn bộ.
 
-        Benchmark T4 của Sếp: BGE batch 4 ~46 texts/s (child projection ~3,45h),
-        Qwen embedding batch 4 ~6,65 texts/s (~24h). Đây chỉ là mẫu 64 texts;
-        batch 32 chưa có phép đo thực tế, không bảo đảm thời gian hoặc điểm.
-        Corpus lớn dùng BGE + BM25 trước; **chưa phải full master plan**:
-        Qwen embedding, query LLM, neural reranker, document-dense và adaptive
-        parents được hoãn. Dùng frozen parents đã kiểm source từ 03.
-        Không cần chạy lại 02–03 hoặc chạy 05 cho lượt baseline này.
+        **Chạy một người:** TEAM_SIZE=1, TEAM_WORKER_ID=None, Run all trên GPU.
+        **Team 3 người:** TEAM_SIZE=3 ở cả ba người, TEAM_WORKER_ID lần lượt 0/1/2.
+        Mỗi người chỉ encode input parts được giao, ghi vector blocks và mapping
+        riêng theo phần. Sau đó một người đặt TEAM_WORKER_ID=None để tổng hợp và
+        chạy các bước còn lại; coordinator báo WAITING nếu thiếu phần.
+        Khi ngắt, giữ cùng TEAM_SIZE/ID, source và runtime package versions.
+        Các phiên cùng truy cập đúng DATA_ROOT đã chia sẻ; dừng phiên solo đang
+        ghi cùng view trước khi chia việc. Mỗi ID chỉ chạy một phiên.
+        Đây là phân công embedding, chưa ghép một job QLoRA thành nhiều GPU.
+        Dùng tài nguyên được cấp phù hợp với quy định nền tảng.
+
+        Full architecture có chi phí thực: Qwen embedding 8B trên 100k được ngoại
+        suy ~24 giờ T4 từ mẫu 64 đoạn, chưa gồm các stage khác và không bảo đảm
+        thời gian. Thử giới hạn MAX_NEW_* nếu cần; không giả trạng thái đã chạy.
+        Full pretrained chạy được trước nhãn. Fine-tune/dev cutoff chỉ chạy khi
+        có labels review; adapter từ 05 được kiểm và dùng cho cả corpus lớn.
+        Corpus mới giữ adapter hợp lệ nhưng ngưỡng cũ cần dev recalibration.
 
         Kiến trúc full cho pilot nhỏ: **BGE-M3 child/document dense + Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF
         → Qwen3-Reranker-8B document → local child retrieval/MaxP rerank
@@ -74,9 +88,9 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v6-large-baseline")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v7-disk-full-system")),
         md('''
-        ## 2. Chạy baseline corpus lớn hoặc full pilot — CPU/GPU lần lượt
+        ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
         Giữ MAX_NEW_*=None để chạy hết. Đổi model/data/policy cần RUN_NAME mới;
         các run cũ không bị ghi đè. Vector BGE của stage-a-retrieval-v1 được kiểm
@@ -87,11 +101,13 @@ def main():
         Run v3-per-model-15b tách khỏi v1/v2; không trộn Qwen vectors 0.6B và 8B.
         Giữ DATA_ROOT; corpus và BGE vectors hợp lệ vẫn được tận dụng.
         Runtime lưu từng phần; lỗi mạng/OOM giữ checkpoints đã hoàn tất.
-        Với candidate lớn: chỉ BGE + BM25; MAX_NEW_EMBEDDING_PARTS và
-        MAX_NEW_QUERIES có thể giới hạn mỗi phiên, mặc định None chạy hết.
+        Với candidate lớn, toàn bộ architecture chạy trên disk. TEAM_SIZE/ID
+        phân công corpus embeddings; coordinator chạy query LLM và reranking.
+        MAX_NEW_* giới hạn mỗi phiên, mặc định None chạy hết.
         Ngắt runtime thì mở cùng notebook và Run all để resume vector/query.
         Catalog CPU xuất bản atomic; nếu ngắt trước hoàn tất catalog thì dựng
-        lại riêng bước CPU đó. Không chạy hai runtime ghi cùng run.
+        lại riêng bước CPU đó. Mỗi worker ID chỉ có một runtime đang ghi;
+        chỉ một coordinator công bố manifest và submission.
         Glossary tùy chọn data/labels/medical_aliases.json cần reviewed=true,
         entries=[{aliases:[...], source:"..."}]; không có thì alias field rỗng,
         biomedical Latin/acronym tokens vẫn được giữ.
@@ -100,17 +116,36 @@ def main():
         import json
         from vietmedbridge.full_plan_runtime import run_full_pipeline
         from vietmedbridge.scale_benchmark import load_handoff
-        from vietmedbridge.scale_baseline import run_large_baseline
+        from vietmedbridge.full_scale_runtime import run_scale_full_pipeline
         from vietmedbridge.artifacts import read_json
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
         RUN_NAME = "stage-a-full-plan-v3-per-model-15b"
         EMBEDDING_CACHE_RUN = "stage-a-retrieval-v1"
+        # Đợt data đầu tiên để []; khi có đợt mới, liệt kê candidate cũ + mới.
+        # Mỗi tuple là (build_run, candidate_filename) đã freeze ở 03.
+        CORPUS_SOURCES = []
+        CORPUS_UNION_RUN = "team-cumulative-v1"  # tên mới cho mỗi tập nguồn mới
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
-        BGE_BATCH_SIZE = 32  # execution only; tự giảm nếu OOM, không đổi source/model
+        TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
+        TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
+
+        if CORPUS_SOURCES:
+            if TEAM_WORKER_ID is not None:
+                raise ValueError("Chỉ coordinator ghép data một lần; workers để CORPUS_SOURCES=[].")
+            from vietmedbridge.corpus_union import compose_candidates
+            from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
+            from vietmedbridge.dataset import parquet_path
+            from vietmedbridge.golden import run_golden_suite
+            first_config = read_json(DATA_ROOT / "processed" / CORPUS_SOURCES[0][0] / "config.json")
+            tokenizer, tokenizer_spec = load_bge_tokenizer(first_config["tokenizer"]["revision"])
+            golden = run_golden_suite(CHECKOUT / "tests/golden/cases.json", tokenizer,
+                tokenizer_spec, ChunkConfig(**first_config["chunks"]))
+            print(compose_candidates(DATA_ROOT, CORPUS_SOURCES, tokenizer, run_name=CORPUS_UNION_RUN,
+                golden_report=golden, official_links=parquet_path(DATA_ROOT,"links_corpus.parquet"), work_dir=WORK_DIR))
 
         LARGE_CANDIDATE = False
         if (DATA_ROOT / "active_data_candidate.json").is_file():
@@ -122,9 +157,10 @@ def main():
                 or candidate["counts"]["children"] > limits["max_children"])
             RUN_NAME = BUILD_RUN + "-full-plan-v1"
         if LARGE_CANDIDATE:
-            RESULT = run_large_baseline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
-                work_dir=WORK_DIR, batch_size=BGE_BATCH_SIZE,
-                max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS, max_new_queries=MAX_NEW_QUERIES)
+            RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
+                work_dir=WORK_DIR, worker_id=TEAM_WORKER_ID, workers=TEAM_SIZE,
+                max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
+                max_new_translations=MAX_NEW_TRANSLATIONS, max_new_queries=MAX_NEW_QUERIES)
             READY = RESULT["ready"]
         else:
             RESULT = run_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
@@ -139,9 +175,9 @@ def main():
         md('''
         ## 3. Xem source samples và báo cáo — CPU
 
-        Chunks bên dưới là source slices. Với corpus lớn, baseline_status.json
-        ghi đúng BGE + BM25, số documents/children và các phần full plan đang hoãn;
-        runtime_profile.json ghi thời gian từng stage. Với full pilot, diagnostics.json
+        Chunks bên dưới là source slices. Với corpus lớn, full_plan_status.json
+        ghi các model/stages thực thi, corpus, cache và adapter/dev calibration;
+        coordinator-profile.json và worker-<id>-profile.json ghi thời gian các stage resource. Với full pilot, diagnostics.json
         có language coverage, branch contributions, output counts và logit distributions. Không có nhãn
         thì không tính F2 giả. full_plan_status.json phân biệt code đã thực thi với
         supervised/scale gates còn cần dữ liệu và đo đạc. Corpus nhỏ và chất lượng
@@ -179,7 +215,11 @@ def main():
         md('''
         # VietMedBridge — 05: Source → nhãn đã duyệt → hard negatives → QLoRA → dev F2
 
-        Giai đoạn supervised trong master §§13/27/39/56. **04 chạy pretrained và
+        Giai đoạn supervised trong master §§13/27/39/56. V7 tự nhận active
+        candidate của 03, dùng disk full index/cache chung với 04 cho corpus lớn.
+        Source review chọn pool có giới hạn; hard negatives vẫn được truy hồi trên
+        toàn candidate hiện tại. Adapter đã chọn được 04 large/full dùng trực tiếp.
+         **04 chạy pretrained và
         submit được ngay**, không cần chạy 05 trước khi có nhãn. Chọn runtime GPU
         mới; L4/A100 thuận tiện hơn cho training. Qwen8B nạp NF4, batch=1,
         gradient checkpointing/accumulation.
@@ -209,11 +249,11 @@ def main():
         Mine 1 positive + 7 negatives, ưu tiên top ranks, không lấy predictions làm gold.
         QLoRA checkpoint giữ optimizer/RNG để resume. Đánh giá dev NDCG/MRR rồi
         chạy finalists qua full pipeline và CPU F2 cutoff sweep. Chọn adapter theo
-        dev F2. Tự chạy dev ablations, rồi chấm held-out với adapter/cutoff đã
+        dev F2. Chạy dev ablations khi bật tùy chọn, rồi chấm held-out với adapter/cutoff đã
         freeze; không chọn model bằng held-out score và không promote corpus.
         04 tự nhận selected_adapter/calibrated_policy trong namespace mới.
 
-        V6: corpus embeddings được tìm và kiểm hash giữa 04/05 và các experiment;
+        V7: corpus embeddings được tìm và kiểm hash giữa 04/05 và các experiment;
         không tính lại corpus chỉ vì đổi tập query. Mining cũ được kiểm và replay
         trước khi nạp GPU. Mining mới dùng retrieval rộng, không chạy cascade 8B
         để tạo file chờ nhãn. Qwen reranker 8B vẫn dùng cho QLoRA/dev/held-out/04.
@@ -226,7 +266,7 @@ def main():
         md("## 1. Bootstrap — CPU"),
         code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json")
             .replace("retrieval_runtime.json", "training_runtime.json")
-            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v6-shared-cache-review")),
+            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v7-disk-full-system")),
         md("## 2. Chuẩn bị nhãn — GPU chỉ khi còn thiếu draft train"),
         code('''
         import json

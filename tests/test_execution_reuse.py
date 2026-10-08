@@ -155,8 +155,10 @@ def test_shared_qwen_preserves_role_instruction_and_original_manifest(tmp_path):
         find_embeddings(tmp_path, units, spec, family="qwen")
 
 
-def review_fixture(tmp_path):
+def review_fixture(tmp_path,scoped=False):
     base = tmp_path / "training/fixture"
+    if scoped:
+        base = base / "corpora/new-corpus"
     item = {"pair_id": "pair", "query_id": 1, "child_id": "child", "text": "Original source"}
     sources = _seal({"items": [item]})
     directory = base / "candidate_reviews/source"
@@ -171,8 +173,9 @@ def review_fixture(tmp_path):
     return upload, directory, incoming
 
 
-def test_candidate_upload_checks_sources_backs_up_and_preserves_team(tmp_path):
-    upload, directory, incoming = review_fixture(tmp_path)
+@pytest.mark.parametrize("scoped",[False,True])
+def test_candidate_upload_checks_sources_backs_up_and_preserves_team(tmp_path,scoped):
+    upload, directory, incoming = review_fixture(tmp_path,scoped)
     result = install_ai_candidate_review(upload, tmp_path, run_name="fixture")
     assert result["judgments"] == {"NEGATIVE": 1} and Path(result["backup_path"]).is_file()
     existing = read_json(directory / "review.json")

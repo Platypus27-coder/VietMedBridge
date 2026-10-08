@@ -32,30 +32,17 @@ cho corpus pilot. Không chạy các notebook
    Tự nhận build hoàn tất từ 02, kiểm coverage/integrity/golden và source audit;
    freeze rồi chia input embedding đã dedup trên disk. Chưa encode vector hoặc
    hoàn tất retrieval index; candidate chỉ được promote sau các gate review.
-5. **04 — Kiến trúc retrieval đầy đủ và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
-   **Chọn GPU, chạy từ đầu.** Tự nhận candidate từ 03; trên 2.000 documents hoặc
-   50.000 children chạy baseline BGE child dense + BM25 VI/EN/ZH trên SQLite,
-   weighted RRF, frozen source parents + LCS dedup và ZIP đủ 1.200 query.
-   Encode theo các input parts của 03, batch 32 tự giảm nếu OOM, checkpoint mỗi phần.
-   Dense search quét toàn bộ vector parts theo blocks trên GPU; source/index ở disk.
-   Đây là baseline lấy điểm, **chưa phải full plan**: không nạp Qwen embedding,
-   query LLM, neural reranker, document dense hoặc adaptive parents. Không âm thầm
-   quay về corpus 864 documents. Xem [chi tiết large baseline](docs/EXTERNAL_CRAWL_IMPORT.md).
-   Khi chưa có handoff mới, mặc định đọc `stage-a-data-v3-laodong`, candidate
-   `candidate-1cd220a4be956d5a.json`: 864 documents, 9.076 children, 8.760 dense
-   representations duy nhất. Bản hiện tại dùng **BGE-M3 child/document dense + Qwen3-Embedding-8B**,
-   BM25 VI/EN/ZH với PyVI/Jieba/soft medical fields → weighted RRF →
-   **Qwen3-Reranker-8B** document/child MaxP → exact-source parent 512/640
-   + token LCS dedup. Qwen3-4B dịch query, thêm PICO/subqueries/HyDE cho query
-   phức tạp khi qua guards. Hai model 8B dùng NF4, nạp lần lượt trên Colab.
-   Theo xác nhận của Sếp từ BTC, gate giữ **≤15B từng model**, gồm adapter của model đó.
-   Tái sử dụng BGE vectors v1 đã kiểm; checkpoint vector/LLM/scored stage/query.
-   **Với corpus nằm trong giới hạn pilot, Run all chạy hết
-   1.200 official queries** (`MAX_NEW_*=None`), validate source/schema rồi xuất
-   `submission.zip`, manifest và file ghi điểm BTC. Không cần ACTION, đủ full corpus,
-   reference labels hay fine-tune trước lần submit pretrained đầu tiên (§§26/55).
-   Khi Colab ngắt, mở lại runtime GPU và Run all cùng RUN_NAME để resume.
-   Xem [hướng dẫn full plan](docs/FULL_PLAN.md).
+5. **04 — Full retrieval và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
+   Đọc candidate active từ 03. Corpus lớn chạy BGE child/document dense +
+   Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF → Qwen3-Reranker-8B
+   document/child MaxP → source parent 512/640 và LCS dedup. Qwen3-4B dịch,
+   tạo PICO/subqueries/HyDE có guards. Các model nạp lần lượt, mỗi model ≤15B.
+   Dùng lại BGE 100k đã kiểm, cache vector theo nội dung qua các đợt data;
+   hỗ trợ ba worker 0/1/2 và một coordinator. Khi data mới về, ghép candidate
+   cũ + mới thành corpus tích lũy, chỉ encode nội dung còn thiếu.
+   Checkpoint vector, giữa lượt dense search, scored stage và từng query.
+   Đủ 1.200 queries và source/schema hợp lệ thì xuất submission ZIP.
+   Xem [hướng dẫn chạy hệ thống và phân công ba người](docs/FULL_SYSTEM_RUNBOOK.md).
 6. **05 — Tạo draft từ source, duyệt nhãn và supervised training:**
    [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
    Chọn GPU và Run all. Khi chưa có nhãn, Qwen 4B tạo draft train từ source;
@@ -66,15 +53,14 @@ cho corpus pilot. Không chạy các notebook
    Lưu file đã duyệt về đúng đường dẫn Drive rồi Run all để tiếp tục.
    Xem [quy trình review và giới hạn bằng chứng](docs/FULL_PLAN.md).
 
-Ưu tiên hiện tại là tận dụng bản crawl 100k để có submission BGE + BM25 trước.
-Benchmark thật trên T4: BGE batch 4 ~46,2 texts/s (child projection ~3,45 giờ),
-Qwen embedding 8B batch 4 ~6,65 texts/s (~24 giờ). Mẫu 64 texts không bảo đảm
-thời gian hoặc điểm; batch 32 mới chưa benchmark thực tế. Checkpoint corpus lớn
-độc lập với pilot, source/build 02–03 không cần làm lại.
-Submission BGE baseline trên 864 documents đã có FINAL SCORE **0.0003**:
-doc F2 0.0004, chunk F2 0.0001; chưa đủ nhãn để quy hết nguyên nhân cho coverage.
-Corpus pilot chỉ chiếm khoảng 0,01966% official URLs. Không chạy thêm training 05
-để thay cho việc mở rộng corpus. Xem [nhập bản crawl độc lập](docs/EXTERNAL_CRAWL_IMPORT.md).
+Ưu tiên hiện tại là hoàn thiện downstream trên dữ liệu đang có, trong khi team
+crawl thêm. Baseline BGE + BM25 trên 90.669 documents đã được Sếp submit:
+FINAL SCORE **0.0081**, doc F2 **0.0115**, chunk F2 **0.0048**. Full system mới
+chưa có điểm BTC hoặc benchmark GPU toàn corpus. Benchmark T4 cũ trên 64 texts
+cho ngoại suy Qwen embedding child-only khoảng 24 giờ ở 573.854 inputs; phân công
+và checkpoint giúp dùng lại công việc đã làm, không loại bỏ chi phí của data mới.
+Xem [full system runbook](docs/FULL_SYSTEM_RUNBOOK.md) và
+[nhập bản crawl độc lập](docs/EXTERNAL_CRAWL_IMPORT.md).
 
 Đích hiện tại là xây baseline crawl đến khoảng 1 triệu URL qua các gate đã chốt:
 Stage A 1.000 → Stage B1 10.000 → Stage B2 100.000 → Stage C 1.000.000.

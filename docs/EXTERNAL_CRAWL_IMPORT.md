@@ -62,7 +62,14 @@ mỗi text representation giống hệt chỉ encode một lần; mọi official
 `active_data_candidate.json` nối đúng candidate tới bước GPU, tránh dùng nhầm 864
 documents cũ.
 
-## 04: BGE + BM25 để có submission trên corpus lớn
+## 04 hiện tại: full system trên candidate lớn
+
+Xem [FULL_SYSTEM_RUNBOOK.md](FULL_SYSTEM_RUNBOOK.md) để chạy bốn model theo
+master plan, phân công ba người, ghép data mới và dùng lại vectors 100k.
+Bản baseline mô tả bên dưới là lượt trước đã đạt **0.0081** theo kết quả Sếp gửi.
+Nó được giữ trong code/artifacts để so sánh, không còn là nhánh mặc định của 04.
+
+## Lượt baseline trước: BGE + BM25 trên corpus lớn
 
 Benchmark T4 đã hoàn tất trên candidate `ce6987985fb015ca`: BGE batch 4 khoảng
 46,2 texts/s, Qwen embedding 8B khoảng 6,65 texts/s, Qwen reranker khoảng 4,19
@@ -70,7 +77,7 @@ pairs/s; không OOM. Child-only projections lần lượt 3,45h và 23,97h, khô
 I/O, document dense, query LLM, sparse/index hay toàn cascade. Mẫu 64 không là
 cam kết thời gian hoặc bằng chứng relevance.
 
-04 bản tiếp theo tự chạy **large baseline** nếu candidate vượt pilot 2.000 docs/
+04 ở phiên bản baseline trước tự chạy **large baseline** nếu candidate vượt pilot 2.000 docs/
 50.000 children. Giữ DATA_ROOT, chọn GPU T4 trở lên và Run all; không ACTION,
 không chạy lại 02–03. Workflow API mới tự nâng retrieval code lock một lần.
 Runtime đã import code cũ thì restart session trước khi Bootstrap.
@@ -93,14 +100,12 @@ Runtime đã import code cũ thì restart session trước khi Bootstrap.
 
 Run nằm ở `data/retrieval/team-100k-data-v1-bge-bm25-v1-<candidate-prefix>/`.
 Vector checkpoint + query checkpoint lưu Drive, checksum trước reuse. Ngắt phiên
-thì Run all lại cùng config. Search result được cache khi quét hoàn tất; ngắt giữa
-lượt search thì quét lại, không encode lại. Catalog CPU publish atomic; ngắt trước
+thì Run all lại cùng config. Search hiện có checkpoint top-k giữa lượt; ngắt phiên thì resume từ phần đã
+commit, không encode lại vectors. Catalog CPU publish atomic; ngắt trước
 khi hoàn tất catalog thì xây lại riêng catalog. Không hai runtime ghi cùng run.
 
 Đây là baseline partial corpus để lấy điểm sớm, **không phải full master plan**,
-không tự promote quality/relevance hoặc giả fine-tune. Giữ nguyên full pretrained
-architecture cho corpus pilot. Qwen embedding/query LLM/reranker/document dense/
-adaptive parents sẽ là run nâng cấp riêng; vectors BGE đã kiểm vẫn được giữ.
-05 supervised chỉ chạy khi có nhãn review độc lập phù hợp. Large baseline đã
-kiểm thử source/resume/export bằng CPU model doubles; chưa chạy end-to-end 100k
-trên GPU thật. Điểm BTC vẫn phải lấy từ ZIP chạy thật, không từ test/benchmark.
+không tự promote quality/relevance hoặc giả fine-tune. Full architecture đã được nối vào corpus lớn ở 04 mới; vectors BGE đã kiểm
+được tận dụng. Xem runbook hiện hành ở trên.
+05 supervised chỉ chạy khi có nhãn review độc lập phù hợp. Large baseline đã được Sếp chạy 100k và submit; full architecture mới
+chưa được đo toàn corpus trên GPU thật. Điểm BTC vẫn phải lấy từ ZIP chạy thật, không từ test/benchmark.
