@@ -52,7 +52,7 @@ def write_data_notebooks():
         )
 
         INPUT_KIND = "external" #@param ["external", "crawl"]
-        EXTERNAL_SOURCE = str(DATA_ROOT / "incoming/team-crawl-archives-2026-10-08") #@param {type:"string"}
+        EXTERNAL_SOURCE = "/content/drive/MyDrive/VietMedBridge/data/incoming/team-crawl-archives-2026-10-08" #@param {type:"string"}
         BUILD_RUN = "" #@param {type:"string"}
         CRAWL_RUN = "stage-a-v2"  # chỉ dùng với INPUT_KIND="crawl"
         SHARD_SIZE = 2048
@@ -231,7 +231,16 @@ def write_data_notebooks():
             build_refs = [{"build_run": BUILD_RUN_OVERRIDE}]
             BATCH = {"schema_version": 1, "state": "COMPLETE", "builds": build_refs}
         else:
-            BATCH = read_json(batch_path) if batch_path.exists() else {}
+            if batch_path.exists():
+                BATCH = read_json(batch_path)
+            else:
+                active_path = DATA_ROOT / "active_data_build.json"
+                active = read_json(active_path) if active_path.exists() else {}
+                if active.get("build_run"):
+                    BATCH = {"schema_version": 1, "state": "COMPLETE", "builds": [{
+                        "build_run": active["build_run"], "snapshot_sha256": active.get("snapshot_sha256")}]}
+                else:
+                    BATCH = {}
             if BATCH.get("state") != "COMPLETE" or not BATCH.get("builds"):
                 raise RuntimeError("Notebook 02 chưa hoàn tất toàn batch. Chạy 02 trước.")
             build_refs = BATCH["builds"]
@@ -277,7 +286,8 @@ def write_data_notebooks():
                     saved = read_json(candidate_path)
                     saved_sha = digest_json({key:value for key,value in saved.items()
                                              if key != "candidate_manifest_sha256"})
-                    if (saved.get("candidate_manifest_sha256") == saved_sha
+                    if (saved.get("state") == "FROZEN_CANDIDATE"
+                        and saved.get("candidate_manifest_sha256") == saved_sha
                         and saved.get("snapshot_sha256") == build["snapshot_sha256"]
                         and saved.get("golden", {}).get("code_sha256") == code_fingerprint()):
                         candidate = saved
