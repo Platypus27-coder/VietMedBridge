@@ -37,6 +37,7 @@ MEMBERS = {
     "crawl": "data/manifests/crawl_manifest.parquet",
     "extracted": "data/manifests/extraction_manifest.parquet",
 }
+FRONTIER_MEMBER = re.compile(r"data/crawl_shards/shard_[0-9]{5,}\.parquet")
 SCHEMAS = {"documents": DOCUMENT_SCHEMA, "children": CHILD_SCHEMA, "parents": PARENT_SCHEMA,
            "sections": SECTION_SCHEMA, "failures": FAILURE_SCHEMA, "ledger": LEDGER_SCHEMA}
 
@@ -72,6 +73,23 @@ def find_external_source(data_root, explicit=None):
     return found[0] if found else None
 
 
+def _directory_members(source):
+    """Resolve the single numbered crawl frontier shard in an extracted archive."""
+    source = Path(source)
+    frontier_root = source / "data" / "crawl_shards"
+    matches = sorted(path for path in frontier_root.glob("shard_*.parquet")
+                     if FRONTIER_MEMBER.fullmatch(path.relative_to(source).as_posix())
+                     and path.is_file())
+    if len(matches) != 1:
+        raise ValueError(
+            "An extracted external source must contain exactly one numbered "
+            f"data/crawl_shards/shard_*.parquet file; found {len(matches)}."
+        )
+    members = dict(MEMBERS)
+    members["frontier"] = matches[0].relative_to(source).as_posix()
+    return members
+
+
 def stage_external_metadata(source, output_dir, *, work_dir):
     """Cache selected metadata on local disk and persist its checksums on Drive."""
     source, target = Path(source).resolve(), Path(output_dir)
@@ -87,8 +105,14 @@ def stage_external_metadata(source, output_dir, *, work_dir):
         source_stat.update(archive_sha256=manifest["sha256"],
                            manifest_sha256=sha256_file(source / "archive_manifest.json"))
     else:
-        source_stat["members"] = {kind: {"bytes": (source/member).stat().st_size,
-            "mtime_ns": (source/member).stat().st_mtime_ns} for kind, member in MEMBERS.items()}
+        members = _directory_members(source)
+        if members == MEMBERS:
+            # Preserve the source signature used by existing shard-00000 directory runs.
+            source_stat["members"] = {kind: {"bytes": (source/member).stat().st_size,
+                "mtime_ns": (source/member).stat().st_mtime_ns} for kind, member in members.items()}
+        else:
+            source_stat["members"] = {kind: {"path": member, "bytes": (source/member).stat().st_size,
+                "mtime_ns": (source/member).stat().st_mtime_ns} for kind, member in members.items()}
     if marker.exists():
         saved = read_json(marker)
         # A renamed/replaced archive must not silently reuse unrelated metadata.
@@ -105,24 +129,33 @@ def stage_external_metadata(source, output_dir, *, work_dir):
     if source.is_dir() and (source / "archive_manifest.json").is_file():
         archive_source = restore_archive(source, Path(work_dir) / "restored_archives")
     if archive_source.is_dir():
-        for kind, member in MEMBERS.items():
+        for kind, member in _directory_members(archive_source).items():
             shutil.copyfile(source / member, paths[kind])
     else:
-        remaining = dict(MEMBERS)
+        remaining = {kind: member for kind, member in MEMBERS.items() if kind != "frontier"}
+        frontier_found = False
         with tarfile.open(archive_source, "r:") as archive:
             for member in archive:
                 kind = next((k for k, name in remaining.items() if name == member.name), None)
+                if kind is None and FRONTIER_MEMBER.fullmatch(member.name):
+                    if frontier_found:
+                        raise ValueError("Archive contains multiple numbered crawl frontier shards; import one shard per build.")
+                    kind = "frontier"
                 if kind is None:
                     continue
                 if not member.isfile() or not 0 < member.size <= 512 * 1024**2:
                     raise ValueError(f"Invalid metadata archive member: {member.name}")
                 with archive.extractfile(member) as incoming, paths[kind].open("wb") as outgoing:
                     shutil.copyfileobj(incoming, outgoing, length=1024**2)
-                del remaining[kind]
-                if not remaining:
-                    break
-        if remaining:
-            raise ValueError(f"Archive missing metadata: {list(remaining.values())}")
+                if kind == "frontier":
+                    frontier_found = True
+                else:
+                    del remaining[kind]
+        missing = list(remaining.values())
+        if not frontier_found:
+            missing.append("data/crawl_shards/shard_*.parquet (exactly one required)")
+        if missing:
+            raise ValueError(f"Archive missing metadata: {missing}")
     files = {kind: {"name": path.name, "sha256": publish_file(path, target / path.name),
                     "bytes": path.stat().st_size} for kind, path in paths.items()}
     saved = {"source": source_stat, "files": files,

@@ -144,6 +144,41 @@ def test_parts_restore_checksum_and_automatic_discovery(tmp_path,external):
         restore_archive(incoming,tmp_path / "fresh_restore")
 
 
+def test_archive_accepts_numbered_frontier_shard(tmp_path,external):
+    source,links,_ = external
+    archive = tmp_path / "vibiomir_shard_00001.tar"
+    with tarfile.open(archive,"w") as tar:
+        for kind,member in MEMBERS.items():
+            arcname = ("data/crawl_shards/shard_00001.parquet" if kind == "frontier" else member)
+            tar.add(source / member,arcname=arcname)
+    result = import_external_corpus(archive,links,tmp_path / "processed",CharacterTokenizer(),SPEC,
+        run_name="team-shard-00001",config=CONFIG,work_dir=tmp_path / "work",shard_size=2)
+    assert result["integrity"]["passed"] and result["selected_range_complete"]
+    assert result["counts"]["input_records"] == 4
+
+
+def test_archive_rejects_multiple_numbered_frontier_shards(tmp_path,external):
+    source,links,_ = external
+    archive = tmp_path / "ambiguous.tar"
+    with tarfile.open(archive,"w") as tar:
+        for kind,member in MEMBERS.items():
+            arcname = ("data/crawl_shards/shard_00001.parquet" if kind == "frontier" else member)
+            tar.add(source / member,arcname=arcname)
+        tar.add(source / MEMBERS["frontier"],arcname="data/crawl_shards/shard_00002.parquet")
+    with pytest.raises(ValueError,match="multiple numbered crawl frontier"):
+        import_external_corpus(archive,links,tmp_path / "processed",CharacterTokenizer(),SPEC,
+            run_name="ambiguous",config=CONFIG,work_dir=tmp_path / "work",shard_size=2)
+
+
+def test_extracted_directory_accepts_numbered_frontier_shard(tmp_path,external):
+    source,links,_ = external
+    (source / MEMBERS["frontier"]).rename(source / "data/crawl_shards/shard_00001.parquet")
+    result = import_external_corpus(source,links,tmp_path / "processed",CharacterTokenizer(),SPEC,
+        run_name="directory-shard-00001",config=CONFIG,work_dir=tmp_path / "work",shard_size=2)
+    assert result["integrity"]["passed"] and result["selected_range_complete"]
+    assert result["counts"]["input_records"] == 4
+
+
 def test_bounded_benchmark_reuses_completed_models_without_loading_corpus(tmp_path,external,monkeypatch):
     import sys
     from types import SimpleNamespace

@@ -24,6 +24,9 @@ và metadata, cộng dung lượng shard tạm/output. Archive và bản chia ph
 
 Sau đó đọc bốn metadata: dataset_manifest, frontier, crawl_manifest và
 extraction_manifest. Không tải website hoặc giải nén lại toàn bộ raw payload.
+Importer nhận frontier Parquet có số shard tương ứng trong tar, ví dụ
+`data/crawl_shards/shard_00001.parquet`; mỗi archive cần đúng một frontier shard
+và một `BUILD_RUN` riêng.
 Archive đang có 100.000 unique URLs tương ứng 100.039 official IDs do aliases;
 metadata ghi 90.645 URLs EXTRACT_SUCCESS. Đây là trạng thái extraction cũ, chưa
 phải số documents vượt kiểm chất lượng mới hoặc số có relevance labels.

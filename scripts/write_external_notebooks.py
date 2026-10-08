@@ -4,7 +4,7 @@ from write_notebooks import BOOTSTRAP, code, md, save
 BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
     .replace("runtime.json","data_processing_runtime.json")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        'DATA_WORKFLOW_API = "external-extraction-import-v1"\n'
+        'DATA_WORKFLOW_API = "external-extraction-import-v2"\n'
         'upgrade = lock.get("workflow_api") != DATA_WORKFLOW_API\n'
         'reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -18,8 +18,9 @@ def write_data_notebooks():
         md('''
         # VietMedBridge — 02: Nhập bản crawl 100k → source + parent/child chunks
 
-        **Runtime CPU, Run all.** Đọc archive `vibiomir_shard_00000.tar` hoặc thư mục
-        đã giải nén, hoặc thư mục `.tar.parts` có archive_manifest.json.
+        **Runtime CPU, Run all.** Đọc một archive `vibiomir_shard_*.tar` hoặc thư mục
+        đã giải nén, hoặc thư mục `.tar.parts` có archive_manifest.json. Frontier
+        bên trong tar có thể mang số shard khác `00000`; mỗi archive vẫn dùng một BUILD_RUN riêng.
         Bản chia phần được tự ghép trên ổ local Colab và kiểm SHA-256 đúng bản gốc.
         Tái sử dụng văn bản EXTRACT_SUCCESS; không tải lại các website.
         Archive và snapshot BTC phải cùng SHA-256. Map bằng official URL, giữ toàn bộ
@@ -42,7 +43,7 @@ def write_data_notebooks():
         from vietmedbridge.external_import import find_external_source, import_external_corpus
 
         INPUT_KIND = "external"  # dùng "crawl" cho các crawl run chuẩn cũ
-        EXTERNAL_SOURCE = None  # hoặc "/content/drive/MyDrive/.../vibiomir_shard_00000.tar"
+        EXTERNAL_SOURCE = None  # hoặc đường dẫn tới một file vibiomir_shard_*.tar
         BUILD_RUN = "team-100k-data-v1"
         CRAWL_RUN = "stage-a-v2"  # chỉ dùng với INPUT_KIND="crawl"
         SHARD_SIZE = 2048
