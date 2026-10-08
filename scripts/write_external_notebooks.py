@@ -4,7 +4,7 @@ from write_notebooks import BOOTSTRAP, code, md, save
 BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
     .replace("runtime.json","data_processing_runtime.json")
     .replace('reference = CODE_REVISION or lock.get("git_commit") or "main"',
-        'DATA_WORKFLOW_API = "external-extraction-import-v6-multi-archive-batches"\n'
+        'DATA_WORKFLOW_API = "external-extraction-import-v7-parallel-workers"\n'
         'upgrade = lock.get("workflow_api") != DATA_WORKFLOW_API\n'
         'reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or "main"')
     .replace('if not lock or CODE_REVISION:\n    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, "pipeline_api": PIPELINE_API_VERSION})',
@@ -40,8 +40,12 @@ def write_data_notebooks():
         từ archive sang ổ local Colab để đọc; raw archive vẫn giữ làm nguồn kiểm tra.
         Metadata binding và exact-source spans không chứng nhận chất lượng y khoa.
 
-        Ghi theo shard 2.048 ID, checkpoint trên Drive. Khi ngắt, Run all với cùng
-        batch folder/config để resume từng archive và từng shard. Một runtime ghi một batch.
+        Ghi theo shard 2.048 ID, checkpoint trên Drive. Chế độ batch chạy tuần tự một runtime.
+        Để chia tải, dừng batch runner hiện tại rồi đặt RUN_MODE="worker", WORKER_ID
+        khác nhau ở mỗi acc và EXTERNAL_SOURCE trỏ tới đúng một tar; để BUILD_RUN trống.
+        Cùng một worker ID có thể chạy tiếp archive kế tiếp, manifest worker sẽ tích lũy.
+        Chỉ chạy notebook 03 sau khi mọi worker xong và chọn BATCH_SOURCE="workers".
+        Không chạy batch mode đồng thời với workers.
         Không tạo embedding, không cần GPU. Sau COMPLETE, chạy notebook 03.
         '''),code(BOOT),md("## 1. Chọn nguồn và tokenizer"),code('''
         from vietmedbridge.artifacts import read_json, atomic_json
@@ -52,8 +56,10 @@ def write_data_notebooks():
         )
 
         INPUT_KIND = "external" #@param ["external", "crawl"]
-        EXTERNAL_SOURCE = "/content/drive/MyDrive/VietMedBridge/data/incoming/team-crawl-archives-2026-10-08" #@param {type:"string"}
+        EXTERNAL_SOURCE = "" #@param {type:"string"}
         BUILD_RUN = "" #@param {type:"string"}
+        RUN_MODE = "batch" #@param ["batch", "worker"]
+        WORKER_ID = "" #@param {type:"string"}
         CRAWL_RUN = "stage-a-v2"  # chỉ dùng với INPUT_KIND="crawl"
         SHARD_SIZE = 2048
         MAX_NEW_SHARDS = None  # None = xử lý hết; giữ cùng config khi resume
@@ -67,15 +73,45 @@ def write_data_notebooks():
             atomic_json(tokenizer_lock_path, TOKENIZER_SPEC)
         CHUNK_CONFIG = ChunkConfig(**PIPELINE_CONFIG["chunking"])
         if INPUT_KIND == "external":
-            if EXTERNAL_SOURCE.strip() and not Path(EXTERNAL_SOURCE).exists():
-                raise FileNotFoundError(f"Không tìm thấy batch folder/archive: {EXTERNAL_SOURCE}")
+            if RUN_MODE == "worker" and not EXTERNAL_SOURCE.strip():
+                raise ValueError("Worker mode cần EXTERNAL_SOURCE là đường dẫn đúng một file .tar.")
+            if RUN_MODE == "worker" and BUILD_RUN.strip():
+                raise ValueError("Worker mode phải để BUILD_RUN trống để tự resume đúng checkpoint.")
+            source_selector = EXTERNAL_SOURCE.strip() or str(
+                DATA_ROOT / "incoming" / "team-crawl-archives-2026-10-08")
+            if not Path(source_selector).exists():
+                raise FileNotFoundError(f"Không tìm thấy batch folder/archive: {source_selector}")
             EXTERNAL_SOURCES = list_external_source_batches(
-                DATA_ROOT, EXTERNAL_SOURCE.strip() or None)
+                DATA_ROOT, source_selector)
             if not EXTERNAL_SOURCES:
                 raise FileNotFoundError(
                     "Không tìm thấy archive trong folder. EXTERNAL_SOURCE phải là file .tar "
                     "hoặc folder chứa các archive .tar.")
-            if BUILD_RUN.strip() and len(EXTERNAL_SOURCES) == 1:
+            if RUN_MODE == "worker" and len(EXTERNAL_SOURCES) != 1:
+                raise ValueError("Worker mode cần EXTERNAL_SOURCE trỏ tới đúng một file .tar.")
+            if RUN_MODE not in {"batch", "worker"}:
+                raise ValueError("RUN_MODE phải là batch hoặc worker.")
+            if RUN_MODE == "worker":
+                import re
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", WORKER_ID.strip()):
+                    raise ValueError("WORKER_ID chỉ gồm chữ/số/_/-, dài tối đa 32 ký tự.")
+                prior_run_names = set()
+                manifests = [DATA_ROOT / "active_data_batch.json",
+                    DATA_ROOT / "worker_batches" / f"{WORKER_ID.strip()}.json"]
+                for manifest_path in manifests:
+                    if manifest_path.is_file():
+                        prior = read_json(manifest_path)
+                        prior_run_names.update(item.get("build_run") for item in prior.get("builds", [])
+                            if item.get("source_path") == str(EXTERNAL_SOURCES[0]) and item.get("build_run"))
+                if len(prior_run_names) > 1:
+                    raise ValueError("Checkpoint manifests disagree on this archive's BUILD_RUN.")
+                if prior_run_names:
+                    BUILD_RUNS = [next(iter(prior_run_names))]
+                else:
+                    BUILD_RUNS = [external_build_run_name(
+                        EXTERNAL_SOURCES[0], tokenizer_spec=TOKENIZER_SPEC,
+                        chunking=CHUNK_CONFIG, shard_size=SHARD_SIZE)]
+            elif BUILD_RUN.strip() and len(EXTERNAL_SOURCES) == 1:
                 BUILD_RUNS = [BUILD_RUN.strip()]
             else:
                 import re
@@ -102,44 +138,95 @@ def write_data_notebooks():
             print("Build:", BUILD_RUN, "| tokenizer:", TOKENIZER_SPEC)
         '''),md("## 2. Nhập/chia chunk theo shard — CPU"),code('''
         from vietmedbridge.artifacts import utc_now
+        import re
         BATCH_PATH = DATA_ROOT / "active_data_batch.json"
-        previous_batch = read_json(BATCH_PATH) if BATCH_PATH.exists() else {}
-        previous_by_key = {
-            (item.get("source_path"), item.get("build_run")): item
-            for item in previous_batch.get("builds", [])
-        }
         if INPUT_KIND == "external":
-            batch_builds = []
-            for source, run_name in zip(EXTERNAL_SOURCES, BUILD_RUNS):
-                key = (str(source), run_name)
-                prior = previous_by_key.get(key, {})
-                batch_builds.append({**prior, "source_path": str(source), "build_run": run_name,
-                                     "state": "PENDING"})
-            BATCH = {"schema_version": 1, "input_kind": "external", "state": "IMPORTING",
-                     "builds": batch_builds, "updated_at": None}
-            atomic_json(BATCH_PATH, BATCH)
-            for index, item in enumerate(BATCH["builds"], 1):
-                item["state"] = "IMPORTING"
+            if RUN_MODE == "worker":
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", WORKER_ID.strip()):
+                    raise ValueError("WORKER_ID chỉ gồm chữ/số/_/-, dài tối đa 32 ký tự.")
+                worker_path = DATA_ROOT / "worker_batches" / f"{WORKER_ID.strip()}.json"
+                worker_path.parent.mkdir(parents=True, exist_ok=True)
+                BATCH = read_json(worker_path) if worker_path.exists() else {
+                    "schema_version": 1, "input_kind": "external", "worker_id": WORKER_ID.strip(),
+                    "state": "IMPORTING", "builds": []}
+                if BATCH.get("worker_id") != WORKER_ID.strip():
+                    raise ValueError("Worker manifest identity mismatch.")
+                BATCH["state"] = "IMPORTING"
+                for source, run_name in zip(EXTERNAL_SOURCES, BUILD_RUNS):
+                    source_path = str(source)
+                    matching = [item for item in BATCH["builds"]
+                                if item.get("source_path") == source_path]
+                    if matching and any(item.get("build_run") != run_name for item in matching):
+                        raise ValueError("Archive đã có build khác trong worker manifest.")
+                    if matching:
+                        item = matching[0]
+                        item["state"] = "IMPORTING"
+                    else:
+                        item = {"source_path": source_path, "build_run": run_name, "state": "IMPORTING"}
+                        BATCH["builds"].append(item)
+                    BATCH["updated_at"] = utc_now()
+                    atomic_json(worker_path, BATCH)
+                    BUILD = import_external_corpus(
+                        source, OFFICIAL_LINKS, DATA_ROOT / "processed", TOKENIZER, TOKENIZER_SPEC,
+                        run_name=run_name, config=CHUNK_CONFIG, shard_size=SHARD_SIZE,
+                        max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR)
+                    item.update({"state": "COMPLETE" if BUILD["selected_range_complete"] else "INCOMPLETE",
+                        "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
+                        "requested_input_records": BUILD["requested_input_records"], "counts": BUILD["counts"]})
+                    BATCH["updated_at"] = utc_now()
+                    atomic_json(worker_path, BATCH)
+                    print(f"Worker {WORKER_ID}: {source.name} -> {item['state']}")
+                    if not BUILD["selected_range_complete"]:
+                        raise RuntimeError("Archive chưa đủ shard. Run all lại với cùng worker ID/source để resume.")
+                BATCH["state"] = "COMPLETE" if all(
+                    item.get("state") == "COMPLETE" for item in BATCH["builds"]) else "IMPORTING"
+                BATCH["updated_at"] = utc_now()
+                atomic_json(worker_path, BATCH)
+                BUILDS = [{"build_run": item["build_run"], "build": read_json(
+                    DATA_ROOT / "processed" / item["build_run"] / "build.json")}
+                    for item in BATCH["builds"] if item.get("state") == "COMPLETE"]
+                BUILD_RUN = BUILD_RUNS[-1]
+                BUILD = read_json(DATA_ROOT / "processed" / BUILD_RUN / "build.json")
+                print("Worker checkpoint:", worker_path)
+            else:
+                previous_batch = read_json(BATCH_PATH) if BATCH_PATH.exists() else {}
+                previous_by_key = {
+                    (item.get("source_path"), item.get("build_run")): item
+                    for item in previous_batch.get("builds", [])
+                }
+                batch_builds = []
+                for source, run_name in zip(EXTERNAL_SOURCES, BUILD_RUNS):
+                    key = (str(source), run_name)
+                    prior = previous_by_key.get(key, {})
+                    batch_builds.append({**prior, "source_path": str(source), "build_run": run_name,
+                                         "state": "PENDING"})
+                BATCH = {"schema_version": 1, "input_kind": "external", "state": "IMPORTING",
+                         "builds": batch_builds, "updated_at": None}
                 atomic_json(BATCH_PATH, BATCH)
-                BUILD = import_external_corpus(
-                    Path(item["source_path"]), OFFICIAL_LINKS, DATA_ROOT / "processed", TOKENIZER, TOKENIZER_SPEC,
-                    run_name=item["build_run"], config=CHUNK_CONFIG, shard_size=SHARD_SIZE,
-                    max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR)
-                item.update({"state": "COMPLETE" if BUILD["selected_range_complete"] else "INCOMPLETE",
-                    "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
-                    "requested_input_records": BUILD["requested_input_records"], "counts": BUILD["counts"]})
+                for index, item in enumerate(BATCH["builds"], 1):
+                    item["state"] = "IMPORTING"
+                    atomic_json(BATCH_PATH, BATCH)
+                    BUILD = import_external_corpus(
+                        Path(item["source_path"]), OFFICIAL_LINKS, DATA_ROOT / "processed", TOKENIZER, TOKENIZER_SPEC,
+                        run_name=item["build_run"], config=CHUNK_CONFIG, shard_size=SHARD_SIZE,
+                        max_shards=MAX_NEW_SHARDS, work_dir=WORK_DIR)
+                    item.update({"state": "COMPLETE" if BUILD["selected_range_complete"] else "INCOMPLETE",
+                        "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
+                        "requested_input_records": BUILD["requested_input_records"], "counts": BUILD["counts"]})
+                    atomic_json(BATCH_PATH, BATCH)
+                    print(f"Archive {index}/{len(BATCH['builds'])}: {item['source_path']} -> {item['state']}")
+                    if not BUILD["selected_range_complete"]:
+                        raise RuntimeError("Batch chưa đủ shard. Run all lại với cùng folder để resume.")
+                BATCH["state"] = "COMPLETE"
+                BATCH["updated_at"] = utc_now()
                 atomic_json(BATCH_PATH, BATCH)
-                print(f"Archive {index}/{len(BATCH['builds'])}: {item['source_path']} -> {item['state']}")
-                if not BUILD["selected_range_complete"]:
-                    raise RuntimeError("Batch chưa đủ shard. Run all lại với cùng folder để resume.")
-            BATCH["state"] = "COMPLETE"
-            BATCH["updated_at"] = utc_now()
-            atomic_json(BATCH_PATH, BATCH)
-            BUILDS = [{"build_run": item["build_run"], "build": read_json(
-                DATA_ROOT / "processed" / item["build_run"] / "build.json")} for item in BATCH["builds"]]
-            BUILD_RUN = BUILDS[-1]["build_run"]
-            BUILD = BUILDS[-1]["build"]
+                BUILDS = [{"build_run": item["build_run"], "build": read_json(
+                    DATA_ROOT / "processed" / item["build_run"] / "build.json")} for item in BATCH["builds"]]
+                BUILD_RUN = BUILDS[-1]["build_run"]
+                BUILD = BUILDS[-1]["build"]
         else:
+            if RUN_MODE != "batch":
+                raise ValueError("Worker mode only supports external archives.")
             from vietmedbridge.build import build_corpus
             BUILD = build_corpus(DATA_ROOT / "crawl" / CRAWL_RUN, DATA_ROOT / "processed",
                 TOKENIZER, TOKENIZER_SPEC, run_name=BUILD_RUN, config=CHUNK_CONFIG,
@@ -167,11 +254,14 @@ def write_data_notebooks():
                 if gap_artifact:
                     print("Gap review file:", build_dir / gap_artifact["path"])
         if BATCH["state"] == "COMPLETE":
-            atomic_json(DATA_ROOT / "active_data_build.json", {
-                "build_run": BUILD_RUN, "crawl_run": BUILD.get("crawl_run"),
-                "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
-                "input_kind": BUILD.get("input_kind", "CRAWL"), "state": BUILD["state"]})
-            print("Hoàn tất toàn batch. Chạy notebook 03 trên CPU.")
+            if INPUT_KIND == "external" and RUN_MODE == "worker":
+                print("Worker hoàn tất. Chờ mọi worker xong, rồi chạy notebook 03 với BATCH_SOURCE='workers'.")
+            else:
+                atomic_json(DATA_ROOT / "active_data_build.json", {
+                    "build_run": BUILD_RUN, "crawl_run": BUILD.get("crawl_run"),
+                    "signature": BUILD["signature"], "snapshot_sha256": BUILD["snapshot_sha256"],
+                    "input_kind": BUILD.get("input_kind", "CRAWL"), "state": BUILD["state"]})
+                print("Hoàn tất toàn batch. Chạy notebook 03 trên CPU.")
         else:
             raise RuntimeError("Input range chưa hoàn tất. Run all cùng config để resume.")
         '''),md("## 3. Kiểm tra một tài liệu và thời gian thực đo"),code('''
@@ -208,8 +298,10 @@ def write_data_notebooks():
         md('''
         # VietMedBridge — 03: Kiểm toàn bộ dữ liệu → freeze → chia input embedding
 
-        **Runtime CPU, Run all sau notebook 02.** Tự lấy mọi build trong
-        active_data_batch.json; nếu chỉ có build cũ thì dùng active_data_build.json.
+        **Runtime CPU, Run all sau notebook 02.** Mặc định lấy build trong
+        active_data_batch.json. Nếu dùng nhiều acc, chọn `BATCH_SOURCE="workers"`;
+        notebook sẽ hợp nhất các worker manifest và build COMPLETE cũ, rồi xác nhận
+        mọi archive trong thư mục nguồn đã có đúng một build hoàn tất.
         Kiểm mọi official ID/URL, source hash, offsets, parent/child và bảo toàn IDs lỗi.
         Global dedup giữ toàn bộ aliases; input model giống hệt chỉ cần encode một lần.
         Chuẩn bị input embedding thành các file nhỏ trên disk, chưa nạp model GPU.
@@ -224,12 +316,54 @@ def write_data_notebooks():
         from vietmedbridge.golden import run_golden_suite
         from vietmedbridge.health import health_report, freeze_candidate
         from vietmedbridge.index_inputs import prepare_index_inputs, publish_data_handoff
+        from vietmedbridge.external_import import list_external_source_batches
 
         BUILD_RUN_OVERRIDE = None  # dùng để chủ động đọc build cũ
+        BATCH_SOURCE = "active_batch" #@param ["active_batch", "workers"]
+        WORKER_EXPECTED_SOURCE = "" #@param {type:"string"}
         batch_path = DATA_ROOT / "active_data_batch.json"
         if BUILD_RUN_OVERRIDE:
             build_refs = [{"build_run": BUILD_RUN_OVERRIDE}]
             BATCH = {"schema_version": 1, "state": "COMPLETE", "builds": build_refs}
+        elif BATCH_SOURCE == "workers":
+            expected_source = WORKER_EXPECTED_SOURCE.strip() or str(
+                DATA_ROOT / "incoming" / "team-crawl-archives-2026-10-08")
+            expected_paths = [str(path.resolve()) for path in list_external_source_batches(
+                DATA_ROOT, expected_source)]
+            if not expected_paths:
+                raise FileNotFoundError(f"Không tìm thấy archive nguồn: {expected_source}")
+            expected_set = set(expected_paths)
+            gathered = {}
+            prior = read_json(batch_path) if batch_path.exists() else {}
+            for item in prior.get("builds", []):
+                if item.get("state") == "COMPLETE" and item.get("source_path") in expected_set:
+                    gathered[item["source_path"]] = item
+            worker_dir = DATA_ROOT / "worker_batches"
+            worker_files = sorted(worker_dir.glob("*.json")) if worker_dir.exists() else []
+            for worker_file in worker_files:
+                worker = read_json(worker_file)
+                worker_items = worker.get("builds", [])
+                if not any(item.get("source_path") in expected_set for item in worker_items):
+                    continue
+                if worker.get("state") != "COMPLETE":
+                    raise RuntimeError(f"Worker chưa hoàn tất: {worker_file.name} ({worker.get('state')})")
+                for item in worker_items:
+                    if item.get("state") != "COMPLETE":
+                        raise RuntimeError(f"Build worker chưa hoàn tất: {item.get('source_path')}")
+                    source_path = item.get("source_path")
+                    if source_path in gathered and (gathered[source_path].get("build_run") != item.get("build_run")
+                        or gathered[source_path].get("snapshot_sha256") != item.get("snapshot_sha256")):
+                        raise ValueError(f"Hai worker đã tạo build không khớp cho cùng archive: {source_path}")
+                    gathered[source_path] = item
+            actual_set = set(gathered)
+            if actual_set != expected_set:
+                missing, extra = sorted(expected_set-actual_set), sorted(actual_set-expected_set)
+                raise ValueError(f"Worker coverage chưa khớp batch; missing={missing}, extra={extra}")
+            build_refs = [gathered[path] for path in expected_paths]
+            BATCH = {"schema_version": 1, "input_kind": "external", "state": "COMPLETE",
+                "builds": build_refs, "assembled_from_workers": [path.name for path in worker_files]}
+            atomic_json(batch_path, BATCH)
+            print(f"Đã hợp nhất {len(worker_files)} worker manifest; đủ {len(build_refs)} archive.")
         else:
             if batch_path.exists():
                 BATCH = read_json(batch_path)

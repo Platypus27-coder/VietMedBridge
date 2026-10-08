@@ -8,8 +8,8 @@ Giữ DATA_ROOT đã dùng: `/content/drive/MyDrive/VietMedBridge/data`.
 Batch mới Sếp vừa đưa lên nằm trong `data/incoming/team-crawl-archives-2026-10-08/`
 và có sáu archive: `vibiomir_shard_00001.tar` đến `vibiomir_shard_00006.tar`,
 tổng khoảng 19,05 GB. Cùng shard `00000` đã xử lý trước đó, đây là batch khoảng
-700k URL cần dùng cho pipeline. 02 được cấu hình trỏ thẳng vào folder này và
-chạy tuần tự cả sáu archive; không chọn lại riêng shard `00001`.
+700k URL cần dùng cho pipeline. Notebook 02 hỗ trợ chạy tuần tự cả folder hoặc
+chia archive cho nhiều Colab worker; không chọn lại riêng shard `00001`.
 
 Archive gốc `vibiomir_shard_00000.tar` có 3.187.025.920 bytes, SHA-256:
 `cfb0dd6cfcb1cc6f8665717942b076a0e71011736d29e4a175064fc7b168929a`.
@@ -44,6 +44,19 @@ nhận file tar hoặc folder batch; folder sẽ nhập hết file tar theo th�
 `BUILD_RUN` trống sẽ tự sinh tên riêng ổn định cho từng archive. `active_data_batch.json`
 checkpoint toàn danh sách; Run all lại cùng folder để resume archive/shard đang dở.
 
+Để chạy nhiều acc: dừng batch runner trước; chọn `RUN_MODE="worker"`, đặt
+`WORKER_ID` duy nhất cho mỗi acc và `EXTERNAL_SOURCE` là đường dẫn đúng một tar.
+Để `BUILD_RUN` trống. Cùng một worker ID có thể nhập archive kế tiếp sau khi archive
+trước hoàn tất; manifest nằm riêng ở `data/worker_batches/<WORKER_ID>.json`.
+Mỗi acc phải mount cùng Drive root và dùng cùng đường dẫn archive. Không giao cùng
+archive cho hai worker và không chạy batch mode cùng lúc. Checkpoint từng shard nằm
+trong build riêng trên Drive nên worker có thể tiếp tục phần đã xong.
+
+Sau khi mọi worker hoàn tất, chạy 03 với `BATCH_SOURCE="workers"` và để
+`WORKER_EXPECTED_SOURCE` trống để dùng folder mặc định. 03 hợp nhất các archive
+đã hoàn tất từ batch cũ và worker manifests, rồi kiểm tra phủ đủ mỗi tar đúng một
+lần trước khi freeze. Không chạy 03 trong khi workers còn chạy.
+
 Kiểm SHA snapshot official, URL → ID/alias, liên kết raw SHA/snapshot và số ký tự.
 Giữ nguyên source_text, chia bằng tokenizer BGE cố định, kiểm mọi span. Frontier URL
 không có crawl row hoặc crawl thành công nhưng thiếu extraction row được giữ thành
@@ -58,14 +71,15 @@ ID; text chỉ lấy cho shard đang xử lý. DuckDB dùng giới hạn 512 MiB
 Metadata được cache trên local disk, không scan lại metadata trên Drive mỗi shard.
 
 Checkpoint chỉ xuất bản sau đủ sáu file và hash của shard. Ngắt Colab thì Run all
-cùng nguồn/run/config/code để tiếp tục. Không để hai runtime ghi cùng build.
+cùng nguồn/run/config/code để tiếp tục. Không để hai runtime ghi cùng build hoặc
+cùng worker manifest.
 `PARTIAL_DATA_VALIDATED` chưa được freeze; phải hoàn tất 100.039 input outcomes.
 Thay code/source/policy thì dùng build run mới để không trộn checkpoints.
 
 ## 03: kiểm snapshot, freeze và chuẩn bị input trên disk
 
-Tự đọc mọi build hoàn tất từ `active_data_batch.json` của 02, kể cả sau khi Colab
-ngắt. Kiểm whole-snapshot source hashes, official membership, parent/child/section
+Đọc mọi build hoàn tất từ `active_data_batch.json` của 02, hoặc hợp nhất worker
+manifests khi `BATCH_SOURCE="workers"`. Kiểm whole-snapshot source hashes, official membership, parent/child/section
 offsets và counts cho từng archive, rồi freeze và chuẩn bị index inputs từng build.
 Candidate lineage tự nối từng batch với candidate cũ; không cần chạy 03 sáu lần.
 Health giữ global content/representation aliases. Freeze là candidate integrity, không tự duyệt y khoa,
