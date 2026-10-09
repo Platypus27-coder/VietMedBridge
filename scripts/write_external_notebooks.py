@@ -11,6 +11,10 @@ BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
         'if not lock or CODE_REVISION or upgrade:\n'
         '    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, '
         '"pipeline_api": PIPELINE_API_VERSION, "workflow_api": DATA_WORKFLOW_API})'))
+BOOT_FREEZE = BOOT.replace(
+    'external-extraction-import-v7-parallel-workers',
+    'external-extraction-import-v8-parallel-freeze',
+)
 
 
 def write_data_notebooks():
@@ -299,9 +303,10 @@ def write_data_notebooks():
         # VietMedBridge — 03: Kiểm toàn bộ dữ liệu → freeze → chia input embedding
 
         **Runtime CPU, Run all sau notebook 02.** Mặc định lấy build trong
-        active_data_batch.json. Nếu dùng nhiều acc, chọn `BATCH_SOURCE="workers"`;
-        notebook sẽ hợp nhất các worker manifest và build COMPLETE cũ, rồi xác nhận
-        mọi archive trong thư mục nguồn đã có đúng một build hoàn tất.
+        active_data_batch.json. Nếu dùng nhiều acc để tăng tốc, chọn
+        `BATCH_SOURCE="workers"` và `FREEZE_MODE="worker"`; mỗi worker xử lý
+        một tập build riêng, checkpoint riêng, không ghi manifest tổng.
+        Chỉ một acc chạy `FREEZE_MODE="coordinator"` sau khi các worker COMPLETE.
         Kiểm mọi official ID/URL, source hash, offsets, parent/child và bảo toàn IDs lỗi.
         Global dedup giữ toàn bộ aliases; input model giống hệt chỉ cần encode một lần.
         Chuẩn bị input embedding thành các file nhỏ trên disk, chưa nạp model GPU.
@@ -309,7 +314,7 @@ def write_data_notebooks():
         Mỗi archive được freeze/checkpoint riêng; batch resume tiếp build chưa xong.
         Candidate freeze là mốc integrity, không tự duyệt relevance hoặc human QA.
         Source audit/golden thật vẫn cần team review; không tạo nhãn thi.
-        '''),code(BOOT),md("## 1. Đọc build hoàn tất và chạy regression của chunker"),code('''
+        '''),code(BOOT_FREEZE),md("## 1. Đọc build hoàn tất và chạy regression của chunker"),code('''
         from vietmedbridge.artifacts import read_json, atomic_json, digest_json, code_fingerprint
         from vietmedbridge.dataset import load_snapshot, parquet_path
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
@@ -317,17 +322,27 @@ def write_data_notebooks():
         from vietmedbridge.health import health_report, freeze_candidate
         from vietmedbridge.index_inputs import prepare_index_inputs, publish_data_handoff
         from vietmedbridge.external_import import list_external_source_batches
+        sys.path.insert(0, str(CHECKOUT / "scripts"))
+        from freeze_workers import (
+            freeze_batch_signature, freeze_worker_manifest_path,
+            partition_freeze_builds, verify_freeze_workers,
+            write_freeze_worker_manifest,
+        )
 
         BUILD_RUN_OVERRIDE = None  # dùng để chủ động đọc build cũ
         BATCH_SOURCE = "active_batch" #@param ["active_batch", "workers"]
         WORKER_EXPECTED_SOURCE = "" #@param {type:"string"}
+        FREEZE_MODE = "serial" #@param ["serial", "worker", "coordinator"]
+        FREEZE_TEAM_SIZE = 3 #@param {type:"integer"}
+        FREEZE_WORKER_ID = 0 #@param {type:"integer"}
+        if FREEZE_MODE != "serial" and (BATCH_SOURCE != "workers" or BUILD_RUN_OVERRIDE):
+            raise ValueError("Parallel freeze requires BATCH_SOURCE='workers' and no BUILD_RUN_OVERRIDE.")
         batch_path = DATA_ROOT / "active_data_batch.json"
         if BUILD_RUN_OVERRIDE:
             build_refs = [{"build_run": BUILD_RUN_OVERRIDE}]
             BATCH = {"schema_version": 1, "state": "COMPLETE", "builds": build_refs}
         elif BATCH_SOURCE == "workers":
-            expected_source = WORKER_EXPECTED_SOURCE.strip() or str(
-                DATA_ROOT / "incoming" / "team-crawl-archives-2026-10-08")
+            expected_source = WORKER_EXPECTED_SOURCE.strip() or str(DATA_ROOT / "incoming")
             expected_paths = [str(path.resolve()) for path in list_external_source_batches(
                 DATA_ROOT, expected_source)]
             if not expected_paths:
@@ -362,7 +377,8 @@ def write_data_notebooks():
             build_refs = [gathered[path] for path in expected_paths]
             BATCH = {"schema_version": 1, "input_kind": "external", "state": "COMPLETE",
                 "builds": build_refs, "assembled_from_workers": [path.name for path in worker_files]}
-            atomic_json(batch_path, BATCH)
+            if FREEZE_MODE == "serial":
+                atomic_json(batch_path, BATCH)
             print(f"Đã hợp nhất {len(worker_files)} worker manifest; đủ {len(build_refs)} archive.")
         else:
             if batch_path.exists():
@@ -404,12 +420,14 @@ def write_data_notebooks():
         GOLDEN = run_golden_suite(CHECKOUT / "tests/golden/cases.json", TOKENIZER, TOKENIZER_SPEC, CHUNK_CONFIG)
         if not GOLDEN["passed"]:
             raise RuntimeError("Golden regression fail; chưa freeze candidate.")
-        atomic_json(DATA_ROOT / "reports/golden_latest.json", GOLDEN)
+        if FREEZE_MODE != "worker":
+            atomic_json(DATA_ROOT / "reports/golden_latest.json", GOLDEN)
         print("Batch builds:", len(ACTIVE_BUILDS), "| requested IDs:",
               sum(item["build"]["requested_input_records"] for item in ACTIVE_BUILDS))
+        print("Freeze mode:", FREEZE_MODE, "| team size:", FREEZE_TEAM_SIZE)
         '''),md("## 2. Kiểm, freeze và chuẩn bị input toàn batch — CPU"),code('''
         HANDOFFS = []
-        for index, item in enumerate(ACTIVE_BUILDS, 1):
+        def freeze_one(item):
             run_name, build_dir, build = item["build_run"], item["build_dir"], item["build"]
             batch_item = item["batch_item"]
             candidate = None
@@ -442,26 +460,127 @@ def write_data_notebooks():
                     work_dir=WORK_DIR, audit_size=PIPELINE_CONFIG["audit_size"])
                 candidate = freeze_candidate(build_dir, health, golden_report=GOLDEN)
                 candidate_name = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
-            INPUTS = prepare_index_inputs(build_dir, candidate_name, TOKENIZER,
+            inputs = prepare_index_inputs(build_dir, candidate_name, TOKENIZER,
                 work_dir=WORK_DIR, part_size=4096)
-            HANDOFF = publish_data_handoff(DATA_ROOT, run_name, candidate, INPUTS)
-            batch_item.update({"state":"FROZEN", "candidate_name":candidate_name,
+            record = {"state":"COMPLETE", "snapshot_sha256":build["snapshot_sha256"],
+                "candidate_name":candidate_name,
                 "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
-                "index_inputs_manifest_sha256":INPUTS["manifest_sha256"]})
+                "index_inputs_manifest_sha256":inputs["manifest_sha256"]}
+            return candidate, inputs, record
+
+        if FREEZE_MODE == "worker":
+            if type(FREEZE_TEAM_SIZE) is not int or FREEZE_TEAM_SIZE < 1:
+                raise ValueError("FREEZE_TEAM_SIZE must be a positive integer.")
+            freeze_refs = [{"build_run":item["build_run"],
+                "source_path":item["batch_item"].get("source_path"),
+                "snapshot_sha256":item["build"]["snapshot_sha256"]} for item in ACTIVE_BUILDS]
+            freeze_code_sha = code_fingerprint()
+            freeze_signature = freeze_batch_signature(freeze_refs,
+                code_sha256=freeze_code_sha, team_size=FREEZE_TEAM_SIZE)
+            assigned = partition_freeze_builds(freeze_refs,
+                team_size=FREEZE_TEAM_SIZE, worker_id=FREEZE_WORKER_ID)
+            assigned_runs = [item["build_run"] for item in assigned]
+            if not assigned_runs:
+                raise ValueError("This worker has no assigned builds; reduce FREEZE_TEAM_SIZE.")
+            worker_path = freeze_worker_manifest_path(DATA_ROOT,
+                batch_signature=freeze_signature, worker_id=FREEZE_WORKER_ID)
+            completed = {}
+            if worker_path.is_file():
+                previous = read_json(worker_path)
+                previous_payload = {key:value for key,value in previous.items()
+                                    if key != "manifest_sha256"}
+                if (previous.get("manifest_sha256") != digest_json(previous_payload)
+                    or previous.get("batch_signature") != freeze_signature
+                    or previous.get("worker_id") != FREEZE_WORKER_ID
+                    or previous.get("team_size") != FREEZE_TEAM_SIZE
+                    or previous.get("assigned_build_runs") != assigned_runs):
+                    raise ValueError("Freeze worker checkpoint does not match this assignment.")
+                completed = previous.get("completed", {})
+            write_freeze_worker_manifest(worker_path, batch_signature=freeze_signature,
+                code_sha256=freeze_code_sha, team_size=FREEZE_TEAM_SIZE,
+                worker_id=FREEZE_WORKER_ID, assigned_build_runs=assigned_runs,
+                completed=completed, state="RUNNING")
+            by_run = {item["build_run"]:item for item in ACTIVE_BUILDS}
+            for index, run_name in enumerate(assigned_runs, 1):
+                candidate, inputs, record = freeze_one(by_run[run_name])
+                completed[run_name] = record
+                write_freeze_worker_manifest(worker_path, batch_signature=freeze_signature,
+                    code_sha256=freeze_code_sha, team_size=FREEZE_TEAM_SIZE,
+                    worker_id=FREEZE_WORKER_ID, assigned_build_runs=assigned_runs,
+                    completed=completed, state="RUNNING")
+                print(f"Worker {FREEZE_WORKER_ID}: {index}/{len(assigned_runs)} {run_name} COMPLETE",
+                      flush=True)
+            write_freeze_worker_manifest(worker_path, batch_signature=freeze_signature,
+                code_sha256=freeze_code_sha, team_size=FREEZE_TEAM_SIZE,
+                worker_id=FREEZE_WORKER_ID, assigned_build_runs=assigned_runs,
+                completed=completed, state="COMPLETE")
+            print(json.dumps({"state":"FREEZE_WORKER_COMPLETE",
+                "worker_id":FREEZE_WORKER_ID, "team_size":FREEZE_TEAM_SIZE,
+                "assigned_builds":assigned_runs, "checkpoint":str(worker_path)},
+                ensure_ascii=False, indent=2))
+        elif FREEZE_MODE == "coordinator":
+            freeze_refs = [{"build_run":item["build_run"],
+                "source_path":item["batch_item"].get("source_path"),
+                "snapshot_sha256":item["build"]["snapshot_sha256"]} for item in ACTIVE_BUILDS]
+            freeze_code_sha = code_fingerprint()
+            freeze_signature = freeze_batch_signature(freeze_refs,
+                code_sha256=freeze_code_sha, team_size=FREEZE_TEAM_SIZE)
+            records = verify_freeze_workers(DATA_ROOT, freeze_refs,
+                batch_signature=freeze_signature, code_sha256=freeze_code_sha,
+                team_size=FREEZE_TEAM_SIZE)
+            for item, record in zip(ACTIVE_BUILDS, records):
+                candidate, inputs = record["candidate"], record["inputs"]
+                handoff = publish_data_handoff(DATA_ROOT, item["build_run"], candidate, inputs)
+                item["batch_item"].update({"state":"FROZEN",
+                    "candidate_name":record["candidate_name"],
+                    "candidate_manifest_sha256":record["candidate_manifest_sha256"],
+                    "index_inputs_manifest_sha256":record["index_inputs_manifest_sha256"]})
+                HANDOFFS.append(handoff)
+            BATCH["freeze_state"] = "COMPLETE"
             atomic_json(batch_path, BATCH)
-            HANDOFFS.append(HANDOFF)
-            print(f"Freeze {index}/{len(ACTIVE_BUILDS)}: {run_name} | documents="
-                  f"{candidate['counts']['documents']:,} | children={candidate['counts']['children']:,}")
-        BATCH["freeze_state"] = "COMPLETE"
-        atomic_json(batch_path, BATCH)
-        print(json.dumps({"state":"BATCH_FROZEN", "builds":len(HANDOFFS),
-            "documents":sum(item["documents"] for item in HANDOFFS),
-            "children":sum(item["children"] for item in HANDOFFS),
-            "lineage_state":read_json(DATA_ROOT / "candidate_lineage.json")["state"],
-            "lineage_candidates":len(read_json(DATA_ROOT / "candidate_lineage.json")["sources"])},
-            ensure_ascii=False, indent=2))
-        print("Model input parts và checkpoints đã lưu riêng trong từng build. Tiếp theo chạy notebook 04.")
+            print(json.dumps({"state":"BATCH_FROZEN", "builds":len(HANDOFFS),
+                "documents":sum(item["documents"] for item in HANDOFFS),
+                "children":sum(item["children"] for item in HANDOFFS),
+                "lineage_state":read_json(DATA_ROOT / "candidate_lineage.json")["state"],
+                "lineage_candidates":len(read_json(DATA_ROOT / "candidate_lineage.json")["sources"])},
+                ensure_ascii=False, indent=2))
+            print("Coordinator đã xác minh checkpoint của mọi worker và công bố batch. Tiếp theo chạy notebook 04.")
+        else:
+            for index, item in enumerate(ACTIVE_BUILDS, 1):
+                candidate, inputs, record = freeze_one(item)
+                HANDOFF = publish_data_handoff(DATA_ROOT, item["build_run"], candidate, inputs)
+                item["batch_item"].update({"state":"FROZEN", "candidate_name":record["candidate_name"],
+                    "candidate_manifest_sha256":record["candidate_manifest_sha256"],
+                    "index_inputs_manifest_sha256":record["index_inputs_manifest_sha256"]})
+                atomic_json(batch_path, BATCH)
+                HANDOFFS.append(HANDOFF)
+                print(f"Freeze {index}/{len(ACTIVE_BUILDS)}: {item['build_run']} | documents="
+                      f"{candidate['counts']['documents']:,} | children={candidate['counts']['children']:,}")
+            BATCH["freeze_state"] = "COMPLETE"
+            atomic_json(batch_path, BATCH)
+            print(json.dumps({"state":"BATCH_FROZEN", "builds":len(HANDOFFS),
+                "documents":sum(item["documents"] for item in HANDOFFS),
+                "children":sum(item["children"] for item in HANDOFFS),
+                "lineage_state":read_json(DATA_ROOT / "candidate_lineage.json")["state"],
+                "lineage_candidates":len(read_json(DATA_ROOT / "candidate_lineage.json")["sources"])},
+                ensure_ascii=False, indent=2))
+            print("Model input parts và checkpoints đã lưu riêng trong từng build. Tiếp theo chạy notebook 04.")
         '''),md('''
+        ### Chạy song song trên 3 tài khoản
+
+        Cả ba tài khoản dùng cùng DATA_ROOT, cùng BATCH_SOURCE/WORKER_EXPECTED_SOURCE,
+        FREEZE_TEAM_SIZE=3 và FREEZE_MODE="worker"; đặt FREEZE_WORKER_ID lần lượt
+        0, 1, 2. Các worker nhận 3/2/2 build theo thứ tự ổn định và chỉ ghi vào
+        thư mục build riêng cùng `data/freeze_workers/<batch-signature>/worker-N.json`.
+        Mỗi build xong được checkpoint; chạy lại đúng worker ID để resume.
+        Không chạy hai runtime cùng worker ID.
+
+        Khi cả ba manifest báo COMPLETE, một tài khoản đổi sang
+        FREEZE_MODE="coordinator", giữ FREEZE_TEAM_SIZE=3 và chạy lại notebook.
+        Coordinator xác minh đủ build/candidate/index-input hashes rồi mới cập nhật
+        manifest tổng, candidate lineage và active pointer. Không chạy coordinator
+        khi còn worker đang làm. Notebook này vẫn chạy CPU; embedding dùng GPU ở 04.
+
         Candidate lớn không được nạp vào catalog RAM của pilot. Notebook 04 sẽ
         đọc một mẫu từ các input parts để đo BGE/Qwen/reranker và ghi chi phí,
         trước khi triển khai inference/index toàn corpus. Nhãn/relevance score không

@@ -66,9 +66,16 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    archive cho các acc ở `RUN_MODE="worker"`. Khi chia worker, dừng batch runner;
    mỗi acc cần `WORKER_ID` duy nhất, đúng một file tar ở `EXTERNAL_SOURCE`, cùng
    Drive root/path và `BUILD_RUN` để trống. Không chạy trùng archive hoặc chạy batch
-   mode đồng thời. Sau khi mọi worker xong, chạy 03 với `BATCH_SOURCE="workers"`;
-   notebook kiểm tra đủ mỗi archive đúng một lần rồi freeze toàn batch. 03 tự ghi các candidate mới nối
-   tiếp candidate đang active vào `data/candidate_lineage.json`; không cần chép hash.
+   mode đồng thời. Sau khi mọi worker xong, 03 có thể chạy tuần tự hoặc song song.
+   Với ba acc, cả ba đặt `BATCH_SOURCE="workers"`, `FREEZE_MODE="worker"`,
+   `FREEZE_TEAM_SIZE=3`, cùng `WORKER_EXPECTED_SOURCE` trỏ tới thư mục `data/incoming`
+   chứa cả `.tar.parts` và batch tar; đặt `FREEZE_WORKER_ID` lần lượt 0/1/2.
+   Mỗi build được giao đúng một worker và có checkpoint riêng. Không chạy trùng ID.
+   Khi cả ba manifest `freeze_workers/<batch-signature>/worker-N.json` báo COMPLETE,
+   một acc chạy lại 03 với `FREEZE_MODE="coordinator"`; coordinator xác minh đủ
+   candidate/index-input hashes rồi mới ghi manifest tổng và candidate lineage.
+   Cách này tránh ba runtime cùng sửa `active_data_batch.json` hoặc active pointer.
+   03 tự nối candidate mới vào `data/candidate_lineage.json`; không cần chép hash.
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
 2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
    candidate, notebook tự ghép chúng, kiểm tra xung đột và chuyển active pointer
