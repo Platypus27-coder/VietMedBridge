@@ -13,7 +13,7 @@ BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
         '"pipeline_api": PIPELINE_API_VERSION, "workflow_api": DATA_WORKFLOW_API})'))
 BOOT_FREEZE = BOOT.replace(
     'external-extraction-import-v7-parallel-workers',
-    'external-extraction-import-v9-legacy-build-freeze',
+    'external-extraction-import-v10-freeze-coverage-audit',
 )
 
 
@@ -319,14 +319,14 @@ def write_data_notebooks():
         from vietmedbridge.dataset import load_snapshot, parquet_path
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
         from vietmedbridge.golden import run_golden_suite
-        from vietmedbridge.health import health_report, freeze_candidate
-        from vietmedbridge.index_inputs import prepare_index_inputs, publish_data_handoff
+        from vietmedbridge.index_inputs import publish_data_handoff
         from vietmedbridge.external_import import list_external_source_batches
         sys.path.insert(0, str(CHECKOUT / "scripts"))
         from freeze_workers import (
             freeze_batch_signature, freeze_worker_manifest_path,
             partition_freeze_builds, verify_freeze_workers,
-            write_freeze_worker_manifest,
+            write_freeze_worker_manifest, collect_completed_build_refs,
+            freeze_build_for_notebook, audit_freeze_batch, verify_freeze_record,
         )
 
         BUILD_RUN_OVERRIDE = None  # dùng để chủ động đọc build cũ
@@ -347,34 +347,11 @@ def write_data_notebooks():
                 DATA_ROOT, expected_source)]
             if not expected_paths:
                 raise FileNotFoundError(f"Không tìm thấy archive nguồn: {expected_source}")
-            expected_set = set(expected_paths)
-            gathered = {}
             prior = read_json(batch_path) if batch_path.exists() else {}
-            for item in prior.get("builds", []):
-                if item.get("state") == "COMPLETE" and item.get("source_path") in expected_set:
-                    gathered[item["source_path"]] = item
             worker_dir = DATA_ROOT / "worker_batches"
             worker_files = sorted(worker_dir.glob("*.json")) if worker_dir.exists() else []
-            for worker_file in worker_files:
-                worker = read_json(worker_file)
-                worker_items = worker.get("builds", [])
-                if not any(item.get("source_path") in expected_set for item in worker_items):
-                    continue
-                if worker.get("state") != "COMPLETE":
-                    raise RuntimeError(f"Worker chưa hoàn tất: {worker_file.name} ({worker.get('state')})")
-                for item in worker_items:
-                    if item.get("state") != "COMPLETE":
-                        raise RuntimeError(f"Build worker chưa hoàn tất: {item.get('source_path')}")
-                    source_path = item.get("source_path")
-                    if source_path in gathered and (gathered[source_path].get("build_run") != item.get("build_run")
-                        or gathered[source_path].get("snapshot_sha256") != item.get("snapshot_sha256")):
-                        raise ValueError(f"Hai worker đã tạo build không khớp cho cùng archive: {source_path}")
-                    gathered[source_path] = item
-            actual_set = set(gathered)
-            if actual_set != expected_set:
-                missing, extra = sorted(expected_set-actual_set), sorted(actual_set-expected_set)
-                raise ValueError(f"Worker coverage chưa khớp batch; missing={missing}, extra={extra}")
-            build_refs = [gathered[path] for path in expected_paths]
+            workers = [(path.name, read_json(path)) for path in worker_files]
+            build_refs = collect_completed_build_refs(expected_paths, prior, workers)
             BATCH = {"schema_version": 1, "input_kind": "external", "state": "COMPLETE",
                 "builds": build_refs, "assembled_from_workers": [path.name for path in worker_files]}
             if FREEZE_MODE == "serial":
@@ -427,46 +404,12 @@ def write_data_notebooks():
         print("Freeze mode:", FREEZE_MODE, "| team size:", FREEZE_TEAM_SIZE)
         '''),md("## 2. Kiểm, freeze và chuẩn bị input toàn batch — CPU"),code('''
         HANDOFFS = []
+        AUDIT_RECORDS = []
         def freeze_one(item):
-            run_name, build_dir, build = item["build_run"], item["build_dir"], item["build"]
-            batch_item = item["batch_item"]
-            candidate = None
-            candidate_name = batch_item.get("candidate_name")
-            if candidate_name:
-                candidate_path = build_dir / candidate_name
-                if candidate_path.is_file():
-                    saved = read_json(candidate_path)
-                    saved_sha = digest_json({key:value for key,value in saved.items()
-                                             if key != "candidate_manifest_sha256"})
-                    if (saved.get("state") == "FROZEN_CANDIDATE"
-                        and saved.get("candidate_manifest_sha256") == saved_sha
-                        and saved.get("snapshot_sha256") == build["snapshot_sha256"]
-                        and saved.get("golden", {}).get("code_sha256") == code_fingerprint()):
-                        candidate = saved
-            if candidate is None:
-                for path in sorted(build_dir.glob("candidate-*.json")):
-                    saved = read_json(path)
-                    saved_sha = digest_json({key:value for key,value in saved.items()
-                                             if key != "candidate_manifest_sha256"})
-                    if (saved.get("state") == "FROZEN_CANDIDATE"
-                        and saved.get("candidate_manifest_sha256") == saved_sha
-                        and saved.get("snapshot_sha256") == build["snapshot_sha256"]
-                        and saved.get("golden", {}).get("code_sha256") == code_fingerprint()):
-                        candidate, candidate_name = saved, path.name
-                        break
-            if candidate is None:
-                crawl_dir = DATA_ROOT / "crawl" / build["crawl_run"] if build.get("crawl_run") else None
-                health = health_report(build_dir, official_links=OFFICIAL_LINKS, crawl_dir=crawl_dir,
-                    work_dir=WORK_DIR, audit_size=PIPELINE_CONFIG["audit_size"])
-                candidate = freeze_candidate(build_dir, health, golden_report=GOLDEN)
-                candidate_name = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
-            inputs = prepare_index_inputs(build_dir, candidate_name, TOKENIZER,
-                work_dir=WORK_DIR, part_size=4096)
-            record = {"state":"COMPLETE", "snapshot_sha256":build["snapshot_sha256"],
-                "candidate_name":candidate_name,
-                "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
-                "index_inputs_manifest_sha256":inputs["manifest_sha256"]}
-            return candidate, inputs, record
+            return freeze_build_for_notebook(item, data_root=DATA_ROOT,
+                official_links=OFFICIAL_LINKS, tokenizer=TOKENIZER,
+                golden_report=GOLDEN, work_dir=WORK_DIR,
+                audit_size=PIPELINE_CONFIG["audit_size"])
 
         if FREEZE_MODE == "worker":
             if type(FREEZE_TEAM_SIZE) is not int or FREEZE_TEAM_SIZE < 1:
@@ -528,6 +471,7 @@ def write_data_notebooks():
             records = verify_freeze_workers(DATA_ROOT, freeze_refs,
                 batch_signature=freeze_signature, code_sha256=freeze_code_sha,
                 team_size=FREEZE_TEAM_SIZE)
+            COVERAGE = audit_freeze_batch(DATA_ROOT, freeze_refs, records, work_dir=WORK_DIR)
             for item, record in zip(ACTIVE_BUILDS, records):
                 candidate, inputs = record["candidate"], record["inputs"]
                 handoff = publish_data_handoff(DATA_ROOT, item["build_run"], candidate, inputs)
@@ -537,34 +481,44 @@ def write_data_notebooks():
                     "index_inputs_manifest_sha256":record["index_inputs_manifest_sha256"]})
                 HANDOFFS.append(handoff)
             BATCH["freeze_state"] = "COMPLETE"
+            BATCH["coverage_report_sha256"] = COVERAGE["report_sha256"]
             atomic_json(batch_path, BATCH)
-            print(json.dumps({"state":"BATCH_FROZEN", "builds":len(HANDOFFS),
+            print(json.dumps({**COVERAGE, "state":"BATCH_FROZEN", "builds":len(HANDOFFS),
                 "documents":sum(item["documents"] for item in HANDOFFS),
                 "children":sum(item["children"] for item in HANDOFFS),
                 "lineage_state":read_json(DATA_ROOT / "candidate_lineage.json")["state"],
                 "lineage_candidates":len(read_json(DATA_ROOT / "candidate_lineage.json")["sources"])},
                 ensure_ascii=False, indent=2))
             print("Coordinator đã xác minh checkpoint của mọi worker và công bố batch. Tiếp theo chạy notebook 04.")
+            print("Coverage report:", DATA_ROOT / "reports/freeze_batch_coverage.json")
         else:
             for index, item in enumerate(ACTIVE_BUILDS, 1):
                 candidate, inputs, record = freeze_one(item)
+                verified = verify_freeze_record(DATA_ROOT, item["build_run"],
+                    {"snapshot_sha256":item["build"]["snapshot_sha256"]}, record, code_fingerprint())
                 HANDOFF = publish_data_handoff(DATA_ROOT, item["build_run"], candidate, inputs)
                 item["batch_item"].update({"state":"FROZEN", "candidate_name":record["candidate_name"],
                     "candidate_manifest_sha256":record["candidate_manifest_sha256"],
                     "index_inputs_manifest_sha256":record["index_inputs_manifest_sha256"]})
                 atomic_json(batch_path, BATCH)
                 HANDOFFS.append(HANDOFF)
+                AUDIT_RECORDS.append(verified)
                 print(f"Freeze {index}/{len(ACTIVE_BUILDS)}: {item['build_run']} | documents="
                       f"{candidate['counts']['documents']:,} | children={candidate['counts']['children']:,}")
+            audit_refs = [{"build_run":item["build_run"], "snapshot_sha256":item["build"]["snapshot_sha256"]}
+                          for item in ACTIVE_BUILDS]
+            COVERAGE = audit_freeze_batch(DATA_ROOT, audit_refs, AUDIT_RECORDS, work_dir=WORK_DIR)
             BATCH["freeze_state"] = "COMPLETE"
+            BATCH["coverage_report_sha256"] = COVERAGE["report_sha256"]
             atomic_json(batch_path, BATCH)
-            print(json.dumps({"state":"BATCH_FROZEN", "builds":len(HANDOFFS),
+            print(json.dumps({**COVERAGE, "state":"BATCH_FROZEN", "builds":len(HANDOFFS),
                 "documents":sum(item["documents"] for item in HANDOFFS),
                 "children":sum(item["children"] for item in HANDOFFS),
                 "lineage_state":read_json(DATA_ROOT / "candidate_lineage.json")["state"],
                 "lineage_candidates":len(read_json(DATA_ROOT / "candidate_lineage.json")["sources"])},
                 ensure_ascii=False, indent=2))
             print("Model input parts và checkpoints đã lưu riêng trong từng build. Tiếp theo chạy notebook 04.")
+            print("Coverage report:", DATA_ROOT / "reports/freeze_batch_coverage.json")
         '''),md('''
         ### Chạy song song trên 3 tài khoản
 

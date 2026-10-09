@@ -78,9 +78,16 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    03 tự nối candidate mới vào `data/candidate_lineage.json`; không cần chép hash.
    Nếu build `data-v2` được tạo bởi revision cũ, 03 vẫn kiểm tra lại schema,
    checksum artifacts, membership ID/URL, tokenizer/chunk policy và golden hiện tại;
-   candidate ghi rõ `code_provenance.status=LEGACY_DATA_V2_VALIDATED`. Không cần chạy
+   validation candidate ghi rõ `code_provenance.status=LEGACY_DATA_V2_VALIDATED`. Không cần chạy
    lại 02 chỉ vì producer code hash khác; các gate review/retrieval trước khi promotion
    vẫn giữ nguyên.
+   Candidate đã có index-input checkpoint được giữ nguyên; kết quả kiểm chứng bằng
+   code hiện tại được lưu thành validation candidate riêng. Coordinator kiểm tra
+   checksum các file processed/index-input thực tế trước khi công bố batch.
+   Kết quả cuối có `input_records`, `unique_official_ids`, số ID trùng giữa các build,
+   `counts.documents`, `counts.failures` và `unaccounted_input_records` (phải bằng 0).
+   Báo cáo nằm ở `data/reports/freeze_batch_coverage.json`; coverage của batch đã chọn
+   không phải xác nhận toàn bộ corpus BTC đã crawl hoặc xác nhận chất lượng relevance.
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
 2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
    candidate, notebook tự ghép chúng, kiểm tra xung đột và chuyển active pointer

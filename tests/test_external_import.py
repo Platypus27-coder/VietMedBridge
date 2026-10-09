@@ -122,6 +122,107 @@ def test_legacy_data_v2_build_can_freeze_after_current_integrity_and_golden(tmp_
     assert candidate["code_provenance"]["producer_matches_freeze_code"] is False
 
 
+def test_notebook_freeze_preserves_legacy_candidate_and_existing_index_checkpoint(tmp_path,external):
+    from copy import deepcopy
+    from scripts.freeze_workers import freeze_build_for_notebook, verify_freeze_record
+
+    build = run_import(tmp_path, external)
+    root = tmp_path / "processed/team-100k-data-v1"
+    health = health_report(root, official_links=external[1], work_dir=tmp_path / "work", audit_size=2)
+    golden = {"passed": True, "code_sha256": code_fingerprint(), "tokenizer": SPEC, "chunking": asdict(CONFIG)}
+    current = freeze_candidate(root, health, golden_report=golden)
+    legacy = deepcopy(current)
+    legacy["golden"]["code_sha256"] = "old-validator-code"
+    legacy.pop("candidate_manifest_sha256")
+    legacy["candidate_manifest_sha256"] = digest_json(legacy)
+    legacy_name = f"candidate-{legacy['candidate_manifest_sha256'][:16]}.json"
+    atomic_json(root / legacy_name, legacy)
+    original_inputs = prepare_index_inputs(root, legacy_name, CharacterTokenizer(),
+                                          work_dir=tmp_path / "work", part_size=4096)
+    original_bytes = (root / "index_inputs/units.json").read_bytes()
+    (root / f"candidate-{current['candidate_manifest_sha256'][:16]}.json").unlink()
+    item = {"build_dir": root, "build": build, "config": read_json(root / "config.json"),
+            "batch_item": {"candidate_name": f"candidate-{current['candidate_manifest_sha256'][:16]}.json"}}
+    candidate, inputs, record = freeze_build_for_notebook(item, data_root=tmp_path,
+        official_links=external[1], tokenizer=CharacterTokenizer(), golden_report=golden,
+        work_dir=tmp_path / "work", audit_size=2)
+    assert candidate["candidate_manifest_sha256"] == legacy["candidate_manifest_sha256"]
+    assert inputs == original_inputs
+    assert (root / "index_inputs/units.json").read_bytes() == original_bytes
+    assert record["validation_candidate_manifest_sha256"] != legacy["candidate_manifest_sha256"]
+    verified = verify_freeze_record(tmp_path, "team-100k-data-v1",
+        {"snapshot_sha256": build["snapshot_sha256"]}, record, code_fingerprint())
+    assert verified["validation"]["golden"]["code_sha256"] == code_fingerprint()
+    _, resumed_inputs, resumed_record = freeze_build_for_notebook(item, data_root=tmp_path,
+        official_links=external[1], tokenizer=CharacterTokenizer(), golden_report=golden,
+        work_dir=tmp_path / "work", audit_size=2)
+    assert resumed_inputs == original_inputs
+    assert resumed_record == record
+
+
+def test_generated_notebook_seven_builds_three_workers_coordinator_and_resume(tmp_path,external):
+    import json
+    from pathlib import Path
+    from scripts.freeze_workers import (
+        freeze_batch_signature, freeze_worker_manifest_path, partition_freeze_builds,
+        verify_freeze_workers, write_freeze_worker_manifest, freeze_build_for_notebook,
+        audit_freeze_batch, collect_completed_build_refs, verify_freeze_record,
+    )
+
+    active, refs = [], []
+    for index in range(7):
+        run = f"batch-{index}"
+        build = run_import(tmp_path, external, run_name=run)
+        root = tmp_path / "processed" / run
+        ref = {"build_run": run, "snapshot_sha256": build["snapshot_sha256"],
+               "source_path": f"/incoming/archive-{index}", "state": "COMPLETE"}
+        refs.append(ref)
+        active.append({"build_run": run, "build_dir": root, "build": build,
+                       "config": read_json(root / "config.json"), "batch_item": ref})
+    project = Path(__file__).resolve().parents[1]
+    notebook = json.loads((project / "notebooks/03_colab_validate_and_freeze.ipynb").read_text(encoding="utf-8"))
+    source = [cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code"][-1]
+    source = "".join(source)
+    golden = {"passed": True, "code_sha256": code_fingerprint(), "tokenizer": SPEC, "chunking": asdict(CONFIG)}
+    scope = dict(Path=Path, json=json, read_json=read_json, atomic_json=atomic_json,
+        digest_json=digest_json, code_fingerprint=code_fingerprint,
+        freeze_batch_signature=freeze_batch_signature, freeze_worker_manifest_path=freeze_worker_manifest_path,
+        partition_freeze_builds=partition_freeze_builds, verify_freeze_workers=verify_freeze_workers,
+        write_freeze_worker_manifest=write_freeze_worker_manifest, freeze_build_for_notebook=freeze_build_for_notebook,
+        audit_freeze_batch=audit_freeze_batch, publish_data_handoff=publish_data_handoff,
+        verify_freeze_record=verify_freeze_record,
+        ACTIVE_BUILDS=active, DATA_ROOT=tmp_path, OFFICIAL_LINKS=external[1], TOKENIZER=CharacterTokenizer(),
+        GOLDEN=golden, WORK_DIR=tmp_path / "work", PIPELINE_CONFIG={"audit_size": 2},
+        FREEZE_MODE="worker", FREEZE_TEAM_SIZE=3, BATCH={"builds": refs, "state": "COMPLETE"},
+        batch_path=tmp_path / "active_data_batch.json")
+    for worker_id in range(3):
+        scope["FREEZE_WORKER_ID"] = worker_id
+        exec(source, scope)
+    assert not (tmp_path / "active_data_candidate.json").exists()
+    # Resume a completed worker using the same frozen candidates/input parts.
+    before = [(item["build_dir"] / "index_inputs/units.json").read_bytes() for item in active]
+    scope["FREEZE_WORKER_ID"] = 0
+    exec(source, scope)
+    assert before == [(item["build_dir"] / "index_inputs/units.json").read_bytes() for item in active]
+    scope["FREEZE_MODE"] = "coordinator"
+    exec(source, scope)
+    report = read_json(tmp_path / "reports/freeze_batch_coverage.json")
+    assert report["archives"] == 7
+    assert report["input_records"] == 28
+    assert report["counts"]["documents"] == report["counts"]["failures"] == 14
+    assert report["unique_official_ids"] == 4
+    assert report["unaccounted_input_records"] == 0
+    assert len(read_json(tmp_path / "candidate_lineage.json")["sources"]) == 7
+    assert len(collect_completed_build_refs([r["source_path"] for r in refs],
+        read_json(tmp_path / "active_data_batch.json"), [])) == 7
+    exec(source, scope)
+    assert len(read_json(tmp_path / "candidate_lineage.json")["sources"]) == 7
+    scope["FREEZE_MODE"] = "serial"
+    exec(source, scope)
+    assert read_json(tmp_path / "reports/freeze_batch_coverage.json")["unaccounted_input_records"] == 0
+    assert len(read_json(tmp_path / "candidate_lineage.json")["sources"]) == 7
+
+
 def test_wrong_snapshot_and_corrupted_source_rejected(tmp_path,external):
     source,links,_ = external
     descriptor = source / MEMBERS["dataset"]
