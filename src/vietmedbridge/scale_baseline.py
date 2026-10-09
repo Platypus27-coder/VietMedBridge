@@ -10,7 +10,8 @@ from tqdm.auto import tqdm
 from .artifacts import atomic_json, digest_json, read_json, sha256_file
 from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .dataset import parquet_path
-from .disk_catalog import lexical_field, prepare_disk_catalog
+from .disk_catalog import lexical_field
+from .catalog_storage import prepare_disk_catalog
 from .embeddings import embed_units, embedding_matrix
 from .medical_lexical import MedicalAnalyzer
 from .qwen_models import review_model_registry

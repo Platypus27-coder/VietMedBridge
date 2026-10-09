@@ -109,7 +109,7 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v10-resume-cpu-preparation")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v11-catalog-recovery")),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
@@ -133,8 +133,12 @@ def main():
         phân công corpus embeddings; coordinator chạy query LLM và reranking.
         MAX_NEW_* giới hạn mỗi phiên, mặc định None chạy hết.
         Ngắt runtime thì mở cùng notebook và Run all để resume vector/query.
-        Catalog CPU xuất bản atomic; nếu ngắt trước hoàn tất catalog thì dựng
-        lại riêng bước CPU đó. Mỗi worker ID chỉ có một runtime đang ghi;
+        Catalog CPU giữ bản local đã dựng xong, lưu Drive thành các phần gzip
+        64 MiB có checksum trước khi ghi COMPLETE. Nếu mất file catalog cũ,
+        tự khôi phục từ bản local/các phần hợp lệ; thiếu cả hai thì dựng lại
+        riêng catalog từ frozen data. Retry upload cùng runtime dùng lại SQLite
+        local và các phần đã lưu. Nếu runtime mất trước khi dựng xong SQLite,
+        bước dựng catalog vẫn phải chạy lại. Mỗi worker ID chỉ có một runtime đang ghi;
         chỉ một coordinator công bố manifest và submission.
         Glossary tùy chọn data/labels/medical_aliases.json cần reviewed=true,
         entries=[{aliases:[...], source:"..."}]; không có thì alias field rỗng,

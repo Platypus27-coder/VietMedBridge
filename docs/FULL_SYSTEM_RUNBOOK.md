@@ -9,9 +9,19 @@ không nâng code lock xử lý dữ liệu 02–03 đang chạy dở.
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
 Giữ đúng `DATA_ROOT`, chạy Bootstrap ở runtime mới. Lượt chuẩn bị chọn CPU,
 giữ `PREPARE_ONLY=True`, `TEAM_WORKER_ID=None`. Workflow API
-`full-master-plan-strong-v10-resume-cpu-preparation` nâng code lock một lần. Không cần
+`full-master-plan-strong-v11-catalog-recovery` nâng code lock một lần. Không cần
 chạy lại 02–03 cho candidate `ce6987985fb015ca` đã hoàn tất.
 Chờ `CPU_PREPARATION_COMPLETE` rồi dùng GPU với `PREPARE_ONLY=False`.
+
+Catalog hiện được dựng xong trên ổ local trước, rồi lưu lên Drive thành các phần
+gzip tối đa 64 MiB dữ liệu gốc mỗi phần. `catalog.json` chỉ công bố COMPLETE sau
+khi tất cả phần đã được kiểm checksum. Các catalog SQLite nguyên file cũ vẫn
+được nhận nếu hợp lệ. Nếu manifest cũ còn nhưng SQLite mất, hệ thống thử bản
+local đã xác minh hoặc các phần đã lưu; thiếu cả hai thì tự dựng lại riêng
+catalog từ frozen data, không chạy lại crawl/chunk/model inputs. Lỗi upload giữ
+SQLite local và các phần đã lưu để retry trong cùng runtime. Nếu runtime mất
+trước khi SQLite dựng xong hoặc trước khi lưu đủ phần, chưa có checkpoint đủ để
+khôi phục toàn catalog ở runtime mới. `catalog_progress.json` ghi tiến độ lưu.
 
 Trong cell cấu hình:
 

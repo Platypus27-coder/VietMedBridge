@@ -12,7 +12,7 @@ from .artifacts import atomic_json, digest_json, read_json, sha256_file, verify_
 from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .content_embeddings import ContentVectorParts, checked, content_embeddings, seal
 from .dataset import parquet_path
-from .disk_catalog import prepare_disk_catalog
+from .catalog_storage import prepare_disk_catalog
 from .disk_full import AdaptiveDiskCatalog, DiskStrongIndex
 from .embeddings import embed_units, embedding_matrix, unit_signature
 from .full_plan_runtime import calibration_context
