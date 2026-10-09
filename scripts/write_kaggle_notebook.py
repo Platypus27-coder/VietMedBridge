@@ -18,16 +18,21 @@ def main():
            Kaggle Settings → API → Legacy API Credentials. Bật quyền notebook đọc
            Secret. Username tự lấy từ Secret của người chạy; không gửi token vào chat.
         2. **Kaggle:** import notebook này, giữ Private, Add Input dataset vừa xuất, bật Internet
-           và GPU **T4 x2**, rồi **Save Version → Save & Run All**. Không cần điền
-           username, DATA_ROOT hoặc worker ID. Mỗi GPU có một process riêng.
+           và GPU **T4 x2**, rồi **Save Version → Save & Run All**. Chạy hai tài khoản:
+           cùng `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`; tài khoản thứ nhất đặt
+           `KAGGLE_ACCOUNT_ID=0`, tài khoản thứ hai đặt `KAGGLE_ACCOUNT_ID=1`.
+           Notebook tự gán worker toàn nhóm: 0–1 và 2–3. Hai bên chạy cùng lúc.
         3. **Colab CPU:** sau khi Kaggle version hoàn tất và có Outputs, điền
-           `KAGGLE_NOTEBOOK_OUTPUT="username/notebook-slug"`, Run all. Notebook
+           `KAGGLE_NOTEBOOK_OUTPUT="owner-a/notebook-a, owner-b/notebook-b"`, Run all. Notebook
            kiểm checksum, model, source text và từng vector row trước khi nhập Drive.
            Sau đó mới tiếp tục notebook 04 chính trên Colab GPU.
 
         Người nào cũng chạy được bằng Secret tài khoản của mình và quyền đọc Drive.
         Nếu dùng private dataset/output của người khác, chủ sở hữu cần cấp quyền
         truy cập trên Kaggle. Không chia sẻ API key cho nhau.
+        Xuất **một dataset chung** rồi cấp quyền đọc cho tài khoản thứ hai; cả hai
+        Add Input đúng dataset đó. Gói khóa số tài khoản/GPU để không chia lệch.
+        Chạy một tài khoản thì đặt `KAGGLE_ACCOUNTS=1` trước khi xuất gói.
 
         Phiên Kaggle tự dừng trước mốc 10 giờ tính từ cell đầu hoặc khi gần 18 GB
         output. Mỗi part hoàn tất có receipt/checksum. Đây là **checkpoint một phần**,
@@ -52,7 +57,10 @@ def main():
 
         SESSION_STARTED = globals().get("SESSION_STARTED", time.time())
         DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")
-        KAGGLE_NOTEBOOK_OUTPUT = ""  # Chỉ điền khi nhập Outputs về Drive: username/notebook-slug
+        KAGGLE_NOTEBOOK_OUTPUT = ""  # Nhập về Drive: owner-a/notebook-a, owner-b/notebook-b
+        KAGGLE_ACCOUNTS = 2  # Giống nhau trên cả hai tài khoản và lúc xuất input
+        KAGGLE_ACCOUNT_ID = 0  # Tài khoản thứ nhất: 0; tài khoản thứ hai: 1
+        GPUS_PER_ACCOUNT = 2  # Chọn T4 x2 ở cả hai tài khoản
         SESSION_HOURS = 10.0
         REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
         IS_KAGGLE = Path("/kaggle/input").is_dir()
@@ -64,6 +72,10 @@ def main():
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         if not (3, 11) <= sys.version_info[:2] < (3, 14):
             raise RuntimeError("Cần Python 3.11–3.13.")
+        if (type(KAGGLE_ACCOUNTS) is not int or KAGGLE_ACCOUNTS < 1
+            or type(KAGGLE_ACCOUNT_ID) is not int or not 0 <= KAGGLE_ACCOUNT_ID < KAGGLE_ACCOUNTS
+            or type(GPUS_PER_ACCOUNT) is not int or GPUS_PER_ACCOUNT < 1):
+            raise ValueError("Kiểm tra KAGGLE_ACCOUNTS, KAGGLE_ACCOUNT_ID và GPUS_PER_ACCOUNT.")
 
         if IS_KAGGLE:
             available = {}
@@ -79,6 +91,8 @@ def main():
             JOB_HEADER = json.loads((JOB_DIR / "job.json").read_text())
             if JOB_HEADER.get("repo_url") != REPO_URL or not re.fullmatch(r"[0-9a-f]{40}", JOB_HEADER.get("code_commit", "")):
                 raise ValueError("Job chưa khóa đúng repo/commit.")
+            if JOB_HEADER.get("team") != {"accounts": KAGGLE_ACCOUNTS, "gpu_count": GPUS_PER_ACCOUNT}:
+                raise ValueError("Số tài khoản/GPU không khớp input chung. Xuất gói bằng notebook mới trên Colab CPU với cùng cấu hình team.")
             reference = JOB_HEADER["code_commit"]
         else:
             from google.colab import drive
@@ -121,8 +135,9 @@ def main():
         code('''
         if IS_KAGGLE:
             RESULT = launch_kaggle(JOB_DIR, CHECKOUT, output=Path("/kaggle/working/vmb_checkpoints"),
-                                  scratch=WORK_DIR / "data", session_started=SESSION_STARTED, hours=SESSION_HOURS)
-            print(json.dumps({k: RESULT[k] for k in ("state", "processes", "updated_at", "scope")}
+                                  scratch=WORK_DIR / "data", session_started=SESSION_STARTED, hours=SESSION_HOURS,
+                                  accounts=KAGGLE_ACCOUNTS, account_id=KAGGLE_ACCOUNT_ID, gpu_count=GPUS_PER_ACCOUNT)
+            print(json.dumps({k: RESULT[k] for k in ("state", "processes", "assignment", "updated_at", "scope")}
                              | {"completed_parts": len(RESULT["receipts"])}, ensure_ascii=False, indent=2))
             print("Chờ Save & Run All hoàn tất để Outputs được lưu. Sau đó nhập Outputs về Drive bằng Colab CPU.")
         else:
@@ -137,21 +152,36 @@ def main():
             os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"] = owner, api_key
             del credentials, api_key
             if KAGGLE_NOTEBOOK_OUTPUT:
-                if not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+(?:/[0-9]+)?", KAGGLE_NOTEBOOK_OUTPUT):
-                    raise ValueError("Điền username/notebook-slug, hoặc username/notebook-slug/version.")
-                download = WORK_DIR / "outputs" / digest_json(KAGGLE_NOTEBOOK_OUTPUT)[:16]
-                download.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["kaggle", "kernels", "output", KAGGLE_NOTEBOOK_OUTPUT, "-p", str(download), "-o"], check=True)
-                manifests = list(download.glob("**/result-manifest.json"))
-                if len(manifests) != 1:
-                    raise RuntimeError("Outputs phải có đúng một result-manifest.json; kiểm tra Kaggle version đã lưu thành công.")
-                print(json.dumps(install_result(manifests[0].parent, DATA_ROOT, CHECKOUT), ensure_ascii=False, indent=2))
+                handles = [h.strip() for h in KAGGLE_NOTEBOOK_OUTPUT.split(",")]
+                if len(set(handles)) != len(handles) or any(not re.fullmatch(
+                    r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+(?:/[0-9]+)?", handle) for handle in handles):
+                    raise ValueError("Điền các username/notebook-slug khác nhau, cách nhau bởi dấu phẩy; có thể thêm /version.")
+                outputs = []
+                for handle in handles:
+                    download = WORK_DIR / "outputs" / digest_json(handle)[:16]
+                    download.mkdir(parents=True, exist_ok=True)
+                    subprocess.run(["kaggle", "kernels", "output", handle, "-p", str(download), "-o"], check=True)
+                    manifests = list(download.glob("**/result-manifest.json"))
+                    if len(manifests) != 1:
+                        raise RuntimeError("Mỗi Outputs phải có đúng một result-manifest.json; kiểm tra version đã lưu thành công.")
+                    outputs.append(manifests[0].parent)
+                if len({read_json(path / "job.json")["manifest_sha256"] for path in outputs}) != 1:
+                    raise ValueError("Hai Outputs thuộc hai input job khác nhau. Chạy cùng dataset chung.")
+                account_ids = [read_json(path / "result-manifest.json")["assignment"]["account_id"]
+                               for path in outputs if read_json(path / "result-manifest.json").get("assignment") is not None]
+                if len(set(account_ids)) != len(account_ids):
+                    raise ValueError("Các Outputs trùng KAGGLE_ACCOUNT_ID. Chọn một version mới nhất cho mỗi tài khoản; hai tài khoản phải là 0 và 1.")
+                for handle, path in zip(handles, outputs, strict=True):
+                    print("Nhập Outputs:", handle)
+                    print(json.dumps(install_result(path, DATA_ROOT, CHECKOUT), ensure_ascii=False, indent=2))
                 print("Đã nhập checkpoint. Các worker Colab 04 dùng lại parts này; dừng mọi worker Kaggle trước khi chia lại TEAM_SIZE.")
             else:
                 runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
                 runtime = checked(read_json(runtime_lock))["runtime"] if runtime_lock.exists() else embedding_runtime()
-                destination = WORK_DIR / ("inputs-" + digest_json([CODE_COMMIT, runtime, read_json(DATA_ROOT / "active_data_candidate.json")])[:16])
-                job = export_kaggle_job(DATA_ROOT, CHECKOUT, destination, code_commit=CODE_COMMIT, runtime=runtime)
+                destination = WORK_DIR / ("inputs-" + digest_json([CODE_COMMIT, runtime, KAGGLE_ACCOUNTS, GPUS_PER_ACCOUNT,
+                                            read_json(DATA_ROOT / "active_data_candidate.json")])[:16])
+                job = export_kaggle_job(DATA_ROOT, CHECKOUT, destination, code_commit=CODE_COMMIT, runtime=runtime,
+                                        accounts=KAGGLE_ACCOUNTS, gpu_count=GPUS_PER_ACCOUNT)
                 print("Input files:", len(job["files"]), "| GB:", round(sum(f["bytes"] for f in job["files"])/1e9, 2),
                       "| seed blocks:", len(job["seeds"]))
                 import kagglehub
@@ -176,6 +206,8 @@ def main():
                     raise ValueError("Uploaded Kaggle job differs; do not run it.")
                 atomic_json(pointer, {"dataset_handle": handle, "job": job["manifest_sha256"], "code_commit": CODE_COMMIT})
                 print("Private dataset đã kiểm:", "https://www.kaggle.com/datasets/" + handle)
+                print("Cấu hình chung:", job["team"], "| Cấp quyền đọc dataset này cho thành viên chạy tài khoản thứ hai.")
+                print("Tài khoản thứ nhất KAGGLE_ACCOUNT_ID=0; tài khoản thứ hai KAGGLE_ACCOUNT_ID=1.")
                 print("Kaggle: import notebook này → Add Input dataset trên → Internet ON → T4 x2 → Save Version / Save & Run All.")
         '''),
     ])

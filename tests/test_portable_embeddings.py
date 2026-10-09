@@ -12,11 +12,11 @@ import pytest
 
 from test_external_import import external  # noqa: F401
 from test_scale_baseline import frozen  # noqa: F401
-from vietmedbridge.artifacts import atomic_json, read_json, sha256_file
+from vietmedbridge.artifacts import atomic_json, digest_json, read_json, sha256_file
 from vietmedbridge.content_embeddings import ContentVectorParts, content_embeddings, seal
 from vietmedbridge.portable_embeddings import (
     MODEL_FILES, carry_forward, export_kaggle_job, finalize_result, hydrate_job,
-    install_result, relative_path, resources_relative, run_worker, runtime_install_commands,
+    install_result, kaggle_assignment, relative_path, resources_relative, run_worker, runtime_install_commands,
     validate_job,
 )
 from vietmedbridge.qwen_models import QUERY_INSTRUCTION
@@ -243,3 +243,131 @@ def test_hung_gpu_worker_is_stopped_before_save_deadline(tmp_path, job, monkeypa
         scratch=tmp_path / "scratch", session_started=time.time(), hours=1)
     assert result["processes"] == [-15, -15]
     assert result["state"] == "WORKER_FAILED_WITH_CHECKPOINTS"
+
+
+def test_two_account_partition_covers_all_937_parts_once():
+    plans = [kaggle_assignment(accounts=2, account_id=i, gpu_count=2) for i in range(2)]
+    assert [p["worker_ids"] for p in plans] == [[0, 1], [2, 3]]
+    parts = [{i for i in range(937) if i % p["workers"] in p["worker_ids"]} for p in plans]
+    assert not parts[0] & parts[1]
+    assert parts[0] | parts[1] == set(range(937))
+    assert [len(p) for p in parts] == [469, 468]
+
+
+@pytest.mark.parametrize("values", [
+    {"accounts": 2, "account_id": 2, "gpu_count": 2},
+    {"accounts": 2, "account_id": -1, "gpu_count": 2},
+    {"accounts": 0, "account_id": 0, "gpu_count": 2},
+    {"accounts": True, "account_id": 0, "gpu_count": 2},
+])
+def test_invalid_account_assignment_rejected(values):
+    with pytest.raises(ValueError, match="assignment"):
+        kaggle_assignment(**values)
+
+
+@pytest.mark.parametrize("account_id", [0, 1])
+def test_parallel_launcher_maps_global_workers_to_local_cuda_devices(tmp_path, job, monkeypatch, account_id):
+    from vietmedbridge import portable_embeddings as runtime
+    shared = seal({k: v for k, v in job.items() if k != "manifest_sha256"} | {"team": {"accounts": 2, "gpu_count": 2}})
+    atomic_json(tmp_path / "bundle/job.json", shared)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 2)))
+    monkeypatch.setattr(runtime, "embedding_runtime", lambda: RUNTIME)
+    launched = []
+    class Process:
+        def __init__(self, command, env):
+            self.command, self.env = command, env
+            launched.append(self)
+        def wait(self, **kwargs):
+            assert len(launched) == 2
+            return 0
+    monkeypatch.setattr(runtime.subprocess, "Popen", Process)
+    result = runtime.launch_kaggle(tmp_path / "bundle", REPO, output=tmp_path / "parallel-launch",
+        scratch=tmp_path / "scratch", session_started=time.time(), hours=1,
+        accounts=2, account_id=account_id, gpu_count=2)
+    assert [p.env["CUDA_VISIBLE_DEVICES"] for p in launched] == ["0", "1"]
+    assert [int(p.command[8]) for p in launched] == [account_id * 2, account_id * 2 + 1]
+    assert all(p.command[9] == "4" for p in launched)
+    assert result["assignment"]["account_id"] == account_id
+    with pytest.raises(ValueError, match="another account/team"):
+        runtime.launch_kaggle(tmp_path / "bundle", REPO, output=tmp_path / "parallel-launch",
+            scratch=tmp_path / "scratch", session_started=time.time(), accounts=2,
+            account_id=1-account_id, gpu_count=2)
+
+
+@pytest.fixture
+def parallel_outputs(tmp_path):
+    """Synthetic frozen model inputs only; no document quality/GPU claim."""
+    from test_full_scale import inputs_at
+    build = tmp_path / "processed/synthetic-portable"
+    candidate = {"state": "FROZEN_CANDIDATE", "selected_range_complete": True}
+    candidate["candidate_manifest_sha256"] = digest_json(candidate)
+    units = inputs_at(build / "index_inputs", [f"source fixture {i}" for i in range(17)])
+    units = seal({k: v for k, v in units.items() if k != "manifest_sha256"}
+                 | {"candidate_manifest_sha256": candidate["candidate_manifest_sha256"]})
+    name = "candidate-" + candidate["candidate_manifest_sha256"][:16] + ".json"
+    atomic_json(build / name, candidate)
+    atomic_json(build / "index_inputs/units.json", units)
+    atomic_json(tmp_path / "active_data_candidate.json", {"build_run": build.name, "candidate_name": name,
+        "candidate_manifest_sha256": candidate["candidate_manifest_sha256"], "index_inputs_manifest_sha256": units["manifest_sha256"]})
+    atomic_json(tmp_path / "retrieval/cpu_preparation" / (candidate["candidate_manifest_sha256"][:16] + ".json"),
+        {"state": "CPU_PREPARATION_COMPLETE", "candidate_manifest_sha256": candidate["candidate_manifest_sha256"]})
+    shared = export_kaggle_job(tmp_path, REPO, tmp_path / "shared", code_commit="a" * 40,
+                              runtime=RUNTIME, accounts=2, gpu_count=2)
+    FakeEncoder.calls = 0
+    groups = []
+    for account_id in range(2):
+        scratch, output = tmp_path / f"account-{account_id}", tmp_path / f"output-{account_id}"
+        hydrate_job(tmp_path / "shared", scratch, REPO)
+        plan = kaggle_assignment(accounts=2, account_id=account_id, gpu_count=2)
+        atomic_json(output / "assignment.json", plan)
+        for worker_id in plan["worker_ids"]:
+            run_worker(tmp_path / "shared", scratch, output, REPO, worker_id=worker_id,
+                workers=4, deadline=time.time() + 60, encoder_factory=FakeEncoder)
+        result = finalize_result(output, shared)
+        groups.append({e["path"] for e in result["receipts"]})
+    assert not groups[0] & groups[1]
+    assert len(groups[0] | groups[1]) == 2 * len(units["parts"])
+    assert FakeEncoder.calls == 2 * units["input_count"]
+    return shared, build, units
+
+
+def test_two_account_outputs_merge_and_colab_uses_all_parts_without_encoding(tmp_path, parallel_outputs):
+    shared, build, units = parallel_outputs
+    partial = install_result(tmp_path / "output-0", tmp_path, REPO, update_lock=False)
+    assert not partial["corpus_embeddings_complete"]
+    complete = install_result(tmp_path / "output-1", tmp_path, REPO, update_lock=False)
+    assert complete["corpus_embeddings_complete"]
+    assert all(v["completed_parts"] == len(units["parts"]) for v in complete["coverage"].values())
+    assert all(v["input_rows"] == units["input_count"] for v in complete["coverage"].values())
+    before = FakeEncoder.calls
+    for family, spec in (("bge", "dense"), ("qwen", "second_dense")):
+        encoder = FakeEncoder(shared["config"][spec])
+        view = tmp_path / shared["resources"] / family
+        for worker_id in range(3):
+            content_embeddings(tmp_path, build / "index_inputs", units, encoder, view,
+                work_dir=tmp_path / "local", worker_id=worker_id, workers=3)
+        manifest = content_embeddings(tmp_path, build / "index_inputs", units, encoder, view,
+            work_dir=tmp_path / "local", encode_missing=False)
+        assert manifest["state"] == "COMPLETE"
+    assert FakeEncoder.calls == before
+
+
+def test_mislabeled_account_output_rejected_before_import(tmp_path, parallel_outputs):
+    shared, _, _ = parallel_outputs
+    output = tmp_path / "output-1"
+    atomic_json(output / "assignment.json", kaggle_assignment(accounts=2, account_id=0, gpu_count=2))
+    finalize_result(output, shared)
+    with pytest.raises(ValueError, match="outside this account"):
+        install_result(output, tmp_path, REPO, update_lock=False)
+    assert not (tmp_path / shared["resources"]).exists()
+
+
+@pytest.mark.parametrize("visible_gpus, message", [(1, "CUDA devices"), (2, "differs from the shared")])
+def test_wrong_gpu_or_team_settings_stop_before_input_copy(tmp_path, job, monkeypatch, visible_gpus, message):
+    from vietmedbridge import portable_embeddings as runtime
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: visible_gpus)))
+    monkeypatch.setattr(runtime, "embedding_runtime", lambda: RUNTIME)
+    with pytest.raises(ValueError, match=message):
+        runtime.launch_kaggle(tmp_path / "bundle", REPO, output=tmp_path / "wrong-output",
+            scratch=tmp_path / "not-copied", session_started=time.time(), accounts=2, account_id=0, gpu_count=2)
+    assert not (tmp_path / "not-copied").exists()

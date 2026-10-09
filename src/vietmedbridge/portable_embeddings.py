@@ -27,6 +27,15 @@ MODEL_FILES = ("retrieval_models.py", "qwen_models.py")
 REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
 
 
+def kaggle_assignment(*, accounts, account_id, gpu_count):
+    if (type(accounts) is not int or accounts < 1 or type(account_id) is not int
+        or not 0 <= account_id < accounts or type(gpu_count) is not int or gpu_count < 1):
+        raise ValueError("Invalid Kaggle account/GPU assignment.")
+    return {"accounts": accounts, "account_id": account_id, "gpu_count": gpu_count,
+            "workers": accounts * gpu_count,
+            "worker_ids": list(range(account_id * gpu_count, (account_id + 1) * gpu_count))}
+
+
 def relative_path(value):
     if (not isinstance(value, str) or not value or "\\" in value or ":" in value
         or PurePosixPath(value).is_absolute() or ".." in PurePosixPath(value).parts
@@ -96,10 +105,11 @@ def _copy_checked(source, destination, checksum):
         raise ValueError("Portable artifact copy changed.")
 
 
-def export_kaggle_job(data_root, checkout, destination, *, code_commit, runtime=None):
+def export_kaggle_job(data_root, checkout, destination, *, code_commit, runtime=None, accounts=1, gpu_count=2):
     """CPU only; never loads model weights or republishes the source corpus."""
     from types import SimpleNamespace
     from .full_scale_runtime import baseline_seed_sources
+    kaggle_assignment(accounts=accounts, account_id=0, gpu_count=gpu_count)
     root, checkout, target = Path(data_root), Path(checkout), Path(destination)
     build, candidate, inputs = load_handoff(root)
     ready = root / "retrieval/cpu_preparation" / (candidate["candidate_manifest_sha256"][:16] + ".json")
@@ -170,6 +180,7 @@ def export_kaggle_job(data_root, checkout, destination, *, code_commit, runtime=
     # Content blocks seed existing work; mappings are regenerated from those
     # blocks without GPU inference. Never bundle a view from another producer.
     job = seal({"schema": "portable-embeddings-v1", "repo_url": REPO_URL, "code_commit": code_commit,
+        "team": {"accounts": accounts, "gpu_count": gpu_count},
         "build_run": build.name, "candidate": candidate["candidate_manifest_sha256"],
         "inputs": inputs["manifest_sha256"], "input_count": inputs["input_count"], "config": config,
         "runtime": runtime, "resources": resources, "seeds": seeds,
@@ -199,6 +210,8 @@ def validate_job(job, checkout, *, runtime=None):
         raise ValueError("Missing model source identity.")
     if runtime is not None and runtime != job["runtime"]:
         raise ValueError("Kaggle/Colab torch, transformers or bitsandbytes differ; install the exported runtime lock.")
+    if job.get("team") is not None:
+        kaggle_assignment(accounts=job["team"]["accounts"], account_id=0, gpu_count=job["team"]["gpu_count"])
     seen, assets = set(), set()
     for entry in job["files"]:
         relative_path(entry["path"])
@@ -291,6 +304,7 @@ def finalize_result(output, job, *, processes=None):
     atomic_json(output / "job.json", job)
     result = seal({"schema": "portable-result-v1", "job": job["manifest_sha256"],
         "state": "WORKER_FAILED_WITH_CHECKPOINTS" if any(processes or []) else "CHECKPOINTED_PARTIAL", "receipts": receipts,
+        "assignment": read_json(output / "assignment.json") if (output / "assignment.json").exists() else None,
         "processes": processes or [], "updated_at": utc_now(),
         "scope": "Completed corpus embedding parts only; no query inference or submission"})
     atomic_json(output / "result-manifest.json", result)
@@ -319,6 +333,7 @@ def run_worker(job_dir, scratch, output, checkout, *, worker_id, workers, deadli
     job = validate_job(read_json(job_dir / "job.json"), checkout,
                        runtime=embedding_runtime() if encoder_factory is None else None)
     build, _, inputs = load_handoff(scratch)
+    local_workers = job.get("team", {}).get("gpu_count", workers)
     for family, spec_name in (("bge", "dense"), ("qwen", "second_dense")):
         if time.time() >= deadline:
             break
@@ -327,7 +342,7 @@ def run_worker(job_dir, scratch, output, checkout, *, worker_id, workers, deadli
                and (output / "receipts" / f"{family}-{p['start']:012d}.json").exists() for p in assigned):
             continue
         used = sum(p.stat().st_size for p in output.rglob("*") if p.is_file())
-        if used + workers * max(1_000_000, max((p["rows"] for p in assigned), default=0) *
+        if used + local_workers * max(1_000_000, max((p["rows"] for p in assigned), default=0) *
                                 ((1024 if family == "bge" else 4096) * 4 + 512)) > max_output_bytes:
             print(f"Worker {worker_id}: output budget reached before loading {family}.", flush=True)
             continue
@@ -342,7 +357,7 @@ def run_worker(job_dir, scratch, output, checkout, *, worker_id, workers, deadli
                 used = sum(p.stat().st_size for p in output.rglob("*") if p.is_file())
                 reserve = max(1_000_000, part["rows"] * encoder.dimension * 4 + part["rows"] * 512)
                 # Reserve for both processes that can pass this check concurrently.
-                return time.time() >= deadline or used + workers * reserve > max_output_bytes
+                return time.time() >= deadline or used + local_workers * reserve > max_output_bytes
             content_embeddings(scratch, build / "index_inputs", inputs, encoder,
                 scratch / job["resources"] / family, work_dir=scratch / f"work-{worker_id}",
                 worker_id=worker_id, workers=workers,
@@ -352,22 +367,41 @@ def run_worker(job_dir, scratch, output, checkout, *, worker_id, workers, deadli
             model.close()
 
 
-def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=10.0, gpu_count=None):
+def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=10.0, gpu_count=None,
+                  accounts=1, account_id=0):
     import torch
     if not 0 < hours <= 10:
         raise ValueError("Use at most 10 hours, leaving time for setup and a normally saved Kaggle version.")
     count = torch.cuda.device_count() if gpu_count is None else gpu_count
-    if not 1 <= count <= torch.cuda.device_count():
+    if type(count) is not int or not 1 <= count <= torch.cuda.device_count():
         raise ValueError("No requested CUDA devices available.")
+    if accounts != 1 and gpu_count is None:
+        raise ValueError("Parallel accounts must set the same explicit GPU count; select T4 x2 on each account.")
+    assignment = kaggle_assignment(accounts=accounts, account_id=account_id, gpu_count=count)
     output, scratch = Path(output), Path(scratch)
-    job = hydrate_job(job_dir, scratch, checkout)
-    validate_job(job, checkout, runtime=embedding_runtime())
+    assignment_path = output / "assignment.json"
+    if assignment_path.exists() and read_json(assignment_path) != assignment:
+        raise ValueError("Kaggle output belongs to another account/team assignment. Keep the saved assignment to resume.")
+    job = validate_job(read_json(Path(job_dir) / "job.json"), checkout, runtime=embedding_runtime())
+    if job.get("team") is not None and job["team"] != {"accounts": accounts, "gpu_count": count}:
+        raise ValueError("Kaggle account/GPU count differs from the shared exported job. Use its saved team settings.")
+    if accounts > 1 and job.get("team") is None:
+        raise ValueError("Parallel Kaggle accounts need a shared job exported by the updated notebook.")
+    hydrate_job(job_dir, scratch, checkout)
     output.mkdir(parents=True, exist_ok=True)
-    print(f"Kaggle: {count} GPU processes; deadline {hours:g} hours from first cell.", flush=True)
+    atomic_json(assignment_path, assignment)
+    print(f"Kaggle account {account_id}/{accounts}: local GPUs {count}, global workers {assignment['worker_ids']}"
+          f"/{assignment['workers']}; deadline {hours:g} hours from first cell.", flush=True)
     finalize_result(output, job)
     # Saved outputs attached as Add Input allow another bounded Kaggle session.
     for previous in sorted(Path("/kaggle/input").glob("**/result-manifest.json")):
-        if read_json(previous).get("job") == job["manifest_sha256"]:
+        previous_result = read_json(previous)
+        if previous_result.get("job") == job["manifest_sha256"]:
+            if previous_result.get("assignment") != assignment and not (
+                accounts == 1 and previous_result.get("assignment") is None
+            ):
+                print(f"Skipping saved Outputs for another account/assignment: {previous.parent.name}", flush=True)
+                continue
             install_result(previous.parent, scratch, checkout, update_lock=False)
             carry_forward(previous.parent, output)
     finalize_result(output, job)
@@ -383,14 +417,14 @@ def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=
                 process.kill()
                 process.wait(timeout=20)
     try:
-        for worker_id in range(count):
+        for device_id, worker_id in enumerate(assignment["worker_ids"]):
             env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = str(worker_id)
+            env["CUDA_VISIBLE_DEVICES"] = str(device_id)
             env["TOKENIZERS_PARALLELISM"] = "false"
             env["OMP_NUM_THREADS"] = "2"
             env["MKL_NUM_THREADS"] = "2"
             command = [sys.executable, "-m", "vietmedbridge.portable_embeddings", "worker", str(job_dir),
-                str(scratch), str(output), str(checkout), str(worker_id), str(count), str(session_started + hours * 3600)]
+                str(scratch), str(output), str(checkout), str(worker_id), str(assignment["workers"]), str(session_started + hours * 3600)]
             processes.append(subprocess.Popen(command, env=env))
         # Allow a part to drain, then stop hung workers in time to save Outputs.
         forced_finish = session_started + (hours + 0.75) * 3600
@@ -422,8 +456,18 @@ def install_result(result_dir, data_root, checkout, *, update_lock=True):
     if update_lock and runtime_path.exists() and checked(read_json(runtime_path))["runtime"] != job["runtime"]:
         raise ValueError("Existing embedding runtime differs; do not mix vector producers.")
     source_parts = {p["start"]: p for p in inputs["parts"]}
+    source_indexes = {p["start"]: i for i, p in enumerate(inputs["parts"])}
+    assignment = result.get("assignment")
+    if assignment is not None and assignment != kaggle_assignment(
+        accounts=assignment["accounts"], account_id=assignment["account_id"], gpu_count=assignment["gpu_count"]
+    ):
+        raise ValueError("Portable result account assignment differs.")
+    if assignment is not None and job.get("team") is not None and job["team"] != {
+        "accounts": assignment["accounts"], "gpu_count": assignment["gpu_count"]
+    }:
+        raise ValueError("Portable result team differs from its shared job.")
     seed_files = {f["path"]: f["sha256"] for f in job["files"]}
-    copies, seen, verified, validated_blocks = {}, set(), set(), {}
+    copies, seen, verified, validated_blocks, view_configs = {}, set(), set(), {}, {}
     def verify_once(path, checksum):
         pair = (Path(path).resolve(), checksum)
         if pair not in verified:
@@ -447,6 +491,14 @@ def install_result(result_dir, data_root, checkout, *, update_lock=True):
             raise ValueError("Invalid portable mapping filename.")
         identity = {"input_manifest_sha256": inputs["manifest_sha256"], "input_count": inputs["input_count"],
                     "encoder": encoder, "dimension": receipt["dimension"], "format": "content-reference-v1"}
+        if assignment is not None and (part is None or source_indexes[saved["start"]] % assignment["workers"] not in assignment["worker_ids"]):
+            raise ValueError("Portable receipt is outside this account's assigned input parts.")
+        if family in view_configs and view_configs[family] != identity:
+            raise ValueError("Portable receipts mix model producers.")
+        view_configs[family] = identity
+        existing_config = root / view / "config.json"
+        if existing_config.exists() and read_json(existing_config) != identity:
+            raise ValueError("Existing Colab vector view has another input/model producer.")
         if (part is None or saved["rows"] != part["rows"] or saved["input_sha256"] != part["sha256"]
             or saved["signature"] != digest_json(identity) or any(encoder.get(k) != v for k, v in spec.items())
             or any(encoder.get(k) != v for k, v in job["runtime"].items() if k != "bitsandbytes" or family == "qwen")
@@ -520,6 +572,8 @@ def install_result(result_dir, data_root, checkout, *, update_lock=True):
     for relative in sorted(copies, key=lambda p: (p.endswith(".done.json"), p)):
         path, checksum = copies[relative]
         _copy_checked(path, bound(root, relative), checksum)
+    for family, identity in view_configs.items():
+        atomic_json(root / job["resources"] / family / "config.json", identity)
     if update_lock:
         atomic_json(runtime_path, seal({"runtime": job["runtime"], "model_code": job["model_code"]}))
         lock_path = root / "retrieval_code_lock.json"
@@ -530,8 +584,49 @@ def install_result(result_dir, data_root, checkout, *, update_lock=True):
     report = {"state": "KAGGLE_CHECKPOINTS_IMPORTED", "parts": len(seen),
               "bge_parts": sum(f == "bge" for f, _ in seen), "qwen_parts": sum(f == "qwen" for f, _ in seen),
               "corpus_complete": False, "job": job["manifest_sha256"], "updated_at": utc_now()}
+    report["assignment"] = assignment
+    report["coverage"] = embedding_coverage(root, job)
+    report["corpus_embeddings_complete"] = all(value["complete"] for value in report["coverage"].values())
+    report["scope"] = "Corpus child embeddings only; coordinator query/document/search/reranker stages remain separate."
+    if assignment is not None:
+        atomic_json(root / "retrieval/portable_imports" / job["manifest_sha256"][:16]
+                    / f"account-{assignment['account_id']}.json", report)
     atomic_json(root / "retrieval/portable_imports" / (job["manifest_sha256"][:16] + ".json"), report)
     return report
+
+
+def embedding_coverage(data_root, job):
+    """Count verified native maps after sequential account imports; never a URL score."""
+    root = Path(data_root)
+    _, _, inputs = load_handoff(root)
+    coverage = {}
+    for family in ("bge", "qwen"):
+        view = root / job["resources"] / family
+        config_path = view / "config.json"
+        completed, rows = 0, 0
+        if config_path.exists():
+            config = read_json(config_path)
+            validate_encoder(job, family, config["encoder"], config["dimension"])
+            if config["input_manifest_sha256"] != inputs["manifest_sha256"] or config["input_count"] != inputs["input_count"]:
+                raise ValueError("Imported embedding view belongs to another corpus.")
+            signature = digest_json(config)
+            for source in inputs["parts"]:
+                marker = view / f"map-{source['start']:012d}.done.json"
+                if not marker.exists():
+                    continue
+                saved = checked(read_json(marker))
+                if any(saved.get(k) != v for k, v in {
+                    "signature": signature, "start": source["start"], "rows": source["rows"],
+                    "input_sha256": source["sha256"], "path": f"map-{source['start']:012d}.parquet"
+                }.items()):
+                    raise ValueError("Imported embedding coverage has a mismatched checkpoint.")
+                verify_file(view / saved["path"], saved["sha256"])
+                completed += 1
+                rows += source["rows"]
+        coverage[family] = {"completed_parts": completed, "total_parts": len(inputs["parts"]),
+                            "input_rows": rows, "total_input_rows": inputs["input_count"],
+                            "complete": completed == len(inputs["parts"])}
+    return coverage
 
 
 if __name__ == "__main__":

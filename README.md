@@ -47,6 +47,8 @@ cho corpus pilot. Không chạy các notebook
    [notebook chuyển embedding](notebooks/04_kaggle_embedding_worker.ipynb) và
    [hướng dẫn Colab → Kaggle → Colab](docs/KAGGLE_HANDOFF.md). Username lấy từ
    Secrets của người chạy; checkpoint nhập về dùng trực tiếp trong 04 chính.
+   Hai tài khoản cùng `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`, đặt
+   `KAGGLE_ACCOUNT_ID=0/1` để chia thành bốn worker; dùng cùng một input dataset.
 6. **05 — Tạo draft từ source, duyệt nhãn và supervised training:**
    [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
    Chọn GPU và Run all. Khi chưa có nhãn, Qwen 4B tạo draft train từ source;
