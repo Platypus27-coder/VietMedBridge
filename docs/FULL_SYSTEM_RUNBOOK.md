@@ -67,9 +67,11 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    mỗi acc cần `WORKER_ID` duy nhất, đúng một file tar ở `EXTERNAL_SOURCE`, cùng
    Drive root/path và `BUILD_RUN` để trống. Không chạy trùng archive hoặc chạy batch
    mode đồng thời. Sau khi mọi worker xong, 03 có thể chạy tuần tự hoặc song song.
-   Với ba acc, cả ba đặt `BATCH_SOURCE="workers"`, `FREEZE_MODE="worker"`,
-   `FREEZE_TEAM_SIZE=3`, cùng `WORKER_EXPECTED_SOURCE` trỏ tới thư mục `data/incoming`
-   chứa cả `.tar.parts` và batch tar; đặt `FREEZE_WORKER_ID` lần lượt 0/1/2.
+   Notebook 03 đã đặt sẵn `BATCH_SOURCE="workers"`, `FREEZE_MODE="worker"`,
+   `FREEZE_TEAM_SIZE=3`; `WORKER_EXPECTED_SOURCE` để trống tự chọn `DATA_ROOT/incoming`
+   chứa cả `.tar.parts` và batch tar. Ba acc chỉ chọn `FREEZE_WORKER_ID` 0/1/2 trên form.
+   Giữ `DATA_ROOT=/content/drive/MyDrive/VietMedBridge/data` nếu shortcut của mỗi acc
+   trỏ tới cùng thư mục Drive đã chạy 02; giữ `CODE_REVISION=None` để dùng code lock.
    Mỗi build được giao đúng một worker và có checkpoint riêng. Không chạy trùng ID.
    Khi cả ba manifest `freeze_workers/<batch-signature>/worker-N.json` báo COMPLETE,
    một acc chạy lại 03 với `FREEZE_MODE="coordinator"`; coordinator xác minh đủ

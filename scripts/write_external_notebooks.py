@@ -302,10 +302,11 @@ def write_data_notebooks():
         md('''
         # VietMedBridge — 03: Kiểm toàn bộ dữ liệu → freeze → chia input embedding
 
-        **Runtime CPU, Run all sau notebook 02.** Mặc định lấy build trong
-        active_data_batch.json. Nếu dùng nhiều acc để tăng tốc, chọn
-        `BATCH_SOURCE="workers"` và `FREEZE_MODE="worker"`; mỗi worker xử lý
-        một tập build riêng, checkpoint riêng, không ghi manifest tổng.
+        **Runtime CPU, chạy sau notebook 02.** Đã đặt sẵn chế độ 3 worker,
+        đọc mọi archive trong `DATA_ROOT/incoming`, gồm `.tar.parts` và các file tar.
+        Giữ Bootstrap với DATA_ROOT đã dùng ở 02 và CODE_REVISION=None.
+        Ba tài khoản chọn FREEZE_WORKER_ID lần lượt 0, 1, 2 trên form rồi Run all.
+        Mỗi worker xử lý một tập build riêng, checkpoint riêng, không ghi manifest tổng.
         Chỉ một acc chạy `FREEZE_MODE="coordinator"` sau khi các worker COMPLETE.
         Kiểm mọi official ID/URL, source hash, offsets, parent/child và bảo toàn IDs lỗi.
         Global dedup giữ toàn bộ aliases; input model giống hệt chỉ cần encode một lần.
@@ -315,6 +316,7 @@ def write_data_notebooks():
         Candidate freeze là mốc integrity, không tự duyệt relevance hoặc human QA.
         Source audit/golden thật vẫn cần team review; không tạo nhãn thi.
         '''),code(BOOT_FREEZE),md("## 1. Đọc build hoàn tất và chạy regression của chunker"),code('''
+        #@title Phân công worker — chọn FREEZE_WORKER_ID: 0, 1 hoặc 2
         from vietmedbridge.artifacts import read_json, atomic_json, digest_json, code_fingerprint
         from vietmedbridge.dataset import load_snapshot, parquet_path
         from vietmedbridge.chunks import ChunkConfig, load_bge_tokenizer
@@ -330,9 +332,9 @@ def write_data_notebooks():
         )
 
         BUILD_RUN_OVERRIDE = None  # dùng để chủ động đọc build cũ
-        BATCH_SOURCE = "active_batch" #@param ["active_batch", "workers"]
+        BATCH_SOURCE = "workers" #@param ["active_batch", "workers"]
         WORKER_EXPECTED_SOURCE = "" #@param {type:"string"}
-        FREEZE_MODE = "serial" #@param ["serial", "worker", "coordinator"]
+        FREEZE_MODE = "worker" #@param ["serial", "worker", "coordinator"]
         FREEZE_TEAM_SIZE = 3 #@param {type:"integer"}
         FREEZE_WORKER_ID = 0 #@param {type:"integer"}
         if FREEZE_MODE != "serial" and (BATCH_SOURCE != "workers" or BUILD_RUN_OVERRIDE):
