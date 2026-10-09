@@ -76,6 +76,11 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    candidate/index-input hashes rồi mới ghi manifest tổng và candidate lineage.
    Cách này tránh ba runtime cùng sửa `active_data_batch.json` hoặc active pointer.
    03 tự nối candidate mới vào `data/candidate_lineage.json`; không cần chép hash.
+   Nếu build `data-v2` được tạo bởi revision cũ, 03 vẫn kiểm tra lại schema,
+   checksum artifacts, membership ID/URL, tokenizer/chunk policy và golden hiện tại;
+   candidate ghi rõ `code_provenance.status=LEGACY_DATA_V2_VALIDATED`. Không cần chạy
+   lại 02 chỉ vì producer code hash khác; các gate review/retrieval trước khi promotion
+   vẫn giữ nguyên.
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
 2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
    candidate, notebook tự ghép chúng, kiểm tra xung đột và chuyển active pointer

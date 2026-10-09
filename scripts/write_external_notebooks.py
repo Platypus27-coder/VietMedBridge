@@ -13,7 +13,7 @@ BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
         '"pipeline_api": PIPELINE_API_VERSION, "workflow_api": DATA_WORKFLOW_API})'))
 BOOT_FREEZE = BOOT.replace(
     'external-extraction-import-v7-parallel-workers',
-    'external-extraction-import-v8-parallel-freeze',
+    'external-extraction-import-v9-legacy-build-freeze',
 )
 
 

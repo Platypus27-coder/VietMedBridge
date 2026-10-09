@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from vietmedbridge.archive_parts import restore_archive
-from vietmedbridge.artifacts import atomic_json, code_fingerprint, read_json, sha256_file
+from vietmedbridge.artifacts import atomic_json, code_fingerprint, digest_json, read_json, sha256_file
 from vietmedbridge.chunks import ChunkConfig
 from vietmedbridge.external_import import MEMBERS, find_external_source, import_external_corpus
 from vietmedbridge.health import freeze_candidate, health_report
@@ -96,6 +96,30 @@ def test_aliases_failures_exact_source_resume_and_freeze(tmp_path,external):
     with pytest.raises(ValueError,match="changed artifact"):
         prepare_index_inputs(root,f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json",
             CharacterTokenizer(),work_dir=tmp_path / "work",part_size=3)
+
+
+def test_legacy_data_v2_build_can_freeze_after_current_integrity_and_golden(tmp_path,external):
+    source,links,_ = external
+    import_external_corpus(source,links,tmp_path / "processed",CharacterTokenizer(),SPEC,
+        config=CONFIG,work_dir=tmp_path / "work",shard_size=2)
+    root = tmp_path / "processed/team-100k-data-v1"
+    config = read_json(root / "config.json")
+    config["code_sha256"] = "legacy-producer-code-fingerprint"
+    config_payload = {key:value for key,value in config.items() if key != "signature"}
+    config["signature"] = digest_json(config_payload)
+    atomic_json(root / "config.json",config)
+    build = read_json(root / "build.json")
+    build["signature"] = config["signature"]
+    build["snapshot_sha256"] = digest_json({"signature":build["signature"],"parts":build["parts"]})
+    atomic_json(root / "build.json",build)
+
+    health = health_report(root,official_links=links,work_dir=tmp_path / "work",audit_size=2)
+    golden = {"passed":True,"code_sha256":code_fingerprint(),"tokenizer":SPEC,"chunking":asdict(CONFIG)}
+    candidate = freeze_candidate(root,health,golden_report=golden)
+
+    assert candidate["state"] == "FROZEN_CANDIDATE"
+    assert candidate["code_provenance"]["status"] == "LEGACY_DATA_V2_VALIDATED"
+    assert candidate["code_provenance"]["producer_matches_freeze_code"] is False
 
 
 def test_wrong_snapshot_and_corrupted_source_rejected(tmp_path,external):
