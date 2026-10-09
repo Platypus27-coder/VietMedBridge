@@ -130,6 +130,36 @@ class FullTokenizer(Tokenizer):
         return 4 if pair else 2
 
 
+def test_notebook_cpu_preparation_builds_reusable_catalog_without_gpu_weights(tmp_path,frozen,monkeypatch):
+    from vietmedbridge import full_scale_runtime as runtime, full_plan_runtime
+    checkout = Path(__file__).resolve().parents[1]
+    config = read_json(checkout / "configs/retrieval_full.json")
+    config["dense"] = {"model_id":"test","revision":"test","max_length":512}
+    config["lexical_segmentation"] = False
+    config["pilot_limits"] = {"max_documents":0,"max_children":0}
+    target = tmp_path / "checkout"
+    atomic_json(target / "configs/retrieval_full.json",config)
+    atomic_json(tmp_path / "raw/snapshot.json",{"files":{
+        "links_corpus.parquet":{"sha256":frozen[1]["origin_corpus_sha256"]}}})
+    monkeypatch.setitem(sys.modules,"transformers",SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a,**k:FullTokenizer())))
+    def forbidden(*args,**kwargs):
+        pytest.fail("CPU preparation must never enter inference or load GPU weights")
+    for name in ("TorchDenseEncoder","TorchQwenEncoder","TorchQueryTranslator","TorchQwenReranker","run_scale_full_pipeline"):
+        monkeypatch.setattr(runtime,name,forbidden)
+    monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
+    notebook = read_json(checkout / "notebooks/04_colab_retrieval_baseline.ipynb")
+    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
+    context = {"DATA_ROOT":tmp_path,"CHECKOUT":target,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test"}
+    exec(compile(cell,"04-cpu-preparation","exec"),context)
+    assert context["READY"]["state"] == "CPU_PREPARATION_COMPLETE"
+    report = read_json(tmp_path / "retrieval/cpu_preparation" / (frozen[1]["candidate_manifest_sha256"][:16]+".json"))
+    assert report["documents"] == 2 and report["unique_dense_inputs"] == frozen[2]["input_count"]
+    marker = next((tmp_path / "retrieval/catalogs").glob("*/catalog.json"))
+    before = (sha256_file(marker),marker.stat().st_mtime_ns)
+    exec(compile(cell,"04-cpu-preparation-resume","exec"),context)
+    assert (sha256_file(marker),marker.stat().st_mtime_ns) == before
+
+
 def test_union_preserves_official_aliases_outcomes_and_resume(tmp_path,frozen,external,monkeypatch):
     from dataclasses import asdict
     from test_external_import import CONFIG,SPEC

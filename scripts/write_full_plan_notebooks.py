@@ -23,7 +23,9 @@ def main():
         # VietMedBridge — 04: Full retrieval system trên frozen corpus
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
-        Chọn **runtime GPU mới, T4 trở lên**, rồi Run all. Giữ DATA_ROOT cũ;
+        Lần đầu hoặc khi ghép data mới: chọn **CPU**, giữ `PREPARE_ONLY=True`, Run all.
+        Chờ `CPU_PREPARATION_COMPLETE` rồi chuyển sang **GPU, T4 trở lên**,
+        đặt `PREPARE_ONLY=False` để chạy embeddings/inference. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
 
         Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
@@ -34,7 +36,7 @@ def main():
         Tự nhận active candidate của 03, gồm team-100k-data-v1 hiện có.
         Khi có batch mới, 03 tự ghi candidate cũ + mới vào lineage trên Drive;
         coordinator 04 tự ghép chúng trước inference, không cần sửa danh sách code.
-        Chạy coordinator một lần trước khi ba worker bắt đầu.
+        Coordinator chuẩn bị trên CPU một lần trước khi ba worker bắt đầu trên GPU.
         Cache vectors gắn với nội dung/model, giữ official ID/alias riêng. Data mới
         dùng lại vectors của nội dung cũ; vectors baseline 100k được kiểm và đăng ký
         vào cache, không copy thêm một ma trận corpus. Cache không xóa được khi còn
@@ -43,8 +45,10 @@ def main():
         Mỗi block vector, scored stage và query có checkpoint. Dense search lưu
         top-k giữa lượt, ngắt phiên rồi resume thay vì quét lại toàn bộ.
 
-        **Chạy một người:** TEAM_SIZE=1, TEAM_WORKER_ID=None, Run all trên GPU.
-        **Team 3 người:** TEAM_SIZE=3 ở cả ba người, TEAM_WORKER_ID lần lượt 0/1/2.
+        **Chạy một người:** sau chuẩn bị CPU, PREPARE_ONLY=False, TEAM_SIZE=1,
+        TEAM_WORKER_ID=None, Run all trên GPU.
+        **Team 3 người:** PREPARE_ONLY=False, TEAM_SIZE=3 ở cả ba người,
+        TEAM_WORKER_ID lần lượt 0/1/2.
         Mỗi người chỉ encode input parts được giao, ghi vector blocks và mapping
         riêng theo phần. Sau đó một người đặt TEAM_WORKER_ID=None để tổng hợp và
         chạy các bước còn lại; coordinator báo WAITING nếu thiếu phần.
@@ -91,9 +95,16 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v9-bounded-union")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v10-resume-cpu-preparation")),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
+
+        Mặc định `PREPARE_ONLY=True`: chạy trên CPU để ghép/freeze/chuẩn bị inputs
+        và catalog BM25. Dừng ở CPU_PREPARATION_COMPLETE, không nạp model weights.
+        Nếu Colab ngắt sau khi ghép đủ IDs, bản DATA_VALIDATED được xác minh và
+        dùng lại, không chọn/xuất union lại. union_progress.json lưu bước cuối/lỗi;
+        RUNNING có thể là phiên đang chạy hoặc bị ngắt cứng, không phải chứng nhận hoàn tất.
+        Sau chuẩn bị CPU, đổi PREPARE_ONLY=False ở runtime GPU; giữ cùng DATA_ROOT.
 
         Giữ MAX_NEW_*=None để chạy hết. Đổi model/data/policy cần RUN_NAME mới;
         các run cũ không bị ghi đè. Vector BGE của stage-a-retrieval-v1 được kiểm
@@ -119,7 +130,7 @@ def main():
         import json
         from vietmedbridge.full_plan_runtime import run_full_pipeline
         from vietmedbridge.scale_benchmark import load_handoff
-        from vietmedbridge.full_scale_runtime import run_scale_full_pipeline
+        from vietmedbridge.full_scale_runtime import run_scale_full_pipeline, prepare_scale_cpu_resources
         from vietmedbridge.artifacts import read_json, digest_json
         from vietmedbridge.index_inputs import read_candidate_lineage
 
@@ -130,13 +141,18 @@ def main():
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
+        PREPARE_ONLY = True  # CPU: ghép/freeze/inputs/BM25; GPU workers/inference: False
         TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
 
         # Notebook 03 appends each newly frozen candidate to this Drive manifest.
         # The coordinator composes the old corpus plus new batch automatically.
         LINEAGE_SOURCES = read_candidate_lineage(DATA_ROOT)
+        if PREPARE_ONLY and TEAM_WORKER_ID is not None:
+            raise ValueError("Chuẩn bị CPU dùng TEAM_WORKER_ID=None; GPU workers đặt PREPARE_ONLY=False.")
         if len(LINEAGE_SOURCES) > 1:
+            if not PREPARE_ONLY:
+                raise ValueError("Data đang chờ ghép. Chạy PREPARE_ONLY=True trên CPU trước khi dùng GPU.")
             if TEAM_WORKER_ID is not None:
                 raise ValueError("Có data mới chờ ghép. Coordinator chạy 04 một lần với TEAM_WORKER_ID=None trước workers.")
             from vietmedbridge.corpus_union import compose_candidates
@@ -155,6 +171,8 @@ def main():
                 golden_report=golden, official_links=parquet_path(DATA_ROOT,"links_corpus.parquet"), work_dir=WORK_DIR))
 
         LARGE_CANDIDATE = False
+        if PREPARE_ONLY and not (DATA_ROOT / "active_data_candidate.json").is_file():
+            raise ValueError("Chưa có frozen candidate active. Kiểm tra DATA_ROOT và hoàn tất notebook 03 trước 04.")
         if (DATA_ROOT / "active_data_candidate.json").is_file():
             active = read_json(DATA_ROOT / "active_data_candidate.json")
             _, candidate, _ = load_handoff(DATA_ROOT)
@@ -163,7 +181,14 @@ def main():
             LARGE_CANDIDATE = (candidate["counts"]["documents"] > limits["max_documents"]
                 or candidate["counts"]["children"] > limits["max_children"])
             RUN_NAME = BUILD_RUN + "-full-plan-v1"
-        if LARGE_CANDIDATE:
+        if PREPARE_ONLY:
+            status = prepare_scale_cpu_resources(DATA_ROOT, CHECKOUT, WORK_DIR) if LARGE_CANDIDATE else {
+                "state":"CPU_PREPARATION_COMPLETE", "build_run":BUILD_RUN,
+                "scope":"Frozen pilot inputs ready; set PREPARE_ONLY=False on GPU for inference"}
+            RESULT = {"status":status,"ready":{"state":status["state"],"query_count":0},
+                "samples":[],"diagnostics_path":str(DATA_ROOT / "retrieval/cpu_preparation")}
+            READY = RESULT["ready"]
+        elif LARGE_CANDIDATE:
             RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
                 work_dir=WORK_DIR, worker_id=TEAM_WORKER_ID, workers=TEAM_SIZE,
                 max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
@@ -210,7 +235,10 @@ def main():
         code('''
         from google.colab import files
         from vietmedbridge.artifacts import verify_file
-        if READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
+        if READY["state"] == "CPU_PREPARATION_COMPLETE":
+            print("Chuẩn bị CPU hoàn tất. Chuyển runtime GPU, đặt PREPARE_ONLY=False.")
+            print("Team 3 người: TEAM_SIZE=3, TEAM_WORKER_ID=0/1/2; coordinator sau đó dùng None.")
+        elif READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
             print("Đã lưu checkpoint:", READY)
             print("Run all lại cùng cấu hình để hoàn tất trước download.")
         else:

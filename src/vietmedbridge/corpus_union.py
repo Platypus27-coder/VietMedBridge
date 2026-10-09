@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
+import traceback
 
 import duckdb
 
@@ -13,6 +15,86 @@ from .index_inputs import prepare_index_inputs, publish_data_handoff
 from .validation import artifact_paths, validate_snapshot
 
 KINDS = ("documents","children","parents","sections","failures","ledger")
+
+
+@contextmanager
+def _union_stage(output, signature, stage):
+    """Keep the last stage on Drive even when Colab loses its cell output."""
+    path = output / "union_progress.json"
+    status = {"signature":signature,"stage":stage,"state":"RUNNING","updated_at":utc_now()}
+    atomic_json(path,status)
+    print(f"Union stage: {stage} — progress: {path}",flush=True)
+    try:
+        yield
+    except BaseException as error:
+        try:
+            atomic_json(path,status | {"state":"FAILED","updated_at":utc_now(),
+                "error":{"type":type(error).__name__,"message":str(error),"traceback":traceback.format_exc()}})
+        except OSError:
+            pass  # Keep the original failure if Drive itself is unavailable.
+        raise
+    else:
+        atomic_json(path,status | {"state":"STAGE_COMPLETE","updated_at":utc_now()})
+
+
+def _verified_completed_build(output, config):
+    """Resume a validated export; recheck its bytes without selecting/exporting again."""
+    build = read_json(output / "build.json")
+    integrity = build.get("integrity",{})
+    if (build.get("state") != "DATA_VALIDATED" or not build.get("selected_range_complete")
+        or build.get("run_name") != output.name or build.get("signature") != config["signature"]
+        or build.get("sources") != config["sources"] or build.get("input_kind") != config["input_kind"]
+        or build.get("schema_version") != config["schema_version"] or build.get("chunking") != config["chunks"]
+        or build.get("origin_corpus_sha256") != config["official_links_sha256"]
+        or digest_json({"signature":build["signature"],"parts":build["parts"]}) != build.get("snapshot_sha256")
+        or integrity.get("passed") is not True or integrity.get("official_membership") != "VERIFIED"
+        or not integrity.get("checks") or any(integrity["checks"].values())
+        or integrity.get("checked_input_records") != build["counts"]["input_records"]):
+        raise ValueError("Validated union build checkpoint changed.")
+    cursor,total = 0,Counter()
+    for part in build["parts"]:
+        expected = min(config["part_size"],build["counts"]["input_records"]-cursor)
+        if (expected <= 0 or part["signature"] != config["signature"]
+            or part["first_input_row"] != cursor or part["records"] != expected
+            or part["counts"]["input_records"] != expected or set(part["files"]) != set(KINDS)
+            or read_json(output / "parts" / f"part-{cursor:012d}.done.json") != part):
+            raise ValueError("Validated union part checkpoint changed.")
+        cursor += expected
+        total.update(part["counts"])
+    if (cursor != build["requested_input_records"] or dict(total) != build["counts"]
+        or build["selected_shards"] != len(build["parts"])):
+        raise ValueError("Validated union coverage checkpoint changed.")
+    for kind in KINDS:
+        artifact_paths(output,build,kind)
+    print(f"Reused validated union: {cursor:,} input IDs; no source selection or export",flush=True)
+    return build
+
+
+def _finish_union(root, output, build, tokenizer, golden_report, official_links, work_dir):
+    signature = build["signature"]
+    frozen_path = output / "union_frozen_candidate.json"
+    if frozen_path.exists():
+        with _union_stage(output,signature,"VERIFY_FROZEN_CANDIDATE"):
+            candidate = read_json(frozen_path)
+            if (candidate["snapshot_sha256"] != build["snapshot_sha256"]
+                or digest_json({k:v for k,v in candidate.items() if k != "candidate_manifest_sha256"}) != candidate["candidate_manifest_sha256"]):
+                raise ValueError("Union frozen checkpoint changed.")
+            for entry in candidate["health"]["files"].values():
+                verify_file(output / entry["path"],entry["sha256"])
+    else:
+        with _union_stage(output,signature,"HEALTH_REPORT"):
+            health = health_report(output,official_links=official_links,work_dir=work_dir)
+        with _union_stage(output,signature,"FREEZE_CANDIDATE"):
+            candidate = freeze_candidate(output,health,golden_report=golden_report)
+            atomic_json(frozen_path,candidate)
+    with _union_stage(output,signature,"INDEX_INPUTS"):
+        inputs = prepare_index_inputs(output,f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json",tokenizer,work_dir=work_dir)
+    with _union_stage(output,signature,"PUBLISH_HANDOFF"):
+        handoff = publish_data_handoff(root,output.name,candidate,inputs,lineage_mode="replace")
+        atomic_json(output / "union_handoff.json",handoff)
+    atomic_json(output / "union_progress.json",{"signature":signature,"stage":"PUBLISH_HANDOFF",
+        "state":"COMPLETE","snapshot_sha256":build["snapshot_sha256"],"updated_at":utc_now()})
+    return handoff
 
 
 def _union_connection(temporary, memory_limit="512MB"):
@@ -151,7 +233,11 @@ def compose_candidates(data_root, sources, tokenizer, *, run_name, golden_report
         for part in inputs["parts"]:
             verify_file(output / "index_inputs" / part["path"],part["sha256"])
         return publish_data_handoff(root,run_name,candidate,inputs,lineage_mode="replace")
-    with local_workspace(work_dir) as temporary, _union_connection(temporary) as con:
+    if (output / "build.json").exists():
+        with _union_stage(output,signature,"VERIFY_SAVED_BUILD"):
+            build = _verified_completed_build(output,config)
+        return _finish_union(root,output,build,tokenizer,golden_report,official_links,work_dir)
+    with _union_stage(output,signature,"SELECT_AND_EXPORT"), local_workspace(work_dir) as temporary, _union_connection(temporary) as con:
         for kind in KINDS:
             selects = []
             for i,(build,candidate) in enumerate(loaded):
@@ -209,29 +295,10 @@ def compose_candidates(data_root, sources, tokenizer, *, run_name, golden_report
         "requested_range":{"kind":"union_of_explicit_official_ids"},"origin_corpus_sha256":first["origin_corpus_sha256"],
         "sources":identity["sources"],"created_at":utc_now(),"offset_reference":first["offset_reference"],
         "snapshot_sha256":digest_json({"signature":signature,"parts":parts}),"state":"DATA_VALIDATED"}
-    integrity = validate_snapshot(output,build,official_links=official_links,work_dir=work_dir)
-    if not integrity["passed"]:
-        raise ValueError(f"Union integrity failed: {integrity}")
-    build["integrity"] = integrity
-    if (output / "build.json").exists():
-        previous = read_json(output / "build.json")
-        if previous["snapshot_sha256"] != build["snapshot_sha256"]:
-            raise ValueError("Union build snapshot changed.")
-        build = previous
-    else:
+    with _union_stage(output,signature,"VALIDATE_EXPORTED_BUILD"):
+        integrity = validate_snapshot(output,build,official_links=official_links,work_dir=work_dir)
+        if not integrity["passed"]:
+            raise ValueError(f"Union integrity failed: {integrity}")
+        build["integrity"] = integrity
         atomic_json(output / "build.json",build)
-    frozen_path = output / "union_frozen_candidate.json"
-    if frozen_path.exists():
-        candidate = read_json(frozen_path)
-        if (candidate["snapshot_sha256"] != build["snapshot_sha256"]
-            or digest_json({k:v for k,v in candidate.items() if k != "candidate_manifest_sha256"}) != candidate["candidate_manifest_sha256"]):
-            raise ValueError("Union frozen checkpoint changed.")
-    else:
-        health = health_report(output,official_links=official_links,work_dir=work_dir)
-        candidate = freeze_candidate(output,health,golden_report=golden_report)
-        atomic_json(frozen_path,candidate)
-    inputs = prepare_index_inputs(output,f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json",tokenizer,work_dir=work_dir)
-    # Change the active pointer only after all source, span and input checks pass.
-    handoff = publish_data_handoff(root,run_name,candidate,inputs,lineage_mode="replace")
-    atomic_json(output / "union_handoff.json",handoff)
-    return handoff
+    return _finish_union(root,output,build,tokenizer,golden_report,official_links,work_dir)

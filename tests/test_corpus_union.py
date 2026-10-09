@@ -8,7 +8,7 @@ import pytest
 from test_external_import import CONFIG, SPEC, external
 from test_scale_baseline import Tokenizer, frozen
 from vietmedbridge import corpus_union as union
-from vietmedbridge.artifacts import code_fingerprint, read_json, sha256_file
+from vietmedbridge.artifacts import atomic_json, code_fingerprint, read_json, sha256_file
 
 
 def span_views(con, rows=16, text_chars=64, change=None):
@@ -123,3 +123,53 @@ def test_union_resumes_old_producer_parts_after_execution_fix(tmp_path, frozen, 
     assert execution["execution_code_sha256"] == golden["code_sha256"]
     assert active_before["build_run"] == build.name
     assert read_json(tmp_path / "active_data_candidate.json")["build_run"] == "resume-union"
+
+
+@pytest.fixture
+def validated_union(tmp_path, frozen, external, monkeypatch):
+    build,candidate,_ = frozen
+    sources = [(build.name,f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json")]
+    golden = {"passed":True,"code_sha256":code_fingerprint(),"tokenizer":SPEC,"chunking":asdict(CONFIG)}
+    def stopped(*args,**kwargs):
+        raise RuntimeError("simulated Colab failure after validated export")
+    with monkeypatch.context() as patch:
+        patch.setattr(union,"health_report",stopped)
+        with pytest.raises(RuntimeError,match="simulated Colab failure"):
+            union.compose_candidates(tmp_path,sources,Tokenizer(),run_name="validated-resume",
+                golden_report=golden,official_links=external[1],work_dir=tmp_path / "work",part_size=2)
+    return tmp_path / "processed/validated-resume",sources,golden
+
+
+def test_validated_export_resumes_without_source_staging_and_preserves_files(tmp_path, validated_union, external, monkeypatch):
+    output,sources,golden = validated_union
+    progress = read_json(output / "union_progress.json")
+    assert progress["stage"] == "HEALTH_REPORT" and progress["state"] == "FAILED"
+    assert progress["error"]["type"] == "RuntimeError" and "simulated Colab failure" in progress["error"]["traceback"]
+    before = {p:(sha256_file(p),p.stat().st_mtime_ns) for p in [output / "build.json",*output.glob("parts/*")]}
+    monkeypatch.setattr(union,"_union_connection",lambda *a,**k:pytest.fail("Validated output must not reselect/export sources"))
+    monkeypatch.setattr(union,"validate_snapshot",lambda *a,**k:pytest.fail("Validated export must not repeat initial validation"))
+    result = union.compose_candidates(tmp_path,sources,Tokenizer(),run_name=output.name,
+        golden_report=golden,official_links=external[1],work_dir=tmp_path / "work",part_size=2)
+    assert result["documents"] == 2
+    assert all((sha256_file(p),p.stat().st_mtime_ns) == original for p,original in before.items())
+    assert read_json(output / "union_progress.json")["state"] == "COMPLETE"
+    assert read_json(tmp_path / "active_data_candidate.json")["build_run"] == output.name
+
+
+@pytest.mark.parametrize("corrupt",["artifact","counts"])
+def test_validated_resume_rejects_corruption_before_publishing(tmp_path, validated_union, external, monkeypatch, corrupt):
+    output,sources,golden = validated_union
+    before = read_json(tmp_path / "active_data_candidate.json")
+    build = read_json(output / "build.json")
+    if corrupt == "artifact":
+        (output / build["parts"][0]["files"]["children"]["path"]).write_bytes(b"changed")
+    else:
+        build["counts"]["children"] += 1
+        atomic_json(output / "build.json",build)
+    monkeypatch.setattr(union,"health_report",lambda *a,**k:pytest.fail("Corrupted export must fail before health/freeze"))
+    with pytest.raises(ValueError,match="changed"):
+        union.compose_candidates(tmp_path,sources,Tokenizer(),run_name=output.name,
+            golden_report=golden,official_links=external[1],work_dir=tmp_path / "work",part_size=2)
+    assert read_json(tmp_path / "active_data_candidate.json") == before
+    progress = read_json(output / "union_progress.json")
+    assert progress["stage"] == "VERIFY_SAVED_BUILD" and progress["state"] == "FAILED"

@@ -8,7 +8,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .artifacts import atomic_json, digest_json, read_json, sha256_file, verify_file
+from .artifacts import atomic_json, digest_json, read_json, sha256_file, verify_file, utc_now
 from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .content_embeddings import ContentVectorParts, checked, content_embeddings, seal
 from .dataset import parquet_path
@@ -66,6 +66,39 @@ def load_scale_catalog(root,checkout,work,tokenizer):
     base = prepare_disk_catalog(build,candidate,inputs,Path(root) / "retrieval/catalogs",analyzer,work_dir=work)
     policy = StrongConfig(**config["retrieval"])
     return AdaptiveDiskCatalog(base,tokenizer,(policy.parent_short_tokens,policy.parent_long_tokens)),analyzer
+
+
+def prepare_scale_cpu_resources(root,checkout,work):
+    """Publish the disk catalog before allocating a GPU or any model weights."""
+    from transformers import AutoTokenizer
+    import traceback
+    root,checkout = Path(root),Path(checkout)
+    build,candidate,inputs = load_handoff(root)
+    path = root / "retrieval/cpu_preparation" / (candidate["candidate_manifest_sha256"][:16]+".json")
+    status = {"state":"RUNNING","stage":"CPU_CATALOG","build_run":build.name,
+        "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],"updated_at":utc_now()}
+    atomic_json(path,status)
+    print(f"CPU catalog preparation — progress: {path}",flush=True)
+    try:
+        spec = read_json(checkout / "configs/retrieval_full.json")["dense"]
+        tokenizer = AutoTokenizer.from_pretrained(spec["model_id"],revision=spec["revision"],trust_remote_code=False)
+        catalog,_ = load_scale_catalog(root,checkout,work,tokenizer)
+        try:
+            report = status | {"state":"CPU_PREPARATION_COMPLETE","catalog":catalog.base.identity,
+                "documents":candidate["counts"]["documents"],"children":candidate["counts"]["children"],
+                "unique_dense_inputs":inputs["input_count"],"updated_at":utc_now(),
+                "scope":"Frozen data, model inputs and CPU catalog ready; corpus vectors still require GPU workers"}
+        finally:
+            catalog.close()
+        atomic_json(path,report)
+        return report
+    except Exception as error:
+        try:
+            atomic_json(path,status | {"state":"FAILED","updated_at":utc_now(),
+                "error":{"type":type(error).__name__,"message":str(error),"traceback":traceback.format_exc()}})
+        except OSError:
+            pass
+        raise
 
 
 def _document_inputs(catalog,tokenizer,target,max_length=512,part_size=1024):

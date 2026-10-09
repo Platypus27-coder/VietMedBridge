@@ -7,13 +7,16 @@ không nâng code lock xử lý dữ liệu 02–03 đang chạy dở.
 ## Chạy ngay với candidate 100k hiện có
 
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
-Chọn GPU, giữ đúng `DATA_ROOT`, chạy Bootstrap ở runtime mới. Workflow API
-`full-master-plan-strong-v9-bounded-union` nâng code lock một lần. Không cần
+Giữ đúng `DATA_ROOT`, chạy Bootstrap ở runtime mới. Lượt chuẩn bị chọn CPU,
+giữ `PREPARE_ONLY=True`, `TEAM_WORKER_ID=None`. Workflow API
+`full-master-plan-strong-v10-resume-cpu-preparation` nâng code lock một lần. Không cần
 chạy lại 02–03 cho candidate `ce6987985fb015ca` đã hoàn tất.
+Chờ `CPU_PREPARATION_COMPLETE` rồi dùng GPU với `PREPARE_ONLY=False`.
 
 Trong cell cấu hình:
 
-- Ba thành viên cùng đặt `TEAM_SIZE=3`; `TEAM_WORKER_ID` lần lượt là `0`, `1`, `2`.
+- Ba thành viên cùng đặt `PREPARE_ONLY=False`, `TEAM_SIZE=3`; `TEAM_WORKER_ID`
+  lần lượt là `0`, `1`, `2` trên runtime GPU.
 - Các tài khoản phải cùng đọc/ghi **một thư mục dữ liệu được chia sẻ**, không phải
   ba bản sao riêng của `MyDrive/VietMedBridge/data`. Sửa `DATA_ROOT` theo vị trí
   mount thực tế nếu cần. Giữ cùng phiên bản code, model và thư viện.
@@ -97,10 +100,11 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    Báo cáo nằm ở `data/reports/freeze_batch_coverage.json`; coverage của batch đã chọn
    không phải xác nhận toàn bộ corpus BTC đã crawl hoặc xác nhận chất lượng relevance.
    Giữ snapshot ID/URL BTC, source text, offsets và outcomes lỗi trong các file chuẩn.
-2. Coordinator chạy 04 một lần với `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
+2. Coordinator chạy 04 trên CPU với `PREPARE_ONLY=True`, `TEAM_WORKER_ID=None`. Nếu lineage có nhiều
    candidate, notebook tự ghép chúng, kiểm tra xung đột và chuyển active pointer
-   sang corpus tích lũy. Khi coordinator báo `WAITING_FOR_BGE_CORPUS_PARTS`, ba
-   worker chạy 04 theo ID 0/1/2. Sau khi đủ phần, coordinator Run all lại để
+   sang corpus tích lũy, chuẩn bị inputs và catalog BM25. Khi báo `CPU_PREPARATION_COMPLETE`, ba
+   worker chạy 04 trên GPU với `PREPARE_ONLY=False`, ID 0/1/2. Sau khi đủ phần,
+   coordinator dùng GPU, `PREPARE_ONLY=False`, `TEAM_WORKER_ID=None`, Run all lại để
    tổng hợp và tiếp tục inference. Nếu không dùng chia worker, đặt `TEAM_SIZE=1`;
    Run all của coordinator tự xử lý toàn bộ.
 3. Nội dung và encoder không đổi sẽ dùng lại vectors;
@@ -118,10 +122,19 @@ Chỉ ID thành công trùng giữa các nguồn mới cần so sánh spans: has
 sort hash trên disk rồi đọc tuần tự; không nối toàn bộ chunk text bằng
 `string_agg(... ORDER BY ...)`. Archives không trùng ID bỏ qua lượt hash này.
 Staging không sort toàn bộ text; thứ tự ID được áp dụng khi xuất từng output part.
-Nếu runtime trước dừng vì OOM, mở 04 mới ở runtime mới để bootstrap nâng lock
-lên v9. Giữ nguyên DATA_ROOT và union run: bản sửa thực thi dùng lại config/parts
+Nếu runtime trước bị ngắt, mở 04 mới ở runtime CPU để bootstrap nâng lock
+lên v10. Giữ nguyên DATA_ROOT và union run: bản sửa thực thi dùng lại config/parts
 đã xác minh khi mọi nguồn, snapshot và policy vẫn khớp. Producer code hash được
 giữ nguyên; `union_execution.json` ghi code hiện tại. Không cần chạy lại 02–03.
+
+Nếu đã có `build.json` ở trạng thái `DATA_VALIDATED`, resume kiểm lại config,
+snapshot, coverage, part markers và SHA-256 của output files rồi chuyển thẳng
+sang health/freeze/inputs còn thiếu. Không dựng lại chosen/staging hoặc xuất
+union lại. Health vẫn chạy integrity validation của snapshot trước freeze.
+`union_progress.json` ghi stage đang chạy, stage hoàn tất và traceback khi bắt
+được exception. Nếu kernel/máy bị tắt cứng, file có thể còn `RUNNING`; trạng thái
+này không đủ kết luận phiên còn sống hoặc stage đã hoàn tất. Sau handoff, file
+ghi `COMPLETE`. Báo cáo CPU catalog nằm ở `retrieval/cpu_preparation/<candidate>.json`.
 
 Mỗi output part có checkpoint; active pointer chỉ đổi sau khi toàn bộ union đã
 qua integrity, freeze và chuẩn bị input. Sau khi gộp thành công, lineage được thu
