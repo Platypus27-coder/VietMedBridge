@@ -8,7 +8,7 @@ không nâng code lock xử lý dữ liệu 02–03 đang chạy dở.
 
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
 Chọn GPU, giữ đúng `DATA_ROOT`, chạy Bootstrap ở runtime mới. Workflow API
-`full-master-plan-strong-v8-auto-cumulative-candidates` nâng code lock một lần. Không cần
+`full-master-plan-strong-v9-bounded-union` nâng code lock một lần. Không cần
 chạy lại 02–03 cho candidate `ce6987985fb015ca` đã hoàn tất.
 
 Trong cell cấu hình:
@@ -112,6 +112,16 @@ extract hoặc chunk lại. Mọi official alias được giữ. Cùng ID, bản
 được ưu tiên trước outcome lỗi. Hai bản thành công khác nội dung/title/language
 hoặc source spans sẽ báo xung đột; không âm thầm chọn một bản. Các nguồn phải
 cùng official snapshot, tokenizer và chunking policy.
+
+Union dùng DuckDB 512 MB, một thread và staging database trên `WORK_DIR` local.
+Chỉ ID thành công trùng giữa các nguồn mới cần so sánh spans: hash từng dòng,
+sort hash trên disk rồi đọc tuần tự; không nối toàn bộ chunk text bằng
+`string_agg(... ORDER BY ...)`. Archives không trùng ID bỏ qua lượt hash này.
+Staging không sort toàn bộ text; thứ tự ID được áp dụng khi xuất từng output part.
+Nếu runtime trước dừng vì OOM, mở 04 mới ở runtime mới để bootstrap nâng lock
+lên v9. Giữ nguyên DATA_ROOT và union run: bản sửa thực thi dùng lại config/parts
+đã xác minh khi mọi nguồn, snapshot và policy vẫn khớp. Producer code hash được
+giữ nguyên; `union_execution.json` ghi code hiện tại. Không cần chạy lại 02–03.
 
 Mỗi output part có checkpoint; active pointer chỉ đổi sau khi toàn bộ union đã
 qua integrity, freeze và chuẩn bị input. Sau khi gộp thành công, lineage được thu

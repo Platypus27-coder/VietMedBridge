@@ -91,7 +91,7 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v8-auto-cumulative-candidates")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v9-bounded-union")),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
