@@ -60,7 +60,7 @@ class ContentBlocks:
 
     def save_block(self, keys, path, checksum):
         value = seal({"identity":self.identity,"keys":keys,"rows":len(keys),
-            "path":str(Path(path).resolve().relative_to(self.root)),"sha256":checksum})
+            "path":Path(path).resolve().relative_to(self.root).as_posix(),"sha256":checksum})
         marker = self.directory / ("block-"+digest_json(keys)+".done.json")
         if marker.exists():
             old = checked(read_json(marker))
@@ -132,7 +132,8 @@ class ContentBlocks:
 
 
 def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir,batch_size=32,
-                       max_new_parts=None,worker_id=None,workers=1,encode_missing=True,seed_root=None,seed_sources=()):
+                       max_new_parts=None,worker_id=None,workers=1,encode_missing=True,seed_root=None,seed_sources=(),
+                       should_stop=None,on_part=None):
     check_manifest(inputs)
     if (type(workers) is not int or workers < 1 or (worker_id is not None and
         (type(worker_id) is not int or not 0 <= worker_id < workers)) or type(batch_size) is not int or batch_size < 1
@@ -154,7 +155,7 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
             blocks.seed(input_root,inputs,seed_root)
         for source_root,source_inputs,vector_root in seed_sources:
             blocks.seed(source_root,source_inputs,vector_root)
-        cursor = 0
+        cursor, stopped = 0, False
         for index,source in enumerate(inputs["parts"]):
             if source["start"] != cursor or source["rows"] < 1:
                 raise ValueError("Content input ordering changed.")
@@ -168,7 +169,10 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
                     raise ValueError("Content mapping checkpoint changed.")
                 verify_file(bound(root,saved["path"]),saved["sha256"])
                 reused_texts += source["rows"]
-            elif assigned and (max_new_parts is None or new_parts < max_new_parts):
+            elif assigned and not stopped and (max_new_parts is None or new_parts < max_new_parts):
+                if should_stop is not None and should_stop(source):
+                    stopped = True
+                    continue
                 path = bound(input_root,source["path"])
                 verify_file(path,source["sha256"])
                 texts = pq.read_table(path,columns=["text"]).column("text").to_pylist()
@@ -189,6 +193,8 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
                 continue
             parts.append(saved)
             if assigned:
+                if on_part is not None:
+                    on_part(saved)
                 print(f"{encoder.identity.get('model_id')} | new texts {new_texts:,}, reused {reused_texts:,}, checked parts {len(parts)}/{len(inputs['parts'])}",flush=True)
         if cursor != inputs["input_count"]:
             raise ValueError("Content input count changed.")

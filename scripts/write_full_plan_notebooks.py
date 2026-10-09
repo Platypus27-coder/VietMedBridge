@@ -16,6 +16,20 @@ reference = CODE_REVISION or ("main" if upgrade else lock.get("git_commit")) or 
         '    atomic_json(lock_path, {"repo_url": REPO_URL, "git_commit": CODE_COMMIT, '
         '"pipeline_api": PIPELINE_API_VERSION, "workflow_api": RETRIEVAL_WORKFLOW_API})'))
 
+# Only present after a verified Kaggle import. Pin producer versions so native
+# Colab workers reuse imported content maps instead of silently changing identity.
+BOOT = BOOT.replace('PIPELINE_CONFIG = json.loads', '''embedding_runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
+if embedding_runtime_lock.exists():
+    from vietmedbridge.portable_embeddings import checked, runtime_install_commands
+    pinned_runtime = checked(json.loads(embedding_runtime_lock.read_text()))["runtime"]
+    install_commands = runtime_install_commands(pinned_runtime)
+    if install_commands and "torch" in sys.modules:
+        raise RuntimeError("Restart session trước khi cài runtime embedding đã khóa từ Kaggle.")
+    for command in install_commands:
+        subprocess.run(command, check=True)
+    importlib.invalidate_caches()
+PIPELINE_CONFIG = json.loads''')
+
 
 def main():
     save("04_colab_retrieval_baseline.ipynb", [

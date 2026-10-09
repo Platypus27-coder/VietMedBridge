@@ -43,6 +43,10 @@ cho corpus pilot. Không chạy các notebook
    Checkpoint vector, giữa lượt dense search, scored stage và từng query.
    Đủ 1.200 queries và source/schema hợp lệ thì xuất submission ZIP.
    Xem [hướng dẫn chạy hệ thống và phân công ba người](docs/FULL_SYSTEM_RUNBOOK.md).
+   Muốn chạy một phiên **Kaggle T4 x2** rồi tiếp tục Colab: dùng
+   [notebook chuyển embedding](notebooks/04_kaggle_embedding_worker.ipynb) và
+   [hướng dẫn Colab → Kaggle → Colab](docs/KAGGLE_HANDOFF.md). Username lấy từ
+   Secrets của người chạy; checkpoint nhập về dùng trực tiếp trong 04 chính.
 6. **05 — Tạo draft từ source, duyệt nhãn và supervised training:**
    [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
    Chọn GPU và Run all. Khi chưa có nhãn, Qwen 4B tạo draft train từ source;
