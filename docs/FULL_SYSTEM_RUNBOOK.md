@@ -72,10 +72,16 @@ nghĩa là đang dùng checkpoint pretrained. Các báo cáo integrity không ph
    chứa cả `.tar.parts` và batch tar. Ba acc chỉ chọn `FREEZE_WORKER_ID` 0/1/2 trên form.
    Giữ `DATA_ROOT=/content/drive/MyDrive/VietMedBridge/data` nếu shortcut của mỗi acc
    trỏ tới cùng thư mục Drive đã chạy 02; giữ `CODE_REVISION=None` để dùng code lock.
+   03 nhận cả đường dẫn MyDrive và `.shortcut-targets-by-id` khi cùng đường dẫn
+   trong thư mục dự án, descriptor nguồn và snapshot build đã được đối chiếu.
+   Không ghép theo tên file đơn lẻ. Mã batch không phụ thuộc đường dẫn mount của acc.
    Mỗi build được giao đúng một worker và có checkpoint riêng. Không chạy trùng ID.
    Khi cả ba manifest `freeze_workers/<batch-signature>/worker-N.json` báo COMPLETE,
    một acc chạy lại 03 với `FREEZE_MODE="coordinator"`; coordinator xác minh đủ
    candidate/index-input hashes rồi mới ghi manifest tổng và candidate lineage.
+   Nếu worker 0/2 đã hoàn tất bằng notebook 03 trước bản sửa đường dẫn, coordinator
+   mới dùng lại checkpoint khi assignment, code, snapshot và mọi file thực tế
+   hợp lệ. Có thể giữ các worker đang chạy; chỉ thay notebook ở phiên bị lỗi.
    Cách này tránh ba runtime cùng sửa `active_data_batch.json` hoặc active pointer.
    03 tự nối candidate mới vào `data/candidate_lineage.json`; không cần chép hash.
    Nếu build `data-v2` được tạo bởi revision cũ, 03 vẫn kiểm tra lại schema,

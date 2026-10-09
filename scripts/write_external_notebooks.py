@@ -13,7 +13,7 @@ BOOT = (BOOTSTRAP.replace("code_lock.json","data_processing_code_lock.json")
         '"pipeline_api": PIPELINE_API_VERSION, "workflow_api": DATA_WORKFLOW_API})'))
 BOOT_FREEZE = BOOT.replace(
     'external-extraction-import-v7-parallel-workers',
-    'external-extraction-import-v10-freeze-coverage-audit',
+    'external-extraction-import-v11-freeze-drive-aliases',
 )
 
 
@@ -353,7 +353,7 @@ def write_data_notebooks():
             worker_dir = DATA_ROOT / "worker_batches"
             worker_files = sorted(worker_dir.glob("*.json")) if worker_dir.exists() else []
             workers = [(path.name, read_json(path)) for path in worker_files]
-            build_refs = collect_completed_build_refs(expected_paths, prior, workers)
+            build_refs = collect_completed_build_refs(expected_paths, prior, workers, data_root=DATA_ROOT)
             BATCH = {"schema_version": 1, "input_kind": "external", "state": "COMPLETE",
                 "builds": build_refs, "assembled_from_workers": [path.name for path in worker_files]}
             if FREEZE_MODE == "serial":

@@ -1,7 +1,7 @@
 """Checkpoint and verify disjoint Notebook 03 freeze workers."""
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from vietmedbridge.artifacts import atomic_json, digest_json, local_workspace, read_json, sha256_file, verify_file
 
@@ -9,32 +9,110 @@ from vietmedbridge.artifacts import atomic_json, digest_json, local_workspace, r
 FREEZE_WORKER_SCHEMA = 1
 
 
-def collect_completed_build_refs(expected_paths, prior_batch, workers):
-    """Collect exactly the discovered archives, including previously frozen builds."""
+def _source_locator_key(source):
+    """Only remove Colab's Drive mount prefix, never match archive basenames."""
+    if not isinstance(source, str) or not source:
+        return None
+    parts = PurePosixPath(source).parts
+    if ".." in parts:
+        raise ValueError("Source locator cannot contain parent traversal.")
+    if parts[:3] == ("/", "content", "drive"):
+        if len(parts) > 4 and parts[3] == "MyDrive":
+            return "colab-drive:" + "/".join(parts[4:])
+        if len(parts) > 5 and parts[3] == ".shortcut-targets-by-id":
+            return "colab-drive:" + "/".join(parts[5:])
+    return source
+
+
+def _verify_source_alias(item, current_path, data_root, identities):
+    """Bind an alias to the completed build's original Notebook 02 descriptor.
+
+    Use the importer's size/mtime identity for tar files and manifest/archive
+    hashes for split archives. This does not reread or certify raw payloads.
+    """
+    from vietmedbridge.external_import import _source_identity
+
+    run = item.get("build_run")
+    if (not isinstance(run, str) or not run or Path(run).name != run
+        or run in {".", ".."}):
+        raise ValueError("Invalid source alias build_run.")
+    if data_root is None:
+        raise ValueError("Drive source alias requires DATA_ROOT to verify the original build.")
+    root = Path(data_root) / "processed" / run
+    build = read_json(root / "build.json")
+    config = read_json(root / "config.json")
+    metadata = read_json(root / "external_source/source.json")
+    if (not build.get("selected_range_complete")
+        or build.get("snapshot_sha256") != item.get("snapshot_sha256")
+        or build.get("snapshot_sha256") != digest_json({"signature": build["signature"], "parts": build["parts"]})
+        or config.get("signature") != build["signature"]
+        or config["signature"] != digest_json({k: v for k, v in config.items() if k != "signature"})
+        or build.get("source_provenance") != metadata
+        or metadata.get("input_signature") != digest_json(metadata["files"])
+        or config.get("source_input_signature") != metadata["input_signature"]
+        or _source_locator_key(metadata["source"].get("path")) != _source_locator_key(current_path)):
+        raise ValueError(f"Drive source alias/build provenance mismatch: {run}")
+    if current_path not in identities:
+        identities[current_path] = _source_identity(current_path)
+    original = {k: v for k, v in metadata["source"].items() if k != "path"}
+    current = {k: v for k, v in identities[current_path].items() if k != "path"}
+    if original != current:
+        raise ValueError(f"Archive source identity changed across Drive aliases: {current_path}. "
+                         "Check that this account uses the same shared Drive source.")
+
+
+def collect_completed_build_refs(expected_paths, prior_batch, workers, *, data_root=None):
+    """Collect all discovered sources, accepting verified Colab Drive aliases."""
+    expected_paths = [str(path) for path in expected_paths]
     expected = set(expected_paths)
+    by_key = {}
+    for path in expected_paths:
+        key = _source_locator_key(path)
+        if key in by_key:
+            raise ValueError(f"Ambiguous/duplicate discovered source: {path}")
+        by_key[key] = path
+    identities = {}
+
+    def match(item):
+        source = item.get("source_path")
+        current = by_key.get(_source_locator_key(source))
+        if current is not None and source != current:
+            _verify_source_alias(item, current, data_root, identities)
+        return current
+
     gathered = {}
+
+    def remember(item, source):
+        if source in gathered and any(gathered[source].get(key) != item.get(key)
+                                     for key in ("build_run", "snapshot_sha256")):
+            raise ValueError(f"Hai worker đã tạo build không khớp cho cùng archive: {source}")
+        gathered[source] = {**gathered.get(source, {}), **item, "source_path": source}
+
     for item in prior_batch.get("builds", []):
-        if item.get("state") in {"COMPLETE", "FROZEN"} and item.get("source_path") in expected:
-            gathered[item["source_path"]] = dict(item)
+        if item.get("state") in {"COMPLETE", "FROZEN"}:
+            source = match(item)
+            if source is not None:
+                remember(item, source)
     for name, worker in workers:
-        items = [item for item in worker.get("builds", []) if item.get("source_path") in expected]
+        items = [(item, source) for item in worker.get("builds", [])
+                 if (source := by_key.get(_source_locator_key(item.get("source_path")))) is not None]
         if not items:
             continue
         if worker.get("state") != "COMPLETE":
             raise RuntimeError(f"Worker chưa hoàn tất: {name} ({worker.get('state')})")
-        for item in items:
+        for item, source in items:
             if item.get("state") not in {"COMPLETE", "FROZEN"}:
                 raise RuntimeError(f"Build worker chưa hoàn tất: {item.get('source_path')}")
-            source = item["source_path"]
-            if source in gathered and any(gathered[source].get(key) != item.get(key)
-                                         for key in ("build_run", "snapshot_sha256")):
-                raise ValueError(f"Hai worker đã tạo build không khớp cho cùng archive: {source}")
+            match(item)
             # Preserve a prior frozen candidate reference when the worker only
             # records its original Notebook 02 completion.
-            gathered[source] = {**gathered.get(source, {}), **item}
+            remember(item, source)
     if set(gathered) != expected:
+        known = [item.get("source_path") for item in prior_batch.get("builds", [])]
+        known += [item.get("source_path") for _, worker in workers for item in worker.get("builds", [])]
         raise ValueError(f"Worker coverage chưa khớp batch; missing={sorted(expected-set(gathered))}, "
-                         f"extra={sorted(set(gathered)-expected)}")
+                         f"extra={sorted(set(gathered)-expected)}; manifests={len(workers)}, "
+                         f"known_sources={known[:3]}. Check DATA_ROOT points to the team's shared data.")
     return [gathered[path] for path in expected_paths]
 
 
@@ -126,17 +204,18 @@ def freeze_batch_signature(build_refs, *, code_sha256: str, team_size: int) -> s
     for item in build_refs:
         run = item.get("build_run")
         snapshot = item.get("snapshot_sha256")
-        source = item.get("source_path")
         if (not isinstance(run, str) or not run or Path(run).name != run
             or run in {".", ".."} or run in seen):
             raise ValueError("Freeze batch must contain unique build_run values.")
         if not isinstance(snapshot, str) or not snapshot:
             raise ValueError(f"Freeze batch is missing snapshot_sha256 for {run}.")
         seen.add(run)
-        builds.append({"build_run": run, "source_path": source, "snapshot_sha256": snapshot})
+        # A path is a runtime locator, not corpus identity. The immutable build
+        # snapshot binds the producer policy and every processed shard checksum.
+        builds.append({"build_run": run, "snapshot_sha256": snapshot})
     if not builds:
         raise ValueError("Freeze batch is empty.")
-    return digest_json({"workflow": "parallel-freeze-v2", "code_sha256": code_sha256,
+    return digest_json({"workflow": "parallel-freeze-v3-drive-aliases", "code_sha256": code_sha256,
                         "orchestrator_sha256": sha256_file(Path(__file__)),
                         "team_size": team_size, "builds": builds})
 
@@ -257,15 +336,33 @@ def verify_freeze_workers(data_root, build_refs, *, batch_signature: str,
     for worker_id in range(team_size):
         path = freeze_worker_manifest_path(data_root, batch_signature=batch_signature,
                                            worker_id=worker_id)
-        if not path.is_file():
-            raise FileNotFoundError(f"Freeze worker manifest missing: {path}")
-        worker = read_json(path)
-        payload = {key: value for key, value in worker.items() if key != "manifest_sha256"}
         expected = partition_freeze_builds(build_refs, team_size=team_size, worker_id=worker_id)
         expected_runs = [item["build_run"] for item in expected]
+        reused = False
+        if not path.is_file():
+            # Source locator/orchestrator updates need not discard completed
+            # receipts. Bind every assigned snapshot and verify actual artifacts
+            # below, instead of trusting another batch signature on its own.
+            for previous_path in sorted((Path(data_root) / "freeze_workers").glob(f"*/worker-{worker_id}.json")):
+                previous = read_json(previous_path)
+                if (previous.get("schema_version") == FREEZE_WORKER_SCHEMA
+                    and previous.get("code_sha256") == code_sha256
+                    and previous.get("worker_id") == worker_id
+                    and previous.get("team_size") == team_size
+                    and previous.get("state") == "COMPLETE"
+                    and previous.get("assigned_build_runs") == expected_runs
+                    and set(previous.get("completed", {})) == set(expected_runs)
+                    and all(previous["completed"][item["build_run"]].get("snapshot_sha256")
+                            == item["snapshot_sha256"] for item in expected)):
+                    path, reused = previous_path, True
+                    break
+            if not reused:
+                raise FileNotFoundError(f"Freeze worker manifest missing: {path}")
+        worker = read_json(path)
+        payload = {key: value for key, value in worker.items() if key != "manifest_sha256"}
         if (worker.get("schema_version") != FREEZE_WORKER_SCHEMA
             or digest_json(payload) != worker.get("manifest_sha256")
-            or worker.get("batch_signature") != batch_signature
+            or (not reused and worker.get("batch_signature") != batch_signature)
             or worker.get("code_sha256") != code_sha256
             or worker.get("team_size") != team_size
             or worker.get("worker_id") != worker_id
@@ -280,6 +377,8 @@ def verify_freeze_workers(data_root, build_refs, *, batch_signature: str,
                 raise ValueError(f"Invalid build run in freeze worker output: {run_name}")
             ref = next(item for item in build_refs if item["build_run"] == run_name)
             records[run_name] = verify_freeze_record(data_root, run_name, ref, record, code_sha256)
+        if reused:
+            print(f"Reused verified freeze checkpoint: worker-{worker_id} ({path.parent.name})", flush=True)
     expected_runs = [item["build_run"] for item in build_refs]
     if set(records) != set(expected_runs):
         missing = sorted(set(expected_runs) - set(records))
