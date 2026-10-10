@@ -42,7 +42,8 @@ def main():
         Runtime GPU được khóa riêng, không lấy bản PyTorch CPU của máy xuất gói.
         Gói cũ khóa `+cpu` và chưa có seed vectors được chuyển sang CUDA ngay tại
         ổ tạm Kaggle, giữ nguyên input/checksum/commit/team. Không upload lại dataset.
-        Nếu phiên đã import torch CPU, mở phiên mới bằng Save & Run All.
+        Kiểm tra CUDA và launcher chạy bằng tiến trình Python mới, tách khỏi
+        torch đã import trong kernel notebook. Không hot-reload torch trong kernel.
 
         Phiên Kaggle tự dừng trước mốc 10 giờ tính từ cell đầu hoặc khi gần 18 GB
         output. Mỗi part hoàn tất có receipt/checksum. Đây là **checkpoint một phần**,
@@ -60,6 +61,7 @@ def main():
         import json
         import os
         import re
+        import signal
         import subprocess
         import sys
         import time
@@ -137,16 +139,102 @@ def main():
         if "vietmedbridge" in sys.modules and globals().get("_VMB_KAGGLE_COMMIT") != CODE_COMMIT:
             raise RuntimeError("Restart session vì code đã thay đổi; không trộn package đang import.")
         subprocess.run(["git", "-C", str(CHECKOUT), "checkout", "--detach", "FETCH_HEAD"], check=True)
-        subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-e",
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-e",
                         ".[notebook,retrieval,strong]", "kagglehub>=0.3.13,<2", "kaggle>=1.8,<3"], cwd=CHECKOUT, check=True)
         sys.path.insert(0, str(CHECKOUT / "src"))
         importlib.invalidate_caches()
         _VMB_KAGGLE_COMMIT = CODE_COMMIT
         from vietmedbridge.portable_embeddings import (
-            checked, embedding_runtime, export_kaggle_job, install_result, launch_kaggle,
+            checked, export_kaggle_job, install_result,
             runtime_install_commands, validate_job, _copy_checked,
         )
         from vietmedbridge.artifacts import atomic_json, digest_json, read_json
+
+        def fresh_kaggle_python(checkout, source, arguments, *, capture_output=False):
+            # A new executable cannot inherit the notebook's imported CPU torch.
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(Path(checkout) / "src") + (
+                os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            command = [sys.executable, "-u", "-c", source, json.dumps(arguments)]
+            process = subprocess.Popen(command, cwd=checkout, env=env, text=True,
+                start_new_session=os.name == "posix",
+                stdout=subprocess.PIPE if capture_output else None,
+                stderr=subprocess.PIPE if capture_output else None)
+            try:
+                stdout, stderr = process.communicate()
+            except BaseException:
+                # Stop the launcher AND its GPU workers when the cell is interrupted.
+                def stop_group(force):
+                    try:
+                        if os.name == "posix":
+                            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+                        elif force:
+                            process.kill()
+                        else:
+                            process.terminate()
+                    except ProcessLookupError:
+                        pass
+                stop_group(False)
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    stop_group(True)
+                    process.wait(timeout=10)
+                raise
+            result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            if result.returncode and capture_output:
+                print(result.stdout or "", end="")
+                print(result.stderr or "", end="", file=sys.stderr)
+            result.check_returncode()
+            return result
+
+        def configure_kaggle_cuda(runtime, gpu_count, checkout):
+            commands = runtime_install_commands(runtime)
+            if commands:
+                print("Installing locked GPU runtime; CUDA will run in fresh Python processes.", flush=True)
+            for command in commands:
+                subprocess.run(command, check=True)
+            importlib.invalidate_caches()
+            probe_source = (
+                "import importlib.metadata, json, torch\\n"
+                "runtime = {n: importlib.metadata.version(n) for n in ('torch', 'transformers', 'bitsandbytes')}\\n"
+                "available = torch.cuda.is_available()\\n"
+                "count = torch.cuda.device_count()\\n"
+                "devices = []\\n"
+                "if available:\\n"
+                "    for i in range(count):\\n"
+                "        x = torch.ones(1, device=f'cuda:{i}').add_(1)\\n"
+                "        assert x.item() == 2, 'CUDA kernel smoke check failed'\\n"
+                "        devices.append(torch.cuda.get_device_name(i))\\n"
+                "        del x\\n"
+                "print(json.dumps({'runtime': runtime, 'cuda_build': torch.version.cuda, "
+                "'cuda_available': available, 'gpu_count': count, 'devices': devices}))\\n"
+            )
+            process = fresh_kaggle_python(checkout, probe_source, {}, capture_output=True)
+            probe = json.loads(process.stdout.strip().splitlines()[-1])
+            print("PyTorch:", probe["runtime"]["torch"], "| CUDA build:", probe["cuda_build"],
+                  "| CUDA available:", probe["cuda_available"], "| GPUs:", probe["gpu_count"], flush=True)
+            if probe["runtime"] != runtime:
+                raise RuntimeError("GPU subprocess runtime không khớp job sau khi cài đặt.")
+            if not probe["cuda_available"] or probe["gpu_count"] != gpu_count:
+                raise RuntimeError("GPU subprocess chưa thấy đủ GPU. Chọn T4 x2; không giảm số worker.")
+            return probe
+
+        def launch_kaggle_fresh(job_dir, checkout, *, output, scratch, session_started, hours,
+                                accounts, account_id, gpu_count):
+            arguments = {"job_dir": str(job_dir), "checkout": str(checkout), "output": str(output),
+                "scratch": str(scratch), "session_started": session_started, "hours": hours,
+                "accounts": accounts, "account_id": account_id, "gpu_count": gpu_count}
+            source = (
+                "import json, sys\\n"
+                "from vietmedbridge.portable_embeddings import launch_kaggle\\n"
+                "launch_kaggle(**json.loads(sys.argv[1]))\\n"
+            )
+            fresh_kaggle_python(checkout, source, arguments)
+            result = checked(read_json(Path(output) / "result-manifest.json"))
+            if result["job"] != read_json(Path(job_dir) / "job.json")["manifest_sha256"]:
+                raise ValueError("GPU subprocess output belongs to another job.")
+            return result
 
         def repair_cpu_export_job(job_dir, checkout, work_dir):
             # Keep compatibility with the worker commit pinned in existing datasets.
@@ -175,19 +263,7 @@ def main():
 
         if IS_KAGGLE:
             JOB_DIR, JOB_HEADER = repair_cpu_export_job(JOB_DIR, CHECKOUT, WORK_DIR)
-            commands = runtime_install_commands(JOB_HEADER["runtime"])
-            if commands and "torch" in sys.modules:
-                raise RuntimeError("Restart session trước khi đổi torch. Save & Run All từ runtime mới.")
-            for command in commands:
-                subprocess.run(command, check=True)
-            importlib.invalidate_caches()
-            import torch
-            print("PyTorch:", torch.__version__, "| CUDA build:", torch.version.cuda,
-                  "| CUDA available:", torch.cuda.is_available(), "| GPUs:", torch.cuda.device_count())
-            if embedding_runtime() != JOB_HEADER["runtime"]:
-                raise RuntimeError("Runtime sau cài đặt không khớp job. Save & Run All từ phiên mới.")
-            if not torch.cuda.is_available() or torch.cuda.device_count() != GPUS_PER_ACCOUNT:
-                raise RuntimeError("PyTorch chưa dùng đủ GPU yêu cầu. Chọn T4 x2 và Save & Run All từ phiên mới; không giảm số worker.")
+            CUDA_PROBE = configure_kaggle_cuda(JOB_HEADER["runtime"], GPUS_PER_ACCOUNT, CHECKOUT)
             if JOB_HEADER.get("runtime_repair"):
                 print("CPU export repaired locally → CUDA; original dataset and all input checksums preserved.")
             print("Kaggle job:", JOB_HEADER["manifest_sha256"], "| inputs:", JOB_HEADER["input_count"])
@@ -196,7 +272,7 @@ def main():
         md("## 2. Xuất dữ liệu / chạy hai GPU / nhập checkpoint — tự chọn theo nền tảng"),
         code('''
         if IS_KAGGLE:
-            RESULT = launch_kaggle(JOB_DIR, CHECKOUT, output=Path("/kaggle/working/vmb_checkpoints"),
+            RESULT = launch_kaggle_fresh(JOB_DIR, CHECKOUT, output=Path("/kaggle/working/vmb_checkpoints"),
                                   scratch=WORK_DIR / "data", session_started=SESSION_STARTED, hours=SESSION_HOURS,
                                   accounts=KAGGLE_ACCOUNTS, account_id=KAGGLE_ACCOUNT_ID, gpu_count=GPUS_PER_ACCOUNT)
             print(json.dumps({k: RESULT[k] for k in ("state", "processes", "assignment", "updated_at", "scope")}

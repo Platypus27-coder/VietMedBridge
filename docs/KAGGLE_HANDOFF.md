@@ -62,10 +62,13 @@ giữ nguyên; không cần chạy lại 02/03/CPU catalog hoặc upload dataset
 Hai tài khoản nhận cùng job CUDA mới, nên Outputs vẫn nhập được cùng nhau.
 Job có seed vectors không được tự đổi producer runtime. Dataset gốc không bị sửa.
 
-Sau khi thay notebook, chạy **Save Version → Save & Run All** từ phiên mới.
-Không tiếp tục phiên đã import torch CPU. Bootstrap phải in torch CUDA,
-`CUDA available: True` và `GPUs: 2` trước khi cell embedding chạy; kiểm tra
-này không nạp model weights.
+Bootstrap cài runtime khóa qua pip rồi kiểm CUDA bằng **tiến trình Python mới**.
+Launcher và GPU workers cũng chạy trong các tiến trình mới, nên torch CPU đã
+import trong kernel notebook không chặn việc sửa runtime hoặc bị hot-reload.
+Giữ phiên interactive cũng có thể chạy lại cell bootstrap rồi cell GPU sau
+khi thay notebook. Muốn đóng tab mà vẫn chạy thì dùng **Save Version → Save &
+Run All**. Bootstrap phải in torch CUDA, `CUDA available: True` và `GPUs: 2`;
+mỗi GPU còn thực hiện phép tính nhỏ để kiểm CUDA kernel trước khi nạp weights.
 
 Một người xuất **một dataset chung**, sau đó chủ dataset cấp quyền đọc trên
 Kaggle cho thành viên chạy tài khoản thứ hai. Cả hai Add Input đúng dataset đó;
