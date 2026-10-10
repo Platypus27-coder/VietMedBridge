@@ -33,6 +33,8 @@ def main():
         Xuất **một dataset chung** rồi cấp quyền đọc cho tài khoản thứ hai; cả hai
         Add Input đúng dataset đó. Gói khóa số tài khoản/GPU để không chia lệch.
         Chạy một tài khoản thì đặt `KAGGLE_ACCOUNTS=1` trước khi xuất gói.
+        `RUNTIME_PLATFORM="auto"` nhận diện runtime đang chạy, không dựa vào thư mục
+        `/kaggle/input`. Có thể chọn rõ `"colab"` hoặc `"kaggle"` tại đầu cell 1.
 
         Phiên Kaggle tự dừng trước mốc 10 giờ tính từ cell đầu hoặc khi gần 18 GB
         output. Mỗi part hoàn tất có receipt/checksum. Đây là **checkpoint một phần**,
@@ -53,6 +55,7 @@ def main():
         import subprocess
         import sys
         import time
+        from IPython import get_ipython
         from pathlib import Path
 
         SESSION_STARTED = globals().get("SESSION_STARTED", time.time())
@@ -62,8 +65,24 @@ def main():
         KAGGLE_ACCOUNT_ID = 0  # Tài khoản thứ nhất: 0; tài khoản thứ hai: 1
         GPUS_PER_ACCOUNT = 2  # Chọn T4 x2 ở cả hai tài khoản
         SESSION_HOURS = 10.0
+        RUNTIME_PLATFORM = "auto"  # "auto", "colab" hoặc "kaggle"
         REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
-        IS_KAGGLE = Path("/kaggle/input").is_dir()
+
+        def resolve_runtime_platform(requested):
+            if requested not in {"auto", "colab", "kaggle"}:
+                raise ValueError('RUNTIME_PLATFORM phải là "auto", "colab" hoặc "kaggle".')
+            if requested != "auto":
+                return requested
+            # A downloaded dataset may create /kaggle/input outside Kaggle.
+            shell_module = type(get_ipython()).__module__
+            if shell_module.startswith("google.colab") or os.environ.get("COLAB_RELEASE_TAG"):
+                return "colab"
+            if os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
+                return "kaggle"
+            raise RuntimeError('Không nhận diện được runtime. Đặt RUNTIME_PLATFORM="colab" hoặc "kaggle" ở đầu cell 1.')
+
+        IS_KAGGLE = resolve_runtime_platform(RUNTIME_PLATFORM) == "kaggle"
+        print("Platform:", "Kaggle" if IS_KAGGLE else "Colab CPU")
         CHECKOUT = Path("/kaggle/temp/VietMedBridge") if IS_KAGGLE else Path("/content/VietMedBridge-kaggle")
         WORK_DIR = Path("/kaggle/temp/vmb") if IS_KAGGLE else Path("/content/vmb_kaggle")
         WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -86,7 +105,7 @@ def main():
                 ) and saved.get("files"):
                     available[saved["manifest_sha256"]] = path.parent
             if len(available) != 1:
-                raise RuntimeError("Add Input đúng một dataset job VietMedBridge; có thể thêm Outputs cũ để resume.")
+                raise RuntimeError(f"Kaggle: tìm thấy {len(available)} input job hợp lệ. Add Input đúng một dataset job VietMedBridge; có thể thêm Outputs cũ để resume.")
             JOB_DIR = next(iter(available.values()))
             JOB_HEADER = json.loads((JOB_DIR / "job.json").read_text())
             if JOB_HEADER.get("repo_url") != REPO_URL or not re.fullmatch(r"[0-9a-f]{40}", JOB_HEADER.get("code_commit", "")):

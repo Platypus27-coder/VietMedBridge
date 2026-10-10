@@ -17,12 +17,19 @@ Mở notebook hỗ trợ trên Colab CPU. Trong cell 1:
 
 ```python
 DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")
+RUNTIME_PLATFORM = "auto"
 KAGGLE_NOTEBOOK_OUTPUT = ""
 KAGGLE_ACCOUNTS = 2
 KAGGLE_ACCOUNT_ID = 0
 GPUS_PER_ACCOUNT = 2
 SESSION_HOURS = 10.0
 ```
+
+Notebook nhận diện runtime Colab/Kaggle bằng shell và biến môi trường, không
+dựa vào sự tồn tại của `/kaggle/input`. Nếu dùng runtime đặc biệt hoặc bản cũ
+báo `Add Input` ngay trên Colab, đặt `RUNTIME_PLATFORM="colab"` trong bản mới;
+trên Kaggle giữ `"auto"` hoặc chọn `"kaggle"`. Dòng `Platform:` được in trước
+khi notebook tìm dataset hoặc mount Drive.
 
 Nếu tài khoản nhận thư mục chia sẻ qua shortcut thì `DATA_ROOT` phải trỏ đúng
 thư mục data đó, cùng nơi đã chạy notebook 04. Đây là đường dẫn Drive; Kaggle
