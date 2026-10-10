@@ -48,6 +48,25 @@ Gói chỉ chứa input embedding đã dedup, metadata và cache vector hợp l�
 upload HTML, toàn bộ parent/section corpus hoặc SQLite BM25. Gói được dựng ở
 ổ tạm Colab, chỉ lưu pointer nhỏ trên Drive.
 
+Runtime của máy xuất gói CPU không phải runtime chạy embedding GPU. Gói mới
+dùng `configs/kaggle_runtime.json` (`torch==2.8.0+cu126`, transformers 4.57.1,
+bitsandbytes 0.49.2), hoặc giữ runtime CUDA của vectors đã nhập trước đó. Không
+lấy phiên bản torch CPU đang cài trên Colab để khóa GPU worker. PyTorch cung
+cấp [wheel CUDA 12.6 cho bản 2.8.0](https://pytorch.org/get-started/previous-versions/).
+
+Nếu dataset cũ đã khóa `torch=2.11.0+cpu` và **chưa có seed vectors**, dùng
+notebook hỗ trợ mới trên Kaggle với **chính dataset đó**. Bootstrap kiểm seal,
+model source và mọi checksum, tạo job CUDA mới ở ổ tạm Kaggle với liên kết
+đến job gốc. Candidate, input files, số tài khoản/GPU và commit của encoder
+giữ nguyên; không cần chạy lại 02/03/CPU catalog hoặc upload dataset lại.
+Hai tài khoản nhận cùng job CUDA mới, nên Outputs vẫn nhập được cùng nhau.
+Job có seed vectors không được tự đổi producer runtime. Dataset gốc không bị sửa.
+
+Sau khi thay notebook, chạy **Save Version → Save & Run All** từ phiên mới.
+Không tiếp tục phiên đã import torch CPU. Bootstrap phải in torch CUDA,
+`CUDA available: True` và `GPUs: 2` trước khi cell embedding chạy; kiểm tra
+này không nạp model weights.
+
 Một người xuất **một dataset chung**, sau đó chủ dataset cấp quyền đọc trên
 Kaggle cho thành viên chạy tài khoản thứ hai. Cả hai Add Input đúng dataset đó;
 không xuất riêng hai gói ở hai môi trường khác nhau. Username của người xuất

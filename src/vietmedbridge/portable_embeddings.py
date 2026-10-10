@@ -70,11 +70,24 @@ def embedding_runtime():
     return {name: importlib.metadata.version(name) for name in ("torch", "transformers", "bitsandbytes")}
 
 
-def runtime_install_commands(runtime):
-    if set(runtime) != {"torch", "transformers", "bitsandbytes"} or any(
-        not re.fullmatch(r"[0-9][A-Za-z0-9.+_-]*", v) for v in runtime.values()
+def validate_runtime_lock(runtime):
+    if not isinstance(runtime, dict) or set(runtime) != {"torch", "transformers", "bitsandbytes"} or any(
+        not isinstance(v, str) or not re.fullmatch(r"[0-9][A-Za-z0-9.+_-]*", v) for v in runtime.values()
     ):
         raise ValueError("Invalid portable embedding runtime lock.")
+
+
+def cuda_embedding_runtime(checkout, runtime=None):
+    """Choose the GPU producer runtime, independently of the CPU export host."""
+    target = read_json(Path(checkout) / "configs/kaggle_runtime.json") if runtime is None else dict(runtime)
+    validate_runtime_lock(target)
+    if not re.search(r"\+cu[0-9]+$", target["torch"]):
+        raise ValueError("Kaggle export requires an explicit CUDA torch runtime; CPU locks cannot produce GPU embeddings.")
+    return target
+
+
+def runtime_install_commands(runtime):
+    validate_runtime_lock(runtime)
     def installed(name):
         try:
             return importlib.metadata.version(name)
@@ -111,6 +124,7 @@ def export_kaggle_job(data_root, checkout, destination, *, code_commit, runtime=
     from .full_scale_runtime import baseline_seed_sources
     kaggle_assignment(accounts=accounts, account_id=0, gpu_count=gpu_count)
     root, checkout, target = Path(data_root), Path(checkout), Path(destination)
+    runtime = cuda_embedding_runtime(checkout, runtime)
     build, candidate, inputs = load_handoff(root)
     ready = root / "retrieval/cpu_preparation" / (candidate["candidate_manifest_sha256"][:16] + ".json")
     if not ready.is_file() or read_json(ready).get("state") != "CPU_PREPARATION_COMPLETE":
@@ -120,7 +134,6 @@ def export_kaggle_job(data_root, checkout, destination, *, code_commit, runtime=
     if not re.fullmatch(r"[0-9a-f]{40}", code_commit):
         raise ValueError("Pin the full Git commit for the Kaggle worker.")
     config = read_json(checkout / "configs/retrieval_full.json")
-    runtime = runtime or embedding_runtime()
     resources = resources_relative(candidate, config)
     contract = {"config": config, "runtime": runtime,
                 "model_code": {n: sha256_file(checkout / "src/vietmedbridge" / n) for n in MODEL_FILES}}

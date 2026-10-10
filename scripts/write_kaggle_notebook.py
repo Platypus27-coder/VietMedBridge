@@ -1,8 +1,12 @@
 """Generate one account-independent Colab/Kaggle transfer and GPU notebook."""
+import json
+from pathlib import Path
+
 from write_notebooks import code, md, save
 
 
 def main():
+    cuda_runtime = json.loads((Path(__file__).resolve().parents[1] / "configs/kaggle_runtime.json").read_text())
     save("04_kaggle_embedding_worker.ipynb", [
         md('''
         # 04 — Chuyển embedding sang Kaggle, rồi nhập lại Drive
@@ -35,6 +39,10 @@ def main():
         Chạy một tài khoản thì đặt `KAGGLE_ACCOUNTS=1` trước khi xuất gói.
         `RUNTIME_PLATFORM="auto"` nhận diện runtime đang chạy, không dựa vào thư mục
         `/kaggle/input`. Có thể chọn rõ `"colab"` hoặc `"kaggle"` tại đầu cell 1.
+        Runtime GPU được khóa riêng, không lấy bản PyTorch CPU của máy xuất gói.
+        Gói cũ khóa `+cpu` và chưa có seed vectors được chuyển sang CUDA ngay tại
+        ổ tạm Kaggle, giữ nguyên input/checksum/commit/team. Không upload lại dataset.
+        Nếu phiên đã import torch CPU, mở phiên mới bằng Save & Run All.
 
         Phiên Kaggle tự dừng trước mốc 10 giờ tính từ cell đầu hoặc khi gần 18 GB
         output. Mỗi part hoàn tất có receipt/checksum. Đây là **checkpoint một phần**,
@@ -136,20 +144,55 @@ def main():
         _VMB_KAGGLE_COMMIT = CODE_COMMIT
         from vietmedbridge.portable_embeddings import (
             checked, embedding_runtime, export_kaggle_job, install_result, launch_kaggle,
-            runtime_install_commands, validate_job,
+            runtime_install_commands, validate_job, _copy_checked,
         )
         from vietmedbridge.artifacts import atomic_json, digest_json, read_json
+
+        def repair_cpu_export_job(job_dir, checkout, work_dir):
+            # Keep compatibility with the worker commit pinned in existing datasets.
+            source = Path(job_dir)
+            original = validate_job(read_json(source / "job.json"), checkout)
+            if not original["runtime"]["torch"].endswith("+cpu"):
+                return source, original
+            if original.get("seeds") or any(entry["path"].startswith("model_cache/") for entry in original["files"]):
+                raise ValueError("Gói CPU có seed vectors: không được đổi runtime của vectors đã tạo. Cần xuất gói CUDA riêng.")
+            target_runtime = __CUDA_RUNTIME__
+            runtime_install_commands(target_runtime)  # validate before copying any files
+            payload = {key: value for key, value in original.items() if key != "manifest_sha256"}
+            payload["runtime"] = target_runtime
+            payload["runtime_repair"] = {"policy": "cpu-export-to-cuda-v1",
+                "source_job": original["manifest_sha256"], "source_runtime": original["runtime"]}
+            repaired = {**payload, "manifest_sha256": digest_json(payload)}
+            validate_job(repaired, checkout)
+            destination = Path(work_dir) / ("cuda-job-" + repaired["manifest_sha256"])
+            header = destination / "job.json"
+            if header.exists() and read_json(header) != repaired:
+                raise ValueError("Local CUDA job differs; restart session with the original input dataset.")
+            for entry in repaired["files"]:
+                _copy_checked(source / entry["asset"], destination / entry["asset"], entry["sha256"])
+            atomic_json(header, repaired)  # publish only after every original payload verifies
+            return destination, repaired
+
         if IS_KAGGLE:
-            validate_job(JOB_HEADER, CHECKOUT)
+            JOB_DIR, JOB_HEADER = repair_cpu_export_job(JOB_DIR, CHECKOUT, WORK_DIR)
             commands = runtime_install_commands(JOB_HEADER["runtime"])
             if commands and "torch" in sys.modules:
                 raise RuntimeError("Restart session trước khi đổi torch. Save & Run All từ runtime mới.")
             for command in commands:
                 subprocess.run(command, check=True)
             importlib.invalidate_caches()
+            import torch
+            print("PyTorch:", torch.__version__, "| CUDA build:", torch.version.cuda,
+                  "| CUDA available:", torch.cuda.is_available(), "| GPUs:", torch.cuda.device_count())
+            if embedding_runtime() != JOB_HEADER["runtime"]:
+                raise RuntimeError("Runtime sau cài đặt không khớp job. Save & Run All từ phiên mới.")
+            if not torch.cuda.is_available() or torch.cuda.device_count() != GPUS_PER_ACCOUNT:
+                raise RuntimeError("PyTorch chưa dùng đủ GPU yêu cầu. Chọn T4 x2 và Save & Run All từ phiên mới; không giảm số worker.")
+            if JOB_HEADER.get("runtime_repair"):
+                print("CPU export repaired locally → CUDA; original dataset and all input checksums preserved.")
             print("Kaggle job:", JOB_HEADER["manifest_sha256"], "| inputs:", JOB_HEADER["input_count"])
         print("Platform:", "Kaggle" if IS_KAGGLE else "Colab CPU", "| code:", CODE_COMMIT)
-        '''),
+        '''.replace("__CUDA_RUNTIME__", repr(cuda_runtime))),
         md("## 2. Xuất dữ liệu / chạy hai GPU / nhập checkpoint — tự chọn theo nền tảng"),
         code('''
         if IS_KAGGLE:
@@ -195,8 +238,10 @@ def main():
                     print(json.dumps(install_result(path, DATA_ROOT, CHECKOUT), ensure_ascii=False, indent=2))
                 print("Đã nhập checkpoint. Các worker Colab 04 dùng lại parts này; dừng mọi worker Kaggle trước khi chia lại TEAM_SIZE.")
             else:
+                from vietmedbridge.portable_embeddings import cuda_embedding_runtime
                 runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
-                runtime = checked(read_json(runtime_lock))["runtime"] if runtime_lock.exists() else embedding_runtime()
+                runtime = cuda_embedding_runtime(CHECKOUT,
+                    checked(read_json(runtime_lock))["runtime"] if runtime_lock.exists() else None)
                 destination = WORK_DIR / ("inputs-" + digest_json([CODE_COMMIT, runtime, KAGGLE_ACCOUNTS, GPUS_PER_ACCOUNT,
                                             read_json(DATA_ROOT / "active_data_candidate.json")])[:16])
                 job = export_kaggle_job(DATA_ROOT, CHECKOUT, destination, code_commit=CODE_COMMIT, runtime=runtime,
