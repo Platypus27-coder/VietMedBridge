@@ -309,17 +309,29 @@ def publish_receipt(root, output, job, family, saved, encoder, *, state=None):
     atomic_json(receipt_path, receipt)
 
 
-def finalize_result(output, job, *, processes=None):
+def finalize_result(output, job, *, processes=None, inputs=None):
     output = Path(output)
     if (output / "job.json").exists() and read_json(output / "job.json") != job:
         raise ValueError("Kaggle output directory belongs to another job.")
     receipts = [_entry(output, p) for p in sorted((output / "receipts").glob("*.json"))]
     atomic_json(output / "job.json", job)
-    result = seal({"schema": "portable-result-v1", "job": job["manifest_sha256"],
+    result = {"schema": "portable-result-v1", "job": job["manifest_sha256"],
         "state": "WORKER_FAILED_WITH_CHECKPOINTS" if any(processes or []) else "CHECKPOINTED_PARTIAL", "receipts": receipts,
         "assignment": read_json(output / "assignment.json") if (output / "assignment.json").exists() else None,
         "processes": processes or [], "updated_at": utc_now(),
-        "scope": "Completed corpus embedding parts only; no query inference or submission"})
+        "scope": "Completed corpus embedding parts only; no query inference or submission"}
+    result["worker_status"] = [read_json(path) for path in sorted((output / "workers").glob("*.json"))]
+    if inputs is not None and result["assignment"] is not None:
+        from .kaggle_continuation import assignment_progress, load_plan
+        plan = load_plan(output, job, inputs)
+        result["account_coverage"] = assignment_progress(inputs, result["assignment"], plan,
+            [checked(read_json(output / entry["path"])) for entry in receipts])
+        if not any(processes or []) and all(value["complete"] for value in result["account_coverage"].values()):
+            result["state"] = "ACCOUNT_ASSIGNMENT_COMPLETE"
+        elif not any(processes or []) and all(value["round_complete"] for value in result["account_coverage"].values()):
+            result["state"] = "ROUND_ASSIGNMENT_COMPLETE"
+        result["continuation_plan"] = plan["manifest_sha256"] if plan is not None else None
+    result = seal(result)
     atomic_json(output / "result-manifest.json", result)
     return result
 
@@ -346,38 +358,74 @@ def run_worker(job_dir, scratch, output, checkout, *, worker_id, workers, deadli
     job = validate_job(read_json(job_dir / "job.json"), checkout,
                        runtime=embedding_runtime() if encoder_factory is None else None)
     build, _, inputs = load_handoff(scratch)
+    from .kaggle_continuation import load_plan
+    plan = load_plan(job_dir, job, inputs)
     local_workers = job.get("team", {}).get("gpu_count", workers)
+    status = {"worker_id": worker_id, "families": {}}
+    status_path = output / "workers" / f"worker-{worker_id}.json"
     for family, spec_name in (("bge", "dense"), ("qwen", "second_dense")):
-        if time.time() >= deadline:
-            break
-        assigned = [p for i, p in enumerate(inputs["parts"]) if i % workers == worker_id]
+        previous = set(plan["completed"][family]) if plan is not None else set()
+        assigned = [p for i, p in enumerate(inputs["parts"])
+                    if i % workers == worker_id and p["start"] not in previous
+                    and (plan is None or p["start"] in plan["scheduled"][family])]
+        progress = {"scheduled_parts": len(assigned), "saved_parts": 0,
+                    "remaining_parts": len(assigned), "stop_reason": "RUNNING"}
+        status["families"][family] = progress
+        def save_progress(reason):
+            progress["saved_parts"] = sum((output / "receipts" / f"{family}-{part['start']:012d}.json").exists()
+                                           for part in assigned)
+            progress["remaining_parts"] = len(assigned) - progress["saved_parts"]
+            progress["stop_reason"] = reason
+            atomic_json(status_path, status)
         if all((scratch / job["resources"] / family / f"map-{p['start']:012d}.done.json").exists()
                and (output / "receipts" / f"{family}-{p['start']:012d}.json").exists() for p in assigned):
+            save_progress("ALREADY_COMPLETE")
+            print(f"Worker {worker_id}: {family} has no remaining parts to encode.", flush=True)
+            continue
+        if time.time() >= deadline:
+            save_progress("SESSION_TIME_LIMIT")
             continue
         used = sum(p.stat().st_size for p in output.rglob("*") if p.is_file())
         if used + local_workers * max(1_000_000, max((p["rows"] for p in assigned), default=0) *
                                 ((1024 if family == "bge" else 4096) * 4 + 512)) > max_output_bytes:
             print(f"Worker {worker_id}: output budget reached before loading {family}.", flush=True)
+            save_progress("OUTPUT_SIZE_LIMIT")
             continue
         factory = encoder_factory or (TorchDenseEncoder if family == "bge" else TorchQwenEncoder)
-        print(f"Worker {worker_id}/{workers}: {family}, {len(assigned)} assigned input parts.", flush=True)
-        model = factory(job["config"][spec_name])
-        encoder = model.for_role("corpus") if family == "qwen" and hasattr(model, "for_role") else model
+        print(f"Worker {worker_id}/{workers}: {family}, {len(assigned)} remaining assigned input parts.", flush=True)
+        model = None
         try:
+            model = factory(job["config"][spec_name])
+            encoder = model.for_role("corpus") if family == "qwen" and hasattr(model, "for_role") else model
             validate_encoder(job, family, encoder.identity, encoder.dimension)
             publishing = {}
             def stop(part):
                 used = sum(p.stat().st_size for p in output.rglob("*") if p.is_file())
                 reserve = max(1_000_000, part["rows"] * encoder.dimension * 4 + part["rows"] * 512)
                 # Reserve for both processes that can pass this check concurrently.
-                return time.time() >= deadline or used + local_workers * reserve > max_output_bytes
+                reason = ("SESSION_TIME_LIMIT" if time.time() >= deadline else
+                          "OUTPUT_SIZE_LIMIT" if used + local_workers * reserve > max_output_bytes else None)
+                if reason is not None:
+                    save_progress(reason)
+                return reason is not None
+            def publish(saved):
+                publish_receipt(scratch, output, job, family, saved, encoder, state=publishing)
+                save_progress("RUNNING")
+                print(f"{family} worker {worker_id}: saved {progress['saved_parts']}/{len(assigned)} "
+                      "scheduled parts for this round.", flush=True)
             content_embeddings(scratch, build / "index_inputs", inputs, encoder,
                 scratch / job["resources"] / family, work_dir=scratch / f"work-{worker_id}",
                 worker_id=worker_id, workers=workers,
+                selected_starts={part["start"] for part in assigned},
                 batch_size=32 if family == "bge" else (inference_batches()["embedding"] if encoder_factory is None else 2),
-                should_stop=stop, on_part=lambda saved: publish_receipt(scratch, output, job, family, saved, encoder, state=publishing))
+                should_stop=stop, on_part=publish)
+            save_progress("ASSIGNMENT_COMPLETE" if progress["remaining_parts"] == 0 else progress["stop_reason"])
+        except BaseException:
+            save_progress("WORKER_ERROR")
+            raise
         finally:
-            model.close()
+            if model is not None:
+                model.close()
 
 
 def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=10.0, gpu_count=None,
@@ -401,13 +449,23 @@ def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=
     if accounts > 1 and job.get("team") is None:
         raise ValueError("Parallel Kaggle accounts need a shared job exported by the updated notebook.")
     hydrate_job(job_dir, scratch, checkout)
+    from .kaggle_continuation import load_plan
+    _, _, inputs = load_handoff(scratch)
+    plan = load_plan(job_dir, job, inputs)
     output.mkdir(parents=True, exist_ok=True)
+    plan_path = output / "continuation-plan.json"
+    if plan_path.exists() and read_json(plan_path) != plan:
+        raise ValueError("Output folder belongs to another continuation round; use a fresh session.")
+    if plan is not None:
+        atomic_json(plan_path, plan)
     atomic_json(assignment_path, assignment)
     print(f"Kaggle account {account_id}/{accounts}: local GPUs {count}, global workers {assignment['worker_ids']}"
           f"/{assignment['workers']}; deadline {hours:g} hours from first cell.", flush=True)
-    finalize_result(output, job)
+    finalize_result(output, job, inputs=inputs)
     # Saved outputs attached as Add Input allow another bounded Kaggle session.
     for previous in sorted(Path("/kaggle/input").glob("**/result-manifest.json")):
+        if plan is not None:
+            break  # Drive holds the old vectors. This round publishes new parts only.
         previous_result = read_json(previous)
         if previous_result.get("job") == job["manifest_sha256"]:
             if previous_result.get("assignment") != assignment and not (
@@ -417,7 +475,7 @@ def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=
                 continue
             install_result(previous.parent, scratch, checkout, update_lock=False)
             carry_forward(previous.parent, output)
-    finalize_result(output, job)
+    finalize_result(output, job, inputs=inputs)
     processes = []
     def stop_processes():
         for process in processes:
@@ -447,9 +505,9 @@ def launch_kaggle(job_dir, checkout, *, output, scratch, session_started, hours=
         statuses = [p.returncode for p in processes]
     except BaseException:
         stop_processes()
-        finalize_result(output, job, processes=[p.returncode for p in processes])
+        finalize_result(output, job, processes=[p.returncode for p in processes], inputs=inputs)
         raise
-    return finalize_result(output, job, processes=statuses)
+    return finalize_result(output, job, processes=statuses, inputs=inputs)
 
 
 def install_result(result_dir, data_root, checkout, *, update_lock=True):
@@ -604,6 +662,7 @@ def install_result(result_dir, data_root, checkout, *, update_lock=True):
     if assignment is not None:
         atomic_json(root / "retrieval/portable_imports" / job["manifest_sha256"][:16]
                     / f"account-{assignment['account_id']}.json", report)
+    atomic_json(root / "retrieval/portable_imports" / job["manifest_sha256"][:16] / "job.json", job)
     atomic_json(root / "retrieval/portable_imports" / (job["manifest_sha256"][:16] + ".json"), report)
     return report
 

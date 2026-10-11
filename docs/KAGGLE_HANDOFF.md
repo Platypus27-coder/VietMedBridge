@@ -119,6 +119,38 @@ kiểm tra và mang chúng sang Outputs phiên mới. Outputs của account ID k
 được bỏ qua, không copy thành một bản thừa. Giữ cùng cách chia khi resume.
 Giới hạn 18 GB tính cả các checkpoint mang theo, riêng cho từng phiên Kaggle.
 
+### Tiếp tục từ Drive khi Outputs tích lũy lớn
+
+Sau khi nhập checkpoint, bản notebook mới tự xuất một **continuation dataset**
+nếu `corpus_embeddings_complete=false`. Dataset giữ nguyên job, model/runtime,
+candidate và input checksums; thêm `continuation-plan.json` khóa commit của worker
+đã hỗ trợ chạy tiếp. Commit mới chỉ thay đổi phần điều phối; cả hai file encoder
+phải có đúng hash của job cũ trước khi được dùng.
+
+Plan được lập từ map checkpoints đã kiểm trên Drive, gồm phần đã hoàn tất và
+phần được giao trong lượt tới. Mỗi tài khoản được giao tối đa khoảng 16 GB vector
+và metadata ước tính, để chừa khoảng trống trong ngân sách Outputs 18 GB.
+`minimum_rounds_by_capacity` chỉ tính dung lượng; tốc độ GPU và thời hạn phiên có
+thể làm số lượt thực tế lớn hơn. Không hứa đủ toàn bộ corpus trong một phiên.
+
+Trên cả hai Kaggle account, dùng **notebook hỗ trợ bản mới**, bỏ input dataset cũ,
+Add Input **chỉ continuation dataset mới nhất**, giữ account ID 0/1 và T4 x2.
+Không gắn Outputs cũ trong chế độ này: vector cũ đã nằm trên Drive. Worker bỏ qua
+những part đã hoàn tất, không nạp BGE khi nhánh đó đã đủ; Outputs chỉ chứa part
+mới. Nhập chúng về cùng Drive rồi lập plan tiếp theo nếu còn thiếu.
+
+Log phân biệt `ROUND_ASSIGNMENT_COMPLETE` (xong phần được giao trong lượt này),
+`ACCOUNT_ASSIGNMENT_COMPLETE` (xong toàn bộ phần của account) và
+`CHECKPOINTED_PARTIAL` (lượt còn dang dở). `account_coverage` in phần còn lại của
+lượt và của toàn account; `worker_status` ghi `SESSION_TIME_LIMIT`,
+`OUTPUT_SIZE_LIMIT` hoặc `WORKER_ERROR` khi có. Chỉ coverage cộng gộp trên Drive
+của cả BGE và Qwen mới chốt đủ embedding corpus.
+
+Ví dụ đã xác nhận trong log ngày 11/10: BGE 937/937, Qwen 151/937. Còn
+3.218.991 văn bản Qwen, khoảng 52,7 GB vector float32, chưa tính metadata.
+Hai Outputs có ngân sách 18 GB mỗi phiên không thể chứa hết phần này cùng lúc;
+cần nhiều lượt có checkpoint. Không crawl/chunk hoặc tính lại BGE đã hoàn tất.
+
 ## 4. Nhập kết quả về Drive
 
 Sau khi Kaggle đã dừng, mở notebook hỗ trợ trên Colab CPU và điền:

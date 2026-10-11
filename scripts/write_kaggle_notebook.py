@@ -30,7 +30,9 @@ def main():
            `KAGGLE_NOTEBOOK_OUTPUT="owner-a/notebook-a, owner-b/notebook-b"`, Run all. Notebook
            kiểm trạng thái/manifest của cả hai acc trước khi tải vector, rồi kiểm
            checksum, model, source text và từng vector row trước khi nhập Drive.
-           Sau đó mới tiếp tục notebook 04 chính trên Colab GPU.
+           Nếu còn thiếu, tự xuất một dataset tiếp tục chỉ giao phần thiếu từ checkpoint
+           Drive; dùng dataset đó cho lượt Kaggle kế tiếp. Khi cả BGE và Qwen đủ,
+           mới tiếp tục notebook 04 chính trên Colab GPU.
 
         Người nào cũng chạy được bằng Secret tài khoản của mình và quyền đọc Drive.
         Nếu dùng private dataset/output của người khác, chủ sở hữu cần cấp quyền
@@ -54,7 +56,11 @@ def main():
 
         `/kaggle/working` cần được lưu thành notebook version thành công mới lấy
         được từ Colab. Không cố chờ quota ngắt cứng. Có thể Add Input Outputs của
-        phiên Kaggle trước để resume; version mới giữ cả checkpoint trước đó.
+        phiên Kaggle trước để resume theo cách cũ; version mới giữ cả checkpoint trước đó.
+        Với nhiều triệu văn bản, ưu tiên nhập Drive rồi dùng **continuation dataset**:
+        nó bỏ qua phần đã có, không mang vector cũ vào Outputs và tránh đầy giới hạn
+        dung lượng vì checkpoint tích lũy. Một phiên kết thúc không có nghĩa cả hai
+        model đã xong; xem `account_coverage`, `worker_status` và coverage trên Drive.
         ''') ,
         md("## 1. Cấu hình và bootstrap — tự nhận Colab hoặc Kaggle"),
         code('''
@@ -114,9 +120,11 @@ def main():
                 if saved.get("schema") == "portable-embeddings-v1" and all(
                     (path.parent / entry["asset"]).is_file() for entry in saved.get("files", [])
                 ) and saved.get("files"):
-                    available[saved["manifest_sha256"]] = path.parent
+                    continuation_file = path.parent / "continuation-plan.json"
+                    continuation_id = json.loads(continuation_file.read_text()).get("manifest_sha256") if continuation_file.is_file() else None
+                    available[(saved["manifest_sha256"], continuation_id)] = path.parent
             if len(available) != 1:
-                raise RuntimeError(f"Kaggle: tìm thấy {len(available)} input job hợp lệ. Add Input đúng một dataset job VietMedBridge; có thể thêm Outputs cũ để resume.")
+                raise RuntimeError(f"Kaggle: tìm thấy {len(available)} input job/plan hợp lệ. Add Input đúng một dataset job VietMedBridge. Với continuation, bỏ dataset gốc và các plan cũ; chỉ giữ dataset tiếp tục mới nhất.")
             JOB_DIR = next(iter(available.values()))
             JOB_HEADER = json.loads((JOB_DIR / "job.json").read_text())
             if JOB_HEADER.get("repo_url") != REPO_URL or not re.fullmatch(r"[0-9a-f]{40}", JOB_HEADER.get("code_commit", "")):
@@ -124,6 +132,14 @@ def main():
             if JOB_HEADER.get("team") != {"accounts": KAGGLE_ACCOUNTS, "gpu_count": GPUS_PER_ACCOUNT}:
                 raise ValueError("Số tài khoản/GPU không khớp input chung. Xuất gói bằng notebook mới trên Colab CPU với cùng cấu hình team.")
             reference = JOB_HEADER["code_commit"]
+            continuation_header = JOB_DIR / "continuation-plan.json"
+            if continuation_header.is_file():
+                header = json.loads(continuation_header.read_text())
+                if (header.get("job") != JOB_HEADER["manifest_sha256"] or
+                    not re.fullmatch(r"[0-9a-f]{40}", header.get("worker_code_commit", ""))):
+                    raise ValueError("Continuation plan chưa khóa đúng job/worker commit.")
+                # Transport may advance; validate_job still locks both model source hashes.
+                reference = header["worker_code_commit"]
         else:
             from google.colab import drive
             drive.mount("/content/drive")
@@ -264,6 +280,17 @@ def main():
 
         if IS_KAGGLE:
             JOB_DIR, JOB_HEADER = repair_cpu_export_job(JOB_DIR, CHECKOUT, WORK_DIR)
+            validate_job(JOB_HEADER, CHECKOUT)
+            if (JOB_DIR / "continuation-plan.json").is_file():
+                from vietmedbridge.kaggle_continuation import assignment_progress, load_plan
+                from vietmedbridge.portable_embeddings import kaggle_assignment
+                units_entry = next(entry for entry in JOB_HEADER["files"]
+                    if entry["path"] == f"processed/{JOB_HEADER['build_run']}/index_inputs/units.json")
+                JOB_INPUTS = checked(read_json(JOB_DIR / units_entry["asset"]))
+                PLAN = load_plan(JOB_DIR, JOB_HEADER, JOB_INPUTS)
+                assignment = kaggle_assignment(accounts=KAGGLE_ACCOUNTS, account_id=KAGGLE_ACCOUNT_ID,
+                                               gpu_count=GPUS_PER_ACCOUNT)
+                print("Remaining assignment:", json.dumps(assignment_progress(JOB_INPUTS, assignment, PLAN, [])))
             CUDA_PROBE = configure_kaggle_cuda(JOB_HEADER["runtime"], GPUS_PER_ACCOUNT, CHECKOUT)
             if JOB_HEADER.get("runtime_repair"):
                 print("CPU export repaired locally → CUDA; original dataset and all input checksums preserved.")
@@ -277,7 +304,9 @@ def main():
                                   scratch=WORK_DIR / "data", session_started=SESSION_STARTED, hours=SESSION_HOURS,
                                   accounts=KAGGLE_ACCOUNTS, account_id=KAGGLE_ACCOUNT_ID, gpu_count=GPUS_PER_ACCOUNT)
             print(json.dumps({k: RESULT[k] for k in ("state", "processes", "assignment", "updated_at", "scope")}
-                             | {"completed_parts": len(RESULT["receipts"])}, ensure_ascii=False, indent=2))
+                             | {"completed_parts": len(RESULT["receipts"]),
+                                "account_coverage": RESULT.get("account_coverage"),
+                                "worker_status": RESULT.get("worker_status")}, ensure_ascii=False, indent=2))
             print("Chờ Save & Run All hoàn tất để Outputs được lưu. Sau đó nhập Outputs về Drive bằng Colab CPU.")
         else:
             from google.colab import userdata
@@ -290,6 +319,7 @@ def main():
                 raise ValueError("KAGGLE_JSON phải có username và key hợp lệ.")
             os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"] = owner, api_key
             del credentials, api_key
+            from vietmedbridge.kaggle_continuation import find_imported_job, upload_continuation
             if KAGGLE_NOTEBOOK_OUTPUT:
                 from kaggle.api.kaggle_api_extended import KaggleApi
                 from vietmedbridge.kaggle_outputs import download_kaggle_outputs, output_handles
@@ -305,8 +335,22 @@ def main():
                     raise ValueError("Các Outputs trùng KAGGLE_ACCOUNT_ID. Chọn một version mới nhất cho mỗi tài khoản; hai tài khoản phải là 0 và 1.")
                 for handle, path in zip(handles, outputs, strict=True):
                     print("Nhập Outputs:", handle)
-                    print(json.dumps(install_result(path, DATA_ROOT, CHECKOUT), ensure_ascii=False, indent=2))
-                print("Đã nhập checkpoint. Các worker Colab 04 dùng lại parts này; dừng mọi worker Kaggle trước khi chia lại TEAM_SIZE.")
+                    report = install_result(path, DATA_ROOT, CHECKOUT)
+                    print(json.dumps(report, ensure_ascii=False, indent=2))
+                if not report["corpus_embeddings_complete"]:
+                    upload_continuation(DATA_ROOT, CHECKOUT, WORK_DIR / "continuations",
+                        read_json(outputs[0] / "job.json"), owner=owner, worker_code_commit=CODE_COMMIT)
+                else:
+                    print("Cả BGE và Qwen đã đủ. Tiếp tục notebook 04 chính; giữ checkpoint đã nhập.")
+            elif (previous_job := find_imported_job(DATA_ROOT, CHECKOUT)) is not None:
+                from vietmedbridge.portable_embeddings import embedding_coverage
+                if all(value["complete"] for value in embedding_coverage(DATA_ROOT, previous_job).values()):
+                    print("Cả BGE và Qwen đã đủ. Tiếp tục notebook 04 chính; không xuất lại embedding job.")
+                else:
+                    if previous_job.get("team") != {"accounts": KAGGLE_ACCOUNTS, "gpu_count": GPUS_PER_ACCOUNT}:
+                        raise ValueError("Tiếp tục với số tài khoản/GPU của job đã nhập; không đổi cách chia giữa các lượt.")
+                    upload_continuation(DATA_ROOT, CHECKOUT, WORK_DIR / "continuations",
+                        previous_job, owner=owner, worker_code_commit=CODE_COMMIT)
             else:
                 from vietmedbridge.portable_embeddings import cuda_embedding_runtime
                 runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"

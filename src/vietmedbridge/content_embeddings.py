@@ -133,12 +133,17 @@ class ContentBlocks:
 
 def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir,batch_size=32,
                        max_new_parts=None,worker_id=None,workers=1,encode_missing=True,seed_root=None,seed_sources=(),
-                       should_stop=None,on_part=None):
+                       should_stop=None,on_part=None,selected_starts=None):
     check_manifest(inputs)
     if (type(workers) is not int or workers < 1 or (worker_id is not None and
         (type(worker_id) is not int or not 0 <= worker_id < workers)) or type(batch_size) is not int or batch_size < 1
         or (max_new_parts is not None and (type(max_new_parts) is not int or max_new_parts < 0))):
         raise ValueError("Invalid content embedding worker/limits.")
+    if selected_starts is not None:
+        selected_starts = set(selected_starts)
+        if (any(type(start) is not int for start in selected_starts)
+            or not selected_starts <= {part["start"] for part in inputs["parts"]}):
+            raise ValueError("Selected embedding parts do not belong to these inputs.")
     root = Path(output_dir)
     identity = {"input_manifest_sha256":inputs["manifest_sha256"],"input_count":inputs["input_count"],
         "encoder":encoder.identity,"dimension":encoder.dimension,"format":"content-reference-v1"}
@@ -162,7 +167,8 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
             cursor += source["rows"]
             marker = root / f"map-{source['start']:012d}.done.json"
             expected = {"signature":signature,"start":source["start"],"rows":source["rows"],"input_sha256":source["sha256"]}
-            assigned = worker_id is None or index % workers == worker_id
+            assigned = (worker_id is None or index % workers == worker_id) and (
+                selected_starts is None or source["start"] in selected_starts)
             if marker.exists():
                 saved = checked(read_json(marker))
                 if any(saved.get(k) != v for k,v in expected.items()):
