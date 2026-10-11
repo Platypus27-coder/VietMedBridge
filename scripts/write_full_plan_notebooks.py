@@ -96,14 +96,93 @@ print("Code commit:",CODE_COMMIT)
 '''
 
 
+DRIVE_CACHED_BOOT = '''
+import importlib, json, os, subprocess, sys
+from pathlib import Path
+from google.colab import drive
+
+drive.mount("/content/drive", readonly=True)
+DATA_ROOT = Path(DRIVE_DATA_ROOT)
+if not (DATA_ROOT / "active_data_candidate.json").is_file():
+    shared = sorted(Path("/content/drive/.shortcut-targets-by-id").glob("*/VietMedBridge/data/active_data_candidate.json"))
+    if DATA_ROOT == Path("/content/drive/MyDrive/VietMedBridge/data") and len(shared) == 1:
+        DATA_ROOT = shared[0].parent
+    else:
+        raise RuntimeError(f"Không thấy active candidate tại {DATA_ROOT}. Điền DRIVE_DATA_ROOT đúng thư mục data đã xử lý.")
+WORK_DIR = Path("/content/vmb_work")
+RESULTS_ROOT = Path("/content/vmb_results")
+WORK_DIR.mkdir(parents=True,exist_ok=True)
+RESULTS_ROOT.mkdir(parents=True,exist_ok=True)
+os.environ["HF_HOME"] = "/content/hf_cache"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
+CODE_REVISION = None  # main mới nhất; không đổi code trong một runtime đang chạy
+EXPECTED_PIPELINE_API = 2
+CHECKOUT = Path("/content/VietMedBridge")
+if not (CHECKOUT / ".git").exists():
+    subprocess.run(["git","clone","--no-checkout",REPO_URL,str(CHECKOUT)],check=True)
+if subprocess.check_output(["git","-C",str(CHECKOUT),"remote","get-url","origin"],text=True).strip() != REPO_URL:
+    raise ValueError("Checkout không thuộc VietMedBridge.")
+subprocess.run(["git","-C",str(CHECKOUT),"fetch","--depth","1","origin",CODE_REVISION or "main"],check=True)
+CODE_COMMIT = subprocess.check_output(["git","-C",str(CHECKOUT),"rev-parse","FETCH_HEAD"],text=True).strip()
+if "vietmedbridge" in sys.modules and globals().get("_VMB_IMPORTED_COMMIT") != CODE_COMMIT:
+    raise RuntimeError("Code đã đổi trong runtime; Restart session rồi chạy lại notebook.")
+subprocess.run(["git","-C",str(CHECKOUT),"checkout","--detach","FETCH_HEAD"],check=True)
+subprocess.run([sys.executable,"-m","pip","install","--disable-pip-version-check","-e",".[notebook,retrieval,strong]"],cwd=CHECKOUT,check=True)
+sys.path.insert(0,str(CHECKOUT / "src"))
+importlib.invalidate_caches()
+from vietmedbridge import PIPELINE_API_VERSION
+from vietmedbridge.artifacts import atomic_json, read_json, runtime_versions
+from vietmedbridge.portable_embeddings import checked, runtime_install_commands
+from vietmedbridge.scale_benchmark import load_handoff
+from vietmedbridge.scale_baseline import imported_bge_manifest
+if PIPELINE_API_VERSION != EXPECTED_PIPELINE_API:
+    raise RuntimeError("Pipeline API khác phiên bản notebook.")
+embedding_runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
+if not embedding_runtime_lock.is_file():
+    raise RuntimeError("Thiếu retrieval_embedding_runtime_lock.json từ bước nhập Kaggle; chưa nạp model hoặc encode corpus.")
+pinned_runtime = checked(read_json(embedding_runtime_lock))["runtime"]
+commands = runtime_install_commands(pinned_runtime)
+if commands and "torch" in sys.modules:
+    raise RuntimeError("Restart session trước khi cài runtime embedding đã khóa từ Kaggle.")
+for command in commands:
+    subprocess.run(command,check=True)
+importlib.invalidate_caches()
+subprocess.run([sys.executable,"-c", "import torch; print('PyTorch:',torch.__version__,'| CUDA:',torch.cuda.is_available()); assert torch.cuda.is_available(), 'Chọn Colab T4 GPU; PyTorch phải là bản CUDA.'"],check=True)
+BUILD_DIR, CANDIDATE, INDEX_INPUTS = load_handoff(DATA_ROOT)
+if CANDIDATE["counts"]["input_records"] < MIN_EXPECTED_INPUT_RECORDS:
+    raise RuntimeError(f"Active candidate chỉ có {CANDIDATE['counts']['input_records']:,} input IDs; cần ít nhất {MIN_EXPECTED_INPUT_RECORDS:,}. Kiểm tra đúng DATA_ROOT/candidate 700k; không tự chạy lại union.")
+FULL_CONFIG = read_json(CHECKOUT / "configs/retrieval_full.json")
+_, BGE_CACHE = imported_bge_manifest(DATA_ROOT,CANDIDATE,INDEX_INPUTS,FULL_CONFIG)
+if BGE_CACHE is None or BGE_CACHE["state"] != "COMPLETE":
+    raise RuntimeError("BGE cache của active candidate chưa đủ. Không tự encode lại corpus.")
+PIPELINE_CONFIG = read_json(CHECKOUT / "configs/data_pipeline.json")
+atomic_json(RESULTS_ROOT / "runtime.json",{"git_commit":CODE_COMMIT,"source":str(DATA_ROOT),
+    "source_read_only":True,"packages":runtime_versions()})
+_VMB_IMPORTED_COMMIT = CODE_COMMIT
+print("Drive source (read only):",DATA_ROOT)
+print("Corpus:",json.dumps(CANDIDATE["counts"],ensure_ascii=False))
+print(f"BGE cache: {len(BGE_CACHE['parts'])}/{len(INDEX_INPUTS['parts'])} parts | {INDEX_INPUTS['input_count']:,} inputs")
+print("Checkpoint/ZIP:",RESULTS_ROOT,"| tải ZIP trước khi kết thúc runtime.")
+print("Code commit:",CODE_COMMIT)
+'''
+
+
 def retrieval_bootstrap():
-    settings = '''USE_HF_STORAGE = False  # True sau khi notebook tools/drive_hf_storage báo HF_STORAGE_VERIFIED
+    settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = True  # ưu tiên submission bằng BGE/BM25 đã xong; Colab GPU
+DRIVE_DATA_ROOT = "/content/drive/MyDrive/VietMedBridge/data"
+MIN_EXPECTED_INPUT_RECORDS = 700244  # chặn chạy nhầm candidate 100k cũ; tăng khi có batch mới
+USE_HF_STORAGE = False  # True sau HF_STORAGE_VERIFIED; khi đó tắt RUN_CACHED_BASELINE_FROM_DRIVE
 HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
     legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v13-hf-storage")
-    return settings + "\nif USE_HF_STORAGE:\n" + textwrap.indent(HF_BOOT.strip(),"    ") + "\nelse:\n" + textwrap.indent(legacy.strip(),"    ")
+    return (settings + '\nif RUN_CACHED_BASELINE_FROM_DRIVE and USE_HF_STORAGE:\n'
+        '    raise ValueError("Chọn đúng một nguồn Drive hoặc HF.")\n'
+        'if RUN_CACHED_BASELINE_FROM_DRIVE:\n' + textwrap.indent(DRIVE_CACHED_BOOT.strip(),"    ")
+        + "\nelif USE_HF_STORAGE:\n" + textwrap.indent(HF_BOOT.strip(),"    ")
+        + "\nelse:\n" + textwrap.indent(legacy.strip(),"    "))
 
 
 def main():
@@ -112,6 +191,18 @@ def main():
         # VietMedBridge — 04: Full retrieval system trên frozen corpus
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
+        **Chạy submission trên Drive hiện có:** mặc định
+        `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `USE_HF_STORAGE=False`.
+        Chọn **Colab T4 GPU**, Run all. Đọc active candidate, BGE đã nhập và
+        catalog BM25 đã hoàn tất trên Drive; không chờ upload HF.
+        Chỉ encode 1.200 query, truy hồi và xuất ZIP. Catalog được khôi phục,
+        vectors được cache vào ổ local khi cần. Không crawl/chunk/encode lại corpus
+        hoặc ghi thêm vào Drive đang đầy. Thiếu catalog/BGE phù hợp thì dừng.
+        Checkpoint và ZIP ở `/content/vmb_results`, dùng lại khi chạy lại trong
+        cùng runtime. Runtime bị thu hồi sẽ mất checkpoint local; corpus vẫn ở
+        Drive. Tải ZIP và bản checkpoint nhỏ ở cuối notebook trước khi ngắt phiên.
+
+        **Quy trình full bên dưới:** đặt `RUN_CACHED_BASELINE_FROM_DRIVE=False`.
         Lần đầu hoặc khi ghép data mới: chọn **CPU**, giữ `PREPARE_ONLY=True`, Run all.
         Chờ `CPU_PREPARATION_COMPLETE` rồi chuyển sang **GPU, T4 trở lên**,
         đặt `PREPARE_ONLY=False` để chạy embeddings/inference. Giữ DATA_ROOT cũ;
@@ -127,7 +218,8 @@ def main():
 
         **Drive đầy, dữ liệu đã chuyển lên HF:** chạy utility
         `tools/drive_hf_storage.ipynb` trên CPU đến HF_STORAGE_VERIFIED. Trong
-        cell 1 notebook này đặt `USE_HF_STORAGE=True`, giữ repo đã chuyển,
+        cell 1 notebook này đặt `RUN_CACHED_BASELINE_FROM_DRIVE=False`,
+        `USE_HF_STORAGE=True`, giữ repo đã chuyển,
         `HF_STORAGE_PROFILE="bge_submit"`; chọn Colab GPU và Run all.
         Tự tải metadata/catalog/BGE về /content/vmb_data và chọn baseline ở
         cell 2. Không mount hoặc ghi Drive; Qwen và source shards không cần tải
@@ -257,7 +349,8 @@ def main():
         TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
 
-        if globals().get("USE_HF_STORAGE") and HF_STORAGE_PROFILE == "bge_submit":
+        DRIVE_CACHED_MODE = globals().get("RUN_CACHED_BASELINE_FROM_DRIVE",False)
+        if DRIVE_CACHED_MODE or (globals().get("USE_HF_STORAGE") and HF_STORAGE_PROFILE == "bge_submit"):
             PREPARE_ONLY = False
             INFERENCE_MODE = "bge_bm25_cached"
             TEAM_SIZE, TEAM_WORKER_ID = 1, None
@@ -269,7 +362,7 @@ def main():
 
         # Notebook 03 appends each newly frozen candidate to this Drive manifest.
         # The coordinator composes the old corpus plus new batch automatically.
-        LINEAGE_SOURCES = read_candidate_lineage(DATA_ROOT)
+        LINEAGE_SOURCES = [] if INFERENCE_MODE == "bge_bm25_cached" else read_candidate_lineage(DATA_ROOT)
         if PREPARE_ONLY and TEAM_WORKER_ID is not None:
             raise ValueError("Chuẩn bị CPU dùng TEAM_WORKER_ID=None; GPU workers đặt PREPARE_ONLY=False.")
         if len(LINEAGE_SOURCES) > 1:
@@ -311,8 +404,9 @@ def main():
                 "samples":[],"diagnostics_path":str(DATA_ROOT / "retrieval/cpu_preparation")}
             READY = RESULT["ready"]
         elif INFERENCE_MODE == "bge_bm25_cached":
+            storage_options = {"output_root":RESULTS_ROOT,"read_only_source":True} if DRIVE_CACHED_MODE else {}
             RESULT = run_large_baseline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
-                work_dir=WORK_DIR, reuse_content_only=True, max_new_queries=MAX_NEW_QUERIES)
+                work_dir=WORK_DIR, reuse_content_only=True, max_new_queries=MAX_NEW_QUERIES,**storage_options)
             READY = RESULT["ready"]
         elif LARGE_CANDIDATE:
             RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
@@ -370,6 +464,24 @@ def main():
         else:
             verify_file(READY["zip_path"], READY["zip_sha256"])
             files.download(READY["zip_path"])
+        '''),
+        md('''
+        ## 5. Lưu checkpoint inference về máy — tùy chọn
+
+        Với chế độ Drive đọc nguồn, cell này chỉ gom checkpoint query embeddings,
+        dense search, query predictions và submission vào ZIP nhỏ; không gom
+        corpus vectors, catalog hoặc model weights. Chạy sau khi đã dừng cell 2.
+        Muốn resume ở runtime mới: upload ZIP vào `/content`, giải nén vào
+        `/content/vmb_results`, giữ nguyên code/model/candidate/policy.
+        Không tự đồng bộ lên Drive hoặc HF đang đầy/bị giới hạn.
+        '''),
+        code('''
+        if globals().get("RUN_CACHED_BASELINE_FROM_DRIVE",False):
+            import shutil
+            from google.colab import files
+            checkpoint_zip = shutil.make_archive("/content/vmb-inference-checkpoints","zip",RESULTS_ROOT)
+            print("Checkpoint backup:",checkpoint_zip)
+            files.download(checkpoint_zip)
         '''),
     ])
     save("05_colab_supervised_training.ipynb", [

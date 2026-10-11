@@ -6,6 +6,28 @@ Hugging Face giữ snapshot của active candidate cùng các checkpoint vector.
 Colab tải phần cần thiết về ổ tạm để xử lý; không dùng `hf://` như một đường
 dẫn `Path` thay cho Drive. Không cần crawl/chunk/embedding lại để đổi nơi lưu.
 
+## Chạy ngay trên Drive, chưa chờ HF
+
+Mở `notebooks/04_colab_retrieval_baseline.ipynb` trên **Colab T4 GPU** và Run all.
+Mặc định `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `USE_HF_STORAGE=False`.
+`DRIVE_DATA_ROOT` là thư mục data cũ; tự nhận một shortcut VietMedBridge nếu
+đường dẫn MyDrive mặc định không có active candidate.
+`MIN_EXPECTED_INPUT_RECORDS=700244` chặn chạy nhầm candidate 100k cũ. Đây là
+số IDs đã nhập, gồm cả thất bại; không đồng nghĩa có đủ 700.244 bài hợp lệ.
+
+Lượt này dùng active candidate và BGE đã hoàn tất, khôi phục catalog BM25 đã
+lưu về ổ local, encode 1.200 query, tìm kiếm rồi xuất ZIP. Không cần HF_TOKEN
+hoặc upload HF. Drive chỉ được đọc; checkpoint query/search và ZIP mới nằm ở
+`/content/vmb_results`. Vectors được cache trên ổ local khi truy hồi, không
+encode lại corpus. Thiếu BGE/catalog hoặc sai runtime thì dừng; không tự
+dựng lại catalog, ghép corpus hoặc chuyển sang full inference.
+
+Giữ runtime đến khi tải submission ZIP. Cell cuối cho tải bản checkpoint
+inference riêng, không chứa corpus/catalog/model weights. Runtime bị thu hồi
+sẽ mất checkpoint local nếu chưa tải bản này; dữ liệu gốc vẫn ở Drive.
+Đây là lượt baseline để lấy điểm trước, chưa chạy Qwen/reranker/fine-tune.
+Muốn trở lại full workflow hoặc dùng HF, tắt `RUN_CACHED_BASELINE_FROM_DRIVE`.
+
 ## 1. Chuyển dữ liệu đang có — Colab CPU
 
 Mở [`tools/drive_hf_storage.ipynb`](../notebooks/tools/drive_hf_storage.ipynb).
@@ -52,6 +74,7 @@ Mở bản mới [`04_colab_retrieval_baseline.ipynb`](../notebooks/04_colab_ret
 Thêm HF_TOKEN có quyền **đọc** repo; chọn **T4**. Đầu cell 1:
 
 ```python
+RUN_CACHED_BASELINE_FROM_DRIVE = False
 USE_HF_STORAGE = True
 HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"

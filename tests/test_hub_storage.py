@@ -193,6 +193,72 @@ def test_snapshot_restore_and_full_1200_query_zip_without_drive_writes_or_corpus
     assert Path(output["ready"]["zip_path"]).is_relative_to(destination)
 
 
+def test_drive_source_exports_all_queries_to_local_without_source_writes_or_hub(tmp_path,prepared,monkeypatch):
+    from vietmedbridge import scale_baseline as runtime, catalog_storage
+    checkout,_,encoder,queries = prepared
+    outputs = tmp_path.parent / (tmp_path.name+"-results")
+    work = tmp_path.parent / (tmp_path.name+"-work")
+    before = {p.relative_to(tmp_path):(sha256_file(p),p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setitem(sys.modules,"torch",SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:True)))
+    monkeypatch.setattr(runtime,"review_model_registry",lambda *_:None)
+    monkeypatch.setattr(runtime,"TorchDenseEncoder",lambda _:encoder)
+    monkeypatch.setattr(runtime,"stream_embeddings",lambda *a,**kw:pytest.fail("Corpus encoding forbidden"))
+    monkeypatch.setattr(catalog_storage.writer,"prepare_disk_catalog",lambda *a,**kw:pytest.fail("Catalog rebuild forbidden"))
+    monkeypatch.setattr(catalog_storage,"_publish",lambda *a,**kw:pytest.fail("Source catalog publish forbidden"))
+    monkeypatch.setattr(storage,"_download",lambda *a,**kw:pytest.fail("HF download forbidden"))
+    real_search = runtime.search_parts
+    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**kw,device="cpu"))
+    kwargs = dict(code_commit="CPU-double",work_dir=work,reuse_content_only=True,
+        output_root=outputs,read_only_source=True)
+    partial = runtime.run_large_baseline(tmp_path,checkout,**kwargs,max_new_queries=3)
+    assert partial["ready"]["state"] == "QUERIES_IN_PROGRESS"
+    output = runtime.run_large_baseline(tmp_path,checkout,**kwargs)
+    assert output["ready"]["state"] == "READY_FOR_MANUAL_UPLOAD"
+    assert output["status"]["source_read_only"] is True
+    assert output["status"]["corpus_reencoded"] is False
+    assert encoder.texts == [q["query"] for q in queries]
+    assert Path(output["ready"]["zip_path"]).is_relative_to(outputs)
+    with ZipFile(output["ready"]["zip_path"]) as archive:
+        predictions = json.loads(archive.read("results.json"))
+    assert [p["id"] for p in predictions] == [q["id"] for q in queries]
+    sources = {d:build_source(tmp_path,d) for d in (583,921)}
+    assert all(c["chunk_text"] in sources[c["doc_id"]] for p in predictions for c in p["relevant_chunks"])
+    assert before == {p.relative_to(tmp_path):(sha256_file(p),p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*") if p.is_file()}
+    for bad in ({"output_root":tmp_path / "results"}, {"work_dir":tmp_path / "work"},
+                {"reuse_content_only":False}, {"output_root":None}):
+        with pytest.raises(ValueError,match="Read-only source"):
+            runtime.run_large_baseline(tmp_path,checkout,**(kwargs | bad))
+
+
+def test_drive_notebook_routes_to_read_only_cached_inference(tmp_path,prepared,monkeypatch):
+    from vietmedbridge import full_plan_runtime, full_scale_runtime, scale_baseline
+    checkout,_,_,_ = prepared
+    notebook = read_json(REPO / "notebooks/04_colab_retrieval_baseline.ipynb")
+    bootstrap = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code")
+    assert "RUN_CACHED_BASELINE_FROM_DRIVE = True" in bootstrap
+    assert "MIN_EXPECTED_INPUT_RECORDS = 700244" in bootstrap
+    assert 'drive.mount("/content/drive", readonly=True)' in bootstrap
+    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
+    def forbidden(*args,**kwargs):
+        pytest.fail("Drive baseline must not enter full inference, CPU preparation or lineage composition")
+    monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
+    monkeypatch.setattr(full_scale_runtime,"run_scale_full_pipeline",forbidden)
+    monkeypatch.setattr(full_scale_runtime,"prepare_scale_cpu_resources",forbidden)
+    from vietmedbridge import index_inputs
+    monkeypatch.setattr(index_inputs,"read_candidate_lineage",forbidden)
+    calls = []
+    monkeypatch.setattr(scale_baseline,"run_large_baseline",lambda *a,**kw:
+        (calls.append(kw) or {"ready":{"state":"READY_FOR_MANUAL_UPLOAD","query_count":1200},"status":{},"samples":[]}))
+    context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path.parent / "work",
+        "RESULTS_ROOT":tmp_path.parent / "results","CODE_COMMIT":"CPU-test","RUN_CACHED_BASELINE_FROM_DRIVE":True}
+    exec(compile(cell,"04-drive-routing","exec"),context)
+    assert calls == [{"code_commit":"CPU-test","work_dir":context["WORK_DIR"],
+        "reuse_content_only":True,"max_new_queries":None,"output_root":context["RESULTS_ROOT"],"read_only_source":True}]
+    assert context["TEAM_SIZE"] == 1 and context["PREPARE_ONLY"] is False
+
+
 def test_incomplete_bge_snapshot_cannot_be_restored_for_submit(tmp_path,prepared,hub):
     _,plan,_,_ = prepared
     from vietmedbridge.content_embeddings import seal

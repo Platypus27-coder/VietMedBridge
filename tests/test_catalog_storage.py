@@ -87,6 +87,34 @@ def test_chunked_catalog_new_runtime_restore_and_repeat_preserve_identity(tmp_pa
     assert (sha256_file(marker), marker.stat().st_mtime_ns) == before
 
 
+def test_read_only_catalog_restores_but_never_rebuilds_or_repairs_source(tmp_path, frozen, setup_catalog, monkeypatch):
+    prepare, analyzer = setup_catalog
+    built = prepare()
+    identity = built.identity
+    built.close()
+    build, candidate, inputs = frozen
+    marker = next((tmp_path / "catalogs").glob("*/catalog.json"))
+    before = {p.relative_to(marker.parent): (sha256_file(p), p.stat().st_mtime_ns)
+        for p in marker.parent.rglob("*") if p.is_file()}
+    monkeypatch.setattr(writer, "prepare_disk_catalog", lambda *a, **kw: pytest.fail("Read-only source cannot rebuild"))
+    monkeypatch.setattr(storage, "_publish", lambda *a, **kw: pytest.fail("Read-only source cannot publish"))
+    for _ in range(2):
+        restored = storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+            work_dir=tmp_path / "readonly-work",read_only=True)
+        assert restored.identity == identity
+        restored.close()
+    assert before == {p.relative_to(marker.parent): (sha256_file(p), p.stat().st_mtime_ns)
+        for p in marker.parent.rglob("*") if p.is_file()}
+    next((marker.parent / "catalog.parts").glob("*.gz")).unlink()
+    with pytest.raises(ValueError, match="changed artifact"):
+        storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+            work_dir=tmp_path / "another-runtime",read_only=True)
+    marker.unlink()
+    with pytest.raises(ValueError, match="Completed CPU catalog missing"):
+        storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+            work_dir=tmp_path / "another-runtime",read_only=True)
+
+
 def test_publish_failure_retains_local_db_and_resumes_uploaded_parts(tmp_path, frozen, setup_catalog, monkeypatch):
     prepare, _ = setup_catalog
     publish = storage.publish_file

@@ -139,7 +139,8 @@ def predict_baseline(catalog,store,queries,query_vectors,positions,scores,search
 
 
 def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
-                       max_new_embedding_parts=None,max_new_queries=None,reuse_content_only=False):
+                       max_new_embedding_parts=None,max_new_queries=None,reuse_content_only=False,
+                       output_root=None,read_only_source=False):
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError("Select a Colab GPU for large-corpus BGE inference.")
@@ -148,6 +149,12 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
     if type(reuse_content_only) is not bool:
         raise ValueError("reuse_content_only must be a boolean.")
     root,checkout,work = Path(data_root),Path(checkout),Path(work_dir)
+    outputs = Path(output_root) if output_root is not None else root / "retrieval"
+    if read_only_source:
+        if not reuse_content_only or output_root is None:
+            raise ValueError("Read-only source requires cached BGE and a separate output_root.")
+        if any(p.resolve().is_relative_to(root.resolve()) for p in (outputs,work)):
+            raise ValueError("Read-only source outputs/work must stay outside DATA_ROOT.")
     build,candidate,inputs = load_handoff(root)
     config = read_json(checkout / "configs/retrieval_large_baseline.json")
     full = read_json(checkout / "configs/retrieval_full.json")
@@ -175,14 +182,15 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"],glossary_path=glossary if glossary.is_file() else None)
     config["analyzer"] = analyzer.identity
     mode = "-bge-bm25-cached-v1-" if reuse_content_only else "-bge-bm25-v1-"
-    run = root / "retrieval" / (build.name+mode+candidate["candidate_manifest_sha256"][:8])
+    run = outputs / (build.name+mode+candidate["candidate_manifest_sha256"][:8])
     profile = RuntimeProfile(run / "runtime_profile.json")
     print(f"Baseline: {candidate['counts']['documents']:,} documents, {inputs['input_count']:,} unique inputs",flush=True)
     if reuse_content_only:
         print(f"Reusing {len(cm['parts'])}/{len(inputs['parts'])} BGE parts; corpus encoding disabled.",flush=True)
     print("Executed model: BAAI/bge-m3. Qwen models are deferred for this baseline.",flush=True)
     with profile.stage("disk_catalog_multilingual_bm25"):
-        catalog = prepare_disk_catalog(build,candidate,inputs,root / "retrieval/catalogs",analyzer,work_dir=work)
+        catalog = prepare_disk_catalog(build,candidate,inputs,root / "retrieval/catalogs",analyzer,work_dir=work,
+            **({"read_only":True} if read_only_source else {}))
     try:
         contract = bind_pilot_run(run,plan_path=checkout / MASTER_PLAN,catalog=catalog,queries=queries,
             config=config,code_commit=code_commit)
@@ -246,6 +254,7 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             "complete_master_plan":False,"fine_tuned":False,"official_score":None,
             "architecture":config["architecture"],"executed_models":[config["dense"]],
             "corpus_embeddings_reused":reuse_content_only,"corpus_reencoded":False if reuse_content_only else None,
+            "source_read_only":read_only_source,"output_root":str(outputs),
             "deferred":["Qwen embedding","query translation/expansion","neural reranker","document dense","adaptive source parents","supervised training"],
             "limitations":["Only the imported partial corpus is searchable","Dense document candidates derive from top child hits; not a document-dense branch",
                 "Uncalibrated top-k; no relevance labels or score guarantee"],

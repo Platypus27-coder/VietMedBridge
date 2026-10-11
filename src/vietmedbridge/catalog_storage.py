@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 from uuid import uuid4
 
@@ -155,7 +156,7 @@ def _preserve_bad_local(local_dir):
             path.rename(local_dir / f"{name}.invalid-{tag}")
 
 
-def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work_dir):
+def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work_dir, read_only=False):
     """Reuse healthy catalogs, repair from local bytes, otherwise rebuild only this derived index."""
     policy = _contract(build, candidate, inputs, analyzer)
     signature = digest_json(policy)
@@ -163,9 +164,24 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
     local_dir = Path(work_dir) / target.name
     if target.resolve() == local_dir.resolve():
         raise ValueError("Persistent catalog output must differ from the runtime work directory.")
+    if read_only and (local_dir.resolve().is_relative_to(Path(output_dir).resolve())
+                      or local_dir.resolve().is_relative_to(Path(build).resolve())):
+        raise ValueError("Read-only catalog work must stay outside the source directories.")
     local_dir.mkdir(parents=True, exist_ok=True)
     local, marker = local_dir / "catalog.sqlite", target / "catalog.json"
     saved = _manifest(marker, policy, candidate, inputs) if marker.exists() else None
+    if read_only:
+        # A full Drive cannot receive repairs or rebuilt indexes. Restore only a
+        # completed catalog; the default repair/publish path below stays intact.
+        if saved is None:
+            raise ValueError(f"Completed CPU catalog missing: {marker}. Read-only inference will not rebuild it.")
+        if not _matches(local, saved["sha256"]):
+            size = saved["storage"]["bytes"] if "storage" in saved else (target / saved["path"]).stat().st_size
+            if size + 2 * 2**30 > shutil.disk_usage(local_dir).free:
+                raise ValueError("Insufficient Colab disk to restore the completed CPU catalog.")
+            print("Read-only Drive: restoring completed CPU catalog to local disk", flush=True)
+            _restore(target, saved, local)
+        return writer.DiskCatalog(local, candidate, inputs, analyzer, saved)
     if saved is not None:
         # A corrupt contract is never ignored. Only derived payload availability
         # can be repaired; inputs and the current data policy were checked above.
