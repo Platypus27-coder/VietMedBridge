@@ -187,6 +187,7 @@ def test_entrypoint_all_1200_queries_resume_source_zip_and_feedback(tmp_path,fro
     test_checkout = tmp_path / "checkout"
     atomic_json(test_checkout / "configs/retrieval_large_baseline.json",config)
     atomic_json(test_checkout / "configs/retrieval_full.json",full)
+    atomic_json(test_checkout / "configs/retrieval_scale.json",read_json(checkout / "configs/retrieval_scale.json"))
     atomic_json(test_checkout / "configs/strong_model_manifest.json",{"models":[SPEC | {"parameters":4}]})
     (test_checkout / MASTER_PLAN).write_text("CPU wiring fixture, never upload these predictions",encoding="utf-8")
     queries = [{"id":10001+i*7,"query":"Người bệnh triệu chứng 中文医学"} for i in range(1200)]
@@ -210,7 +211,7 @@ def test_entrypoint_all_1200_queries_resume_source_zip_and_feedback(tmp_path,fro
     encoder = CachedEncoder() if reuse_content_only else Encoder()
     monkeypatch.setattr(runtime,"TorchDenseEncoder",lambda _:encoder)
     real_search = runtime.search_parts
-    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**kw,device="cpu"))
+    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**(kw | {"device":"cpu"})))
     kwargs = dict(code_commit="CPU-test",work_dir=tmp_path / "work",reuse_content_only=reuse_content_only)
     if reuse_content_only:
         # Native content maps use the same layout as verified Kaggle imports.
@@ -320,7 +321,8 @@ def test_notebook_cached_baseline_routes_to_cache_only_coordinator(tmp_path,froz
     context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test"}
     exec(compile(cell,"04-cached-baseline-routing","exec"),context)
     assert calls == [(tmp_path,checkout,{"code_commit":"CPU-test","work_dir":tmp_path / "work",
-        "reuse_content_only":True,"max_new_queries":None})]
+        "reuse_content_only":True,"max_new_queries":None,
+        "vector_search_options":{"backend":"faiss_ivf_sq8","nprobe":64}})]
     assert context["READY"]["query_count"] == 1200
 
 

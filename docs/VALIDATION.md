@@ -1,5 +1,27 @@
 # Kiểm chứng data pipeline v2
 
+## Persistent ANN và Qdrant backend — 11/10/2026
+
+**59 passed in 179.34s**: test_vector_index, test_cached_strong, test_full_scale,
+test_scale_baseline, test_hub_storage, test_catalog_storage. FAISS 1.12.0 thật
+trên CPU: IVF/SQ8 training/index/search, checksum corruption, build resume,
+append reuse và reuse shard khi global offset đổi. ANN candidates được exact
+rescore theo một lượt source-part; refinement checkpoint không đọc lại part
+đã xong. Recall gate fail chặn kết quả cuối. Query batches và complete results
+được dùng lại. Full/cached entrypoints kiểm source/schema/ZIP đủ 1.200 queries;
+neural models là doubles, không phải đo chất lượng relevance hay GPU.
+
+Qdrant REST mock kiểm wait=true, mất acknowledgement sau upsert, retry không
+nhân đôi ID, exact server count, append reuse, collection bị mất, trạng thái
+chờ HNSW optimization, query dispatch/recall/refinement/resume và kiểm URL/key.
+Chưa chạy server Qdrant thật. Compose ghim 1.19.2 đã kiểm YAML; chưa deploy.
+Notebook 04 qua nbformat/schema/Python syntax/empty-output checks. Các file
+vector Python qua syntax, git diff --check sạch. Trên Windows test runner nạp
+FAISS trước DuckDB để tránh xung đột DLL OpenMP; Linux mmap chưa live-test.
+
+Chưa benchmark thời gian, dung lượng thực hoặc ANN recall trên candidate 700k;
+chưa có official score mới. Chưa upload thêm storage hay thay dữ liệu Drive.
+
 ## Cached strong inference — 11/10/2026
 
 Regression liên quan disk full runtime, cached baseline, catalog và storage:

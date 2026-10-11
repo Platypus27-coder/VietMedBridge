@@ -39,6 +39,11 @@ cho corpus pilot. Không chạy các notebook
    nhánh còn lại và không encode lại child corpus. Drive đọc nguồn; outputs mới
    ở ổ tạm Colab, cần tải backup trước khi runtime bị thu hồi. Muốn nộp baseline
    trước: `CACHED_INFERENCE_MODE="bge_bm25_cached"`.
+   Mặc định `VECTOR_BACKEND="faiss_ivf_sq8"`: chỉ mục ANN lưu theo shard,
+   dùng lại embedding cũ, checkpoint build/search/refinement và kiểm recall so
+   với exact trước inference. Có backend Qdrant server qua `QDRANT_URL` và
+   Secret `QDRANT_API_KEY`; chưa có server thì giữ FAISS. Xem
+   [vector index và vector DB](docs/VECTOR_SEARCH.md).
    Đọc candidate active từ 03. Corpus lớn chạy BGE child/document dense +
    Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF → Qwen3-Reranker-8B
    document/child MaxP → source parent 512/640 và LCS dedup. Qwen3-4B dịch,

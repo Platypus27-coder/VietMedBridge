@@ -22,12 +22,14 @@ from .runtime_profile import RuntimeProfile, inference_batches
 from .scale_baseline import imported_content_manifest
 from .scale_benchmark import load_handoff
 from .strong_retrieval import auxiliary_units
+from .vector_search import search_vectors, preflight
+from .vector_index import policy as vector_policy, VectorIndexPending
 
 
 def prepare_cached_strong_resources(root, checkout, work, queries, *, output_root,
                                     second_dense_mode="if_complete", document_dense_enabled=True,
                                     max_new_embedding_parts=None, max_new_translations=None,
-                                    search_device="cuda"):
+                                    search_device="cuda", vector_search_options=None):
     from transformers import AutoTokenizer
 
     root, checkout, work, outputs = map(Path, (root, checkout, work, output_root))
@@ -41,6 +43,7 @@ def prepare_cached_strong_resources(root, checkout, work, queries, *, output_roo
     build, candidate, inputs = load_handoff(root)
     config = read_json(checkout / "configs/retrieval_full.json")
     scale = read_json(checkout / "configs/retrieval_scale.json")
+    vector_options = vector_policy(scale.get("vector_search", {}) | (vector_search_options or {}))
     registry = read_json(checkout / "configs/strong_model_manifest.json")
     full.review_model_registry(config, registry)
     bge_view, cm = imported_content_manifest(root, candidate, inputs, config, family="bge")
@@ -69,6 +72,7 @@ def prepare_cached_strong_resources(root, checkout, work, queries, *, output_roo
         return waiting("WAITING_FOR_COMPLETE_BGE_CACHE")
     if second_dense_mode == "require" and not second_complete:
         return waiting("WAITING_FOR_COMPLETE_QWEN_CACHE")
+    preflight(vector_options)
     print(f"Cached strong: {coverage['searchable_documents']:,} documents; "
           f"BGE {coverage['bge_completed_parts']}/{coverage['total_parts']}; "
           f"Qwen {coverage['qwen_completed_parts']}/{coverage['total_parts']} "
@@ -79,6 +83,7 @@ def prepare_cached_strong_resources(root, checkout, work, queries, *, output_roo
     if not document_dense_enabled:
         config["retrieval"]["document_dense_weight"] = 0.
     config["scale_execution"] = scale
+    config["vector_search"] = vector_options
     config["architecture"] = "master-plan-cached-strong-" + ("dual-dense" if second_complete else "bge-dense")
     config["execution_policy"] = {"mode":"cached_strong", "second_dense_mode":second_dense_mode,
         "second_dense_active":second_complete, "document_dense_enabled":document_dense_enabled,
@@ -161,12 +166,14 @@ def prepare_cached_strong_resources(root, checkout, work, queries, *, output_roo
             local_cache_bytes=scale["local_vector_cache_bytes_per_branch"]) if second_complete else None
         documents = ContentVectorParts(outputs, resources / "document_dense", dm, cache_dir,
             local_cache_bytes=min(scale["local_vector_cache_bytes_per_branch"], 2**30)) if dm else None
-        search_root = resources / "search" / digest_json({"queries":queries, "aux":aux,
+        search_root = outputs / "vector_search" / digest_json({"candidate":candidate["candidate_manifest_sha256"],"queries":queries, "aux":aux,
             "auxiliary_family":config["execution_policy"]["auxiliary_dense_family"]})[:16]
         searches = []
         def search(name, store, vectors, k):
             with profile.stage("dense_search_"+name):
-                result = full.search_parts(store, vectors, search_root / name, k=k, work_dir=work, device=search_device)
+                result = search_vectors(store, vectors, search_root / name, k=k, work_dir=work, device=search_device,
+                    options=vector_options, index_root=outputs / "vector_indexes" / vector_options["backend"],
+                    reference_search=full.search_parts)
             searches.append(result)
             return result
         if secondary is None:
@@ -192,6 +199,9 @@ def prepare_cached_strong_resources(root, checkout, work, queries, *, output_roo
             "document_dense":"COMPLETE" if dm else "DISABLED",
             "qwen_child_dense":"COMPLETE" if secondary is not None else "DEFERRED_INCOMPLETE_CACHE" if sm else "DISABLED_OR_UNAVAILABLE",
             "auxiliary_dense_family":config["execution_policy"]["auxiliary_dense_family"]}
+        branches["vector_index"] = vector_options["backend"]
+        vector_reports = [{"backend":s[2]["backend"],"index_manifest_sha256":s[2].get("index"),
+            "quality":s[2].get("quality"),"exact_candidate_rescoring":s[2].get("exact_candidate_rescoring",False)} for s in searches]
         identity = {"catalog":catalog.identity, "primary":cm["manifest_sha256"],
             "secondary":sm["manifest_sha256"] if secondary is not None else None,
             "document_dense":dm["manifest_sha256"] if dm else None, "auxiliary":am["manifest_sha256"],
@@ -208,7 +218,9 @@ def prepare_cached_strong_resources(root, checkout, work, queries, *, output_roo
         handed_off = True
         return {"state":"FULL_RESOURCES_READY", "index":index, "vectors":qv, "query_manifest":qm,
             "translations":translations, "config":config, "registry":registry, "resources":str(resources),
-            "branches":branches, "coverage":coverage}
+            "branches":branches, "coverage":coverage,"vector_search_reports":vector_reports}
+    except VectorIndexPending as pending:
+        return waiting(pending.report["state"],vector_index=pending.report)
     finally:
         if not handed_off:
             catalog.close()

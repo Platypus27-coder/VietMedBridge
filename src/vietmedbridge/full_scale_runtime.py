@@ -30,6 +30,8 @@ from .scale_benchmark import load_handoff
 from .scale_vectors import bound, search_parts
 from .strong_retrieval import StrongConfig, auxiliary_units, predict_strong
 from .translation_model import TorchQueryTranslator
+from .vector_search import search_vectors, preflight
+from .vector_index import policy as vector_policy, VectorIndexPending
 
 
 def is_large_handoff(root,config):
@@ -226,7 +228,8 @@ def baseline_seed_sources(root,candidate):
 
 
 def prepare_scale_resources(root,checkout,work,queries,*,catalog=None,worker_id=None,workers=1,
-                            max_new_embedding_parts=None,max_new_translations=None,search_device="cuda"):
+                            max_new_embedding_parts=None,max_new_translations=None,search_device="cuda",
+                            vector_search_options=None):
     """All four model roles, bounded corpus reads, query cache independent of corpus."""
     from transformers import AutoTokenizer
     root,checkout,work = Path(root),Path(checkout),Path(work)
@@ -236,6 +239,10 @@ def prepare_scale_resources(root,checkout,work,queries,*,catalog=None,worker_id=
     registry = read_json(checkout / "configs/strong_model_manifest.json")
     review_model_registry(config,registry)
     config["scale_execution"] = scale
+    vector_options = vector_policy(scale.get("vector_search", {}) | (vector_search_options or {}))
+    config["vector_search"] = vector_options
+    if worker_id is None:
+        preflight(vector_options)
     tokenizer = AutoTokenizer.from_pretrained(config["dense"]["model_id"],revision=config["dense"]["revision"],trust_remote_code=False)
     if catalog is None:
         catalog,analyzer = load_scale_catalog(root,checkout,work,tokenizer)
@@ -326,10 +333,16 @@ def prepare_scale_resources(root,checkout,work,queries,*,catalog=None,worker_id=
     primary,secondary,documents = (_store(root,resources / name,m,work,scale["local_vector_cache_bytes_per_branch"])
         for name,m in (("bge",cm),("qwen",sm),("document_dense",dm)))
     searches = []
-    for name,store,vectors in (("bge",primary,qv),("qwen",secondary,av),("documents",documents,qv)):
-        with profile.stage("dense_search_"+name):
-            searches.append(search_parts(store,vectors,resources / "search" / digest_json({"queries":queries,"aux":aux})[:16] / name,
-                k=scale["dense_top_k"] if name != "documents" else config["retrieval"]["doc_candidate_k"],work_dir=work,device=search_device))
+    try:
+        for name,store,vectors in (("bge",primary,qv),("qwen",secondary,av),("documents",documents,qv)):
+            with profile.stage("dense_search_"+name):
+                searches.append(search_vectors(store,vectors,root / "retrieval/vector_search" / digest_json({"candidate":candidate["candidate_manifest_sha256"],"queries":queries,"aux":aux})[:16] / name,
+                    k=scale["dense_top_k"] if name != "documents" else config["retrieval"]["doc_candidate_k"],work_dir=work,device=search_device,
+                    options=vector_options,index_root=root / "retrieval/vector_indexes" / vector_options["backend"],reference_search=search_parts))
+    except VectorIndexPending as pending:
+        catalog.close()
+        profile.finish(pending.report["state"])
+        return pending.report | {"resources":str(resources)}
     ps,ss,ds = searches
     primary_search = {q["query"]:(ps[0][i],ps[1][i]) for i,q in enumerate(queries)}
     secondary_search = {u["id"]:(ss[0][i],ss[1][i]) for i,u in enumerate(aux)}
@@ -344,7 +357,9 @@ def prepare_scale_resources(root,checkout,work,queries,*,catalog=None,worker_id=
         primary_search,secondary_search,document_search,document_ids,tokenizer,manifest)
     profile.finish("FULL_RESOURCES_READY")
     return {"state":"FULL_RESOURCES_READY","index":index,"vectors":qv,"query_manifest":qm,"translations":translations,
-        "config":config,"budget":model_budget_report(config,registry),"registry":registry,"resources":str(resources)}
+        "config":config,"budget":model_budget_report(config,registry),"registry":registry,"resources":str(resources),
+        "vector_search_reports":[{"backend":s[2]["backend"],"index_manifest_sha256":s[2].get("index"),
+            "quality":s[2].get("quality"),"exact_candidate_rescoring":s[2].get("exact_candidate_rescoring",False)} for s in searches]}
 
 
 def scale_adapter(root,catalog,queries,config):
@@ -377,7 +392,7 @@ def scale_adapter(root,catalog,queries,config):
 def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=None,workers=1,
                             max_new_embedding_parts=None,max_new_translations=None,max_new_queries=None,
                             execution_mode="full",output_root=None,second_dense_mode="if_complete",
-                            document_dense_enabled=True):
+                            document_dense_enabled=True,vector_search_options=None):
     root,checkout = Path(data_root),Path(checkout)
     if execution_mode not in ("full", "cached_strong"):
         raise ValueError("Unknown full inference execution mode.")
@@ -388,12 +403,14 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
         from .cached_strong_runtime import prepare_cached_strong_resources
         prepared = prepare_cached_strong_resources(root,checkout,work_dir,queries,output_root=output_root,
             second_dense_mode=second_dense_mode,document_dense_enabled=document_dense_enabled,
-            max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations)
+            max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations,
+            vector_search_options=vector_search_options)
     else:
         if output_root is not None:
             raise ValueError("Separate output_root currently requires cached_strong execution.")
         prepared = prepare_scale_resources(root,checkout,work_dir,queries,worker_id=worker_id,workers=workers,
-            max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations)
+            max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations,
+            vector_search_options=vector_search_options)
     if prepared["state"] != "FULL_RESOURCES_READY":
         return {"ready":{"state":prepared["state"],"query_count":0},"status":prepared,"samples":[],
             "diagnostics_path":prepared.get("resources",str(root / "retrieval/full_resources"))}
@@ -429,6 +446,7 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
             "all_dense_branches_ready":all_dense,
             "strong_inference":True,"complete_master_plan":False,"execution_mode":execution_mode,
             "branches":branches,"coverage":prepared.get("coverage"),
+            "vector_search":prepared.get("vector_search_reports"),
             "executed_models":[config[k] for k in ("dense","translation","reranker")]
                 + ([config["second_dense"]] if branches.get("qwen_child_dense") == "COMPLETE" else []),
             "source_read_only":execution_mode == "cached_strong","output_root":str(outputs),

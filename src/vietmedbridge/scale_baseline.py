@@ -148,7 +148,7 @@ def predict_baseline(catalog,store,queries,query_vectors,positions,scores,search
 
 def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
                        max_new_embedding_parts=None,max_new_queries=None,reuse_content_only=False,
-                       output_root=None,read_only_source=False):
+                       output_root=None,read_only_source=False,vector_search_options=None):
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError("Select a Colab GPU for large-corpus BGE inference.")
@@ -165,6 +165,11 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             raise ValueError("Read-only source outputs/work must stay outside DATA_ROOT.")
     build,candidate,inputs = load_handoff(root)
     config = read_json(checkout / "configs/retrieval_large_baseline.json")
+    from .vector_index import policy as vector_policy
+    from .vector_search import search_vectors, preflight
+    from .vector_index import VectorIndexPending
+    vector_options = vector_policy(read_json(checkout / "configs/retrieval_scale.json").get("vector_search", {}) | (vector_search_options or {}))
+    config["vector_search"] = vector_options
     full = read_json(checkout / "configs/retrieval_full.json")
     registry = read_json(checkout / "configs/strong_model_manifest.json")
     review_model_registry(full,registry)
@@ -182,6 +187,7 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             return {"ready":{"state":status["state"],"query_count":0},"status":status,
                 "samples":[],"diagnostics_path":str(content_view)}
         config["corpus_embedding_source"] = "verified_content_cache_only"
+    preflight(vector_options)
     snapshot = read_json(root / "raw/snapshot.json")
     if snapshot["files"]["links_corpus.parquet"]["sha256"] != candidate["origin_corpus_sha256"]:
         raise ValueError("Large baseline/official corpus snapshot mismatch.")
@@ -237,8 +243,9 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             print(f"Local BGE cache budget: {cache_bytes / 2**30:.2f} GiB",flush=True)
         else:
             store = VectorParts(run / "corpus_embeddings",cm,work / "vector_cache")
-        with profile.stage("all_query_exact_dense_search"):
-            scores,positions,search = search_parts(store,qv,run / "dense_search",k=config["retrieval"]["dense_top_k"],work_dir=work)
+        with profile.stage("persistent_vector_index_search"):
+            scores,positions,search = search_vectors(store,qv,outputs / "vector_search" / digest_json({"candidate":candidate["candidate_manifest_sha256"],"queries":queries})[:16],k=config["retrieval"]["dense_top_k"],work_dir=work,
+                options=vector_options,index_root=outputs / "vector_indexes" / vector_options["backend"],reference_search=search_parts)
         with profile.stage("bm25_rrf_source_parent_predictions"):
             records,report = predict_baseline(catalog,store,queries,qv,positions,scores,search,run / "queries",
                 tokenizer=tokenizer,policy=config["retrieval"],max_new_queries=max_new_queries)
@@ -263,6 +270,7 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             "architecture":config["architecture"],"executed_models":[config["dense"]],
             "corpus_embeddings_reused":reuse_content_only,"corpus_reencoded":False if reuse_content_only else None,
             "source_read_only":read_only_source,"output_root":str(outputs),
+            "vector_backend":search["backend"],"vector_index":search.get("index_manifest"),"ann_quality":search.get("quality"),
             "deferred":["Qwen embedding","query translation/expansion","neural reranker","document dense","adaptive source parents","supervised training"],
             "limitations":["Only the imported partial corpus is searchable","Dense document candidates derive from top child hits; not a document-dense branch",
                 "Uncalibrated top-k; no relevance labels or score guarantee"],
@@ -271,5 +279,9 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
         profile.finish(ready["state"])
         return {"ready":ready,"status":status,"diagnostics_path":str(run / "baseline_status.json"),
             "samples":[{"query":q,"prediction":r["prediction"]} for q,r in zip(queries[:3],records[:3],strict=True)]}
+    except VectorIndexPending as pending:
+        profile.finish(pending.report["state"])
+        return {"ready":{"state":pending.report["state"],"query_count":0},"status":pending.report,
+            "samples":[],"diagnostics_path":str(outputs / "vector_indexes")}
     finally:
         catalog.close()

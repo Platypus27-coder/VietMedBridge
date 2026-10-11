@@ -88,6 +88,7 @@ def prepared(tmp_path,frozen,external):
         "pilot_limits":{"max_documents":2000,"max_children":50000}}
     atomic_json(checkout / "configs/retrieval_large_baseline.json",config)
     atomic_json(checkout / "configs/retrieval_full.json",full)
+    atomic_json(checkout / "configs/retrieval_scale.json",read_json(REPO / "configs/retrieval_scale.json"))
     atomic_json(checkout / "configs/strong_model_manifest.json",{"models":[SPEC | {"parameters":4}]})
     (checkout / MASTER_PLAN).write_text("CPU test fixture; not competition predictions",encoding="utf-8")
     queries = [{"id":10001+i*7,"query":"Người bệnh triệu chứng 中文医学"} for i in range(1200)]
@@ -178,7 +179,7 @@ def test_snapshot_restore_and_full_1200_query_zip_without_drive_writes_or_corpus
     monkeypatch.setattr(runtime,"TorchDenseEncoder",lambda _:encoder)
     monkeypatch.setattr(runtime,"stream_embeddings",lambda *a,**kw:pytest.fail("Corpus reencoding forbidden"))
     real_search = runtime.search_parts
-    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**kw,device="cpu"))
+    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**(kw | {"device":"cpu"})))
     # The full source is in the restored SQLite catalog; processed source shards
     # and input text Parquets are deliberately absent in bge_submit mode.
     output = runtime.run_large_baseline(destination,checkout,code_commit="CPU-double",
@@ -208,7 +209,7 @@ def test_drive_source_exports_all_queries_to_local_without_source_writes_or_hub(
     monkeypatch.setattr(catalog_storage,"_publish",lambda *a,**kw:pytest.fail("Source catalog publish forbidden"))
     monkeypatch.setattr(storage,"_download",lambda *a,**kw:pytest.fail("HF download forbidden"))
     real_search = runtime.search_parts
-    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**kw,device="cpu"))
+    monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**(kw | {"device":"cpu"})))
     kwargs = dict(code_commit="CPU-double",work_dir=work,reuse_content_only=True,
         output_root=outputs,read_only_source=True)
     partial = runtime.run_large_baseline(tmp_path,checkout,**kwargs,max_new_queries=3)
@@ -256,7 +257,8 @@ def test_drive_notebook_routes_to_read_only_cached_inference(tmp_path,prepared,m
         "CACHED_INFERENCE_MODE":"bge_bm25_cached"}
     exec(compile(cell,"04-drive-routing","exec"),context)
     assert calls == [{"code_commit":"CPU-test","work_dir":context["WORK_DIR"],
-        "reuse_content_only":True,"max_new_queries":None,"output_root":context["RESULTS_ROOT"],"read_only_source":True}]
+        "reuse_content_only":True,"max_new_queries":None,"output_root":context["RESULTS_ROOT"],"read_only_source":True,
+        "vector_search_options":{"backend":"faiss_ivf_sq8","nprobe":64}}]
     assert context["TEAM_SIZE"] == 1 and context["PREPARE_ONLY"] is False
 
 

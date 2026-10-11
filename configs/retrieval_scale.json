@@ -5,5 +5,19 @@
   "dense_top_k": 4096,
   "source_pool_documents": 1024,
   "worker_count_default": 3,
+  "vector_search": {
+    "backend": "faiss_ivf_sq8",
+    "parts_per_shard": 32,
+    "nlist": 1024,
+    "training_rows": 32768,
+    "training_iterations": 12,
+    "threads": 4,
+    "nprobe": 64,
+    "max_nprobe": 512,
+    "query_batch_size": 16,
+    "recall_queries": 8,
+    "recall_k": 20,
+    "minimum_recall": 0.95
+  },
   "scope": "Full inference architecture; original, translated lexical, second dense, document dense, conservative expansion, document/child Qwen reranking and exact adaptive source parents. Supervised steps require reviewed independent labels. Each model <=15B. Resource use and relevance need real GPU measurement."
 }

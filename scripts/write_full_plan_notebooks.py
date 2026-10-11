@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v13-hf-storage"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v14-vector-index"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -174,6 +174,9 @@ def retrieval_bootstrap():
 CACHED_INFERENCE_MODE = "cached_strong"  # dịch + rerank + parents; "bge_bm25_cached": bản nhanh chỉ BGE/BM25
 DOCUMENT_DENSE_ENABLED = True  # thêm BGE title/opening embeddings; False: bỏ nhánh này và ghi rõ trong báo cáo
 QWEN_DENSE_MODE = "if_complete"  # đủ cache thì dùng; "require": chờ đủ; "off": tắt nhánh Qwen dense
+VECTOR_BACKEND = "faiss_ivf_sq8"  # ANN lưu theo shard; "qdrant": server; "exact": quét đầy đủ theo yêu cầu
+ANN_NPROBE = 64  # tự tăng tối đa 512 nếu recall sample < 0.95
+QDRANT_URL = ""  # chỉ điền khi VECTOR_BACKEND="qdrant"; không dùng Qdrant Python local mode cho 700k
 DRIVE_DATA_ROOT = "/content/drive/MyDrive/VietMedBridge/data"
 MIN_EXPECTED_INPUT_RECORDS = 700244  # chặn chạy nhầm candidate 100k cũ; tăng khi có batch mới
 USE_HF_STORAGE = False  # True sau HF_STORAGE_VERIFIED; khi đó tắt RUN_CACHED_BASELINE_FROM_DRIVE
@@ -181,8 +184,20 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v13-hf-storage")
-    return (settings + '\nif RUN_CACHED_BASELINE_FROM_DRIVE and USE_HF_STORAGE:\n'
+    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v14-vector-index")
+    vector_boot = '''
+import os
+if VECTOR_BACKEND == "qdrant":
+    if not QDRANT_URL:
+        raise ValueError("Điền QDRANT_URL của server trước khi chọn backend qdrant. Mặc định FAISS ANN không cần server.")
+    os.environ["VMB_QDRANT_URL"] = QDRANT_URL
+    try:
+        from google.colab import userdata
+        os.environ["VMB_QDRANT_API_KEY"] = userdata.get("QDRANT_API_KEY") or ""
+    except Exception:
+        pass  # server riêng có thể không yêu cầu API key; không in token
+'''
+    return (settings + vector_boot + '\nif RUN_CACHED_BASELINE_FROM_DRIVE and USE_HF_STORAGE:\n'
         '    raise ValueError("Chọn đúng một nguồn Drive hoặc HF.")\n'
         'if RUN_CACHED_BASELINE_FROM_DRIVE:\n' + textwrap.indent(DRIVE_CACHED_BOOT.strip(),"    ")
         + "\nelif USE_HF_STORAGE:\n" + textwrap.indent(HF_BOOT.strip(),"    ")
@@ -203,6 +218,18 @@ def main():
         `QWEN_DENSE_MODE="if_complete"` không chờ phần Qwen corpus còn thiếu;
         subqueries/HyDE dùng BGE khi Qwen dense chưa đủ. Không encode lại child corpus.
         Document dense **tạo vectors mới** cho title/opening của mỗi document;
+        `VECTOR_BACKEND="faiss_ivf_sq8"` dựng chỉ mục ANN nén từ vectors hiện có,
+        checkpoint từng shard trong RESULTS_ROOT/vector_indexes; không encode lại child corpus.
+        Các shard cũ được dùng lại khi parts tương ứng giữ nguyên ở batch mới.
+        ANN kiểm recall trên 8 query thực so với exact top-20 toàn corpus, tối thiểu 0.95;
+        tự tăng nprobe nếu cần, dừng nếu vẫn không đạt. Đây không phải đánh giá relevance/F2.
+        Candidate ANN được chấm lại bằng vector gốc trước RRF/rerank.
+        Chấm lại toàn bộ query pool trong một lượt đọc tuần tự vector parts,
+        checkpoint từng part; không tải lại corpus riêng cho mỗi query.
+        Qdrant server đã được nối: chọn `VECTOR_BACKEND="qdrant"`, điền `QDRANT_URL`,
+        API key đặt trong Secret `QDRANT_API_KEY`. Vectors/HNSW nằm trên disk của server;
+        upsert có acknowledgement và count chính xác, dùng lại collections của shard cũ.
+        Chưa có server thì giữ FAISS ANN. FAISS là chỉ mục portable, không gọi là vector DB server.
         đặt `DOCUMENT_DENSE_ENABLED=False` nếu cần bỏ chi phí này, báo cáo ghi DISABLED.
         Nhánh dịch và rerank vẫn cần GPU và thời gian; không phải đổi tên baseline thành full.
         Muốn xuất bản BGE/BM25 trước: `CACHED_INFERENCE_MODE="bge_bm25_cached"`.
@@ -354,6 +381,8 @@ def main():
         from vietmedbridge.artifacts import read_json, digest_json
         from vietmedbridge.index_inputs import read_candidate_lineage
         RESULTS_ROOT = globals().get("RESULTS_ROOT", WORK_DIR.parent / "vmb_results")
+        VECTOR_SEARCH_OPTIONS = {"backend":globals().get("VECTOR_BACKEND","faiss_ivf_sq8"),
+            "nprobe":globals().get("ANN_NPROBE",64)}
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
@@ -427,19 +456,22 @@ def main():
         elif INFERENCE_MODE == "bge_bm25_cached":
             storage_options = {"output_root":RESULTS_ROOT,"read_only_source":True} if DRIVE_CACHED_MODE else {}
             RESULT = run_large_baseline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
-                work_dir=WORK_DIR, reuse_content_only=True, max_new_queries=MAX_NEW_QUERIES,**storage_options)
+                work_dir=WORK_DIR, reuse_content_only=True, max_new_queries=MAX_NEW_QUERIES,
+                vector_search_options=VECTOR_SEARCH_OPTIONS,**storage_options)
             READY = RESULT["ready"]
         elif INFERENCE_MODE == "cached_strong":
             RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
                 work_dir=WORK_DIR, execution_mode="cached_strong", output_root=RESULTS_ROOT,
                 second_dense_mode=globals().get("QWEN_DENSE_MODE","if_complete"),
                 document_dense_enabled=globals().get("DOCUMENT_DENSE_ENABLED",True),
+                vector_search_options=VECTOR_SEARCH_OPTIONS,
                 max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
                 max_new_translations=MAX_NEW_TRANSLATIONS, max_new_queries=MAX_NEW_QUERIES)
             READY = RESULT["ready"]
         elif LARGE_CANDIDATE:
             RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
                 work_dir=WORK_DIR, worker_id=TEAM_WORKER_ID, workers=TEAM_SIZE,
+                vector_search_options=VECTOR_SEARCH_OPTIONS,
                 max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
                 max_new_translations=MAX_NEW_TRANSLATIONS, max_new_queries=MAX_NEW_QUERIES)
             READY = RESULT["ready"]

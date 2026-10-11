@@ -225,10 +225,13 @@ tạo namespace `-ft-` mới.
 - `sharded_dense.build_dense_shards(...)`: verified NPY parts qua mmap, giới hạn
   rows mỗi FAISS shard, checksum/done để resume. `ShardedDenseIndex.search(...)`
   mở từng shard, gộp global top-k. Đây là exact-search toolkit có kiểm thử CPU;
-  chưa là full-scale backend của full architecture. Full architecture giữ giới hạn
-  2.000 documents/50.000 children; large baseline dùng GPU search theo vector parts
-  và SQLite BM25 thay cho catalog/FAISS toàn corpus trong RAM.
-  ANN và budget benchmark tại 100k/1M cần đo sau khi import crawl qua data pipeline.
+  không phải backend hiện hành của corpus lớn. Từ 11/10, các nhánh large baseline,
+  cached strong và full scale nối `vector_search.search_vectors`: mặc định FAISS
+  IVF/SQ8, shared immutable shards, mmap, kiểm ANN recall và exact candidate
+  rescoring một lượt tuần tự theo part. Có backend Qdrant server HNSW/on-disk,
+  idempotent upsert/count và reuse collection khi source group giữ nguyên.
+  `backend="exact"` giữ đối chứng cũ theo yêu cầu. Xem VECTOR_SEARCH.md.
+  ANN được kiểm CPU thật; Qdrant REST dùng mock. Chưa đo thời gian/recall trên 700k.
 
 Master §§7/8/13/17/27/39/56 có module cho kiến trúc/supervised/ablation trên đây;
 §§26/55 giữ baseline làm comparator. Relevance, glossary, fine-tune thực,

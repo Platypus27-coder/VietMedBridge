@@ -11,6 +11,14 @@ Cell 1 giữ `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `USE_HF_STORAGE=False`,
 `CACHED_INFERENCE_MODE="cached_strong"`, `DOCUMENT_DENSE_ENABLED=True`,
 `QWEN_DENSE_MODE="if_complete"`. Chỉ một coordinator chạy luồng này.
 
+Giữ `VECTOR_BACKEND="faiss_ivf_sq8"`, `ANN_NPROBE=64`: tạo persistent ANN
+shards từ vectors đã có, không encode lại child corpus. Chạy lại dùng shard,
+recall gate, query-batch và refinement checkpoints. Gate lấy exact top-20 trên
+toàn corpus cho 8 query mẫu; phải đạt recall >=0,95, không phải relevance/F2.
+Các query đầy đủ dùng ANN rồi exact-rescore ứng viên trong một lượt đọc tuần tự
+vector parts. Có thể chọn Qdrant server khi có QDRANT_URL/API key; thiếu server
+không tự chuyển backend. Xem [vector storage/search](VECTOR_SEARCH.md).
+
 Luồng này đọc active candidate, catalog đã hoàn thành và BGE cache đầy đủ,
 không gọi union/import/chunk hoặc encode lại child corpus. Qwen dense chưa đủ
 thì ghi DEFERRED và vẫn tìm trên toàn bộ BGE; tuyệt đối không coi các phần Qwen
@@ -37,7 +45,7 @@ parts, document vectors, dense-search progress, scored stages và query cuối c
 checkpoint. Chạy lại cùng code/model/candidate/policy trong runtime dùng lại
 checkpoint; input document đã hoàn thành không bị token hóa lại khi resume.
 Runtime bị thu hồi **mất outputs local** nếu chưa tải backup cuối notebook.
-Backup gồm document vectors mới nên có thể vài GB; không gồm BGE child corpus,
+Backup gồm ANN indexes và document vectors mới nên có thể nhiều GB; không gồm BGE child corpus,
 catalog hoặc weights. Giải nén backup về đúng `/content/vmb_results` để resume
 ở runtime mới. Chưa tự đồng bộ outputs mới lên HF đang bị rate limit.
 

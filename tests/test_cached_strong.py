@@ -277,4 +277,5 @@ def test_notebook_default_cached_strong_routes_without_union_or_cpu_rebuild(prep
     assert len(calls) == 1 and calls[0]["execution_mode"] == "cached_strong"
     assert calls[0]["output_root"] == p.outputs and calls[0]["second_dense_mode"] == "if_complete"
     assert calls[0]["document_dense_enabled"] is True
+    assert calls[0]["vector_search_options"] == {"backend":"faiss_ivf_sq8","nprobe":64}
     assert context["TEAM_SIZE"] == 1 and context["PREPARE_ONLY"] is False
