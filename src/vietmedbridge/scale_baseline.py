@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import numpy as np
 from tqdm.auto import tqdm
 
-from .artifacts import atomic_json, digest_json, read_json, sha256_file
+from .artifacts import atomic_json, digest_json, read_json, sha256_file, verify_file
 from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .dataset import parquet_path
 from .disk_catalog import lexical_field
 from .catalog_storage import prepare_disk_catalog
+from .content_embeddings import ContentVectorParts, checked, seal
 from .embeddings import embed_units, embedding_matrix
 from .medical_lexical import MedicalAnalyzer
 from .qwen_models import review_model_registry
@@ -22,6 +24,42 @@ from .retrieval_policy import select_parents
 from .runtime_profile import RuntimeProfile
 from .scale_benchmark import load_handoff
 from .scale_vectors import VectorParts, search_parts, stream_embeddings
+
+
+def imported_bge_manifest(data_root, candidate, inputs, full_config):
+    """Read native Kaggle/Colab maps without creating blocks or encoding texts.
+
+    Vector checksums/shapes are verified lazily by ContentVectorParts during the
+    complete search. A partial view must never become a smaller submission corpus.
+    """
+    from .portable_embeddings import resources_relative
+
+    view = Path(data_root) / resources_relative(candidate, full_config) / "bge"
+    path = view / "config.json"
+    if not path.is_file():
+        return view, None
+    identity = read_json(path)
+    if (identity.get("input_manifest_sha256") != inputs["manifest_sha256"]
+        or identity.get("input_count") != inputs["input_count"]
+        or identity.get("format") != "content-reference-v1"
+        or identity.get("dimension") != 1024
+        or any(identity.get("encoder", {}).get(k) != v for k, v in full_config["dense"].items())):
+        raise ValueError("Imported BGE view differs from the active frozen corpus/model.")
+    signature = digest_json(identity)
+    parts = []
+    for source in inputs["parts"]:
+        marker = view / f"map-{source['start']:012d}.done.json"
+        if not marker.is_file():
+            continue
+        saved = checked(read_json(marker))
+        expected = {"signature":signature, "start":source["start"], "rows":source["rows"],
+            "input_sha256":source["sha256"], "path":f"map-{source['start']:012d}.parquet"}
+        if any(saved.get(k) != v for k, v in expected.items()):
+            raise ValueError("Imported BGE mapping differs from the frozen input order.")
+        verify_file(view / saved["path"], saved["sha256"])
+        parts.append(saved)
+    return view, seal(identity | {"signature":signature, "parts":parts,
+        "state":"COMPLETE" if len(parts) == len(inputs["parts"]) else "IN_PROGRESS"})
 
 
 def baseline_ranking(catalog, store, query, vector, positions, dense_values, policy):
@@ -74,7 +112,7 @@ def predict_baseline(catalog,store,queries,query_vectors,positions,scores,search
         doc_score_floor=None,chunk_min_k=0,chunk_top_k=policy["chunk_top_k"],chunk_score_margin=None,
         chunk_score_floor=None,max_chunks_per_doc=policy["max_chunks_per_doc"],dedup_threshold=policy["dedup_threshold"])
     records,written = [],0
-    for i,q in enumerate(tqdm(queries,desc="100k baseline query checkpoints")):
+    for i,q in enumerate(tqdm(queries,desc="Baseline query checkpoints")):
         path = root / f"query-{q['id']}.done.json"
         if path.exists():
             saved = read_json(path)
@@ -101,12 +139,14 @@ def predict_baseline(catalog,store,queries,query_vectors,positions,scores,search
 
 
 def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
-                       max_new_embedding_parts=None,max_new_queries=None):
+                       max_new_embedding_parts=None,max_new_queries=None,reuse_content_only=False):
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError("Select a Colab GPU for large-corpus BGE inference.")
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("Invalid GPU embedding batch size.")
+    if type(reuse_content_only) is not bool:
+        raise ValueError("reuse_content_only must be a boolean.")
     root,checkout,work = Path(data_root),Path(checkout),Path(work_dir)
     build,candidate,inputs = load_handoff(root)
     config = read_json(checkout / "configs/retrieval_large_baseline.json")
@@ -115,6 +155,18 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
     review_model_registry(full,registry)
     if config["dense"] != full["dense"] or any(candidate["golden"]["tokenizer"][k] != config["dense"][k] for k in ("model_id","revision")):
         raise ValueError("Large baseline/tokenizer/model policy mismatch.")
+    cm, content_view = None, None
+    if reuse_content_only:
+        content_view, cm = imported_bge_manifest(root,candidate,inputs,full)
+        if cm is None or cm["state"] != "COMPLETE":
+            status = {"state":"WAITING_FOR_COMPLETE_BGE_CACHE", "query_count":0,
+                "completed_parts":len(cm["parts"]) if cm else 0,"total_parts":len(inputs["parts"]),
+                "completed_inputs":sum(p["rows"] for p in cm["parts"]) if cm else 0,
+                "requested_inputs":inputs["input_count"],"corpus_reencoded":False,
+                "scope":"Use the existing active-candidate BGE cache; no fallback to corpus encoding."}
+            return {"ready":{"state":status["state"],"query_count":0},"status":status,
+                "samples":[],"diagnostics_path":str(content_view)}
+        config["corpus_embedding_source"] = "verified_content_cache_only"
     snapshot = read_json(root / "raw/snapshot.json")
     if snapshot["files"]["links_corpus.parquet"]["sha256"] != candidate["origin_corpus_sha256"]:
         raise ValueError("Large baseline/official corpus snapshot mismatch.")
@@ -122,9 +174,12 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
     glossary = root / "labels/medical_aliases.json"
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"],glossary_path=glossary if glossary.is_file() else None)
     config["analyzer"] = analyzer.identity
-    run = root / "retrieval" / (build.name+"-bge-bm25-v1-"+candidate["candidate_manifest_sha256"][:8])
+    mode = "-bge-bm25-cached-v1-" if reuse_content_only else "-bge-bm25-v1-"
+    run = root / "retrieval" / (build.name+mode+candidate["candidate_manifest_sha256"][:8])
     profile = RuntimeProfile(run / "runtime_profile.json")
-    print(f"100k baseline: {candidate['counts']['documents']:,} documents, {inputs['input_count']:,} unique inputs",flush=True)
+    print(f"Baseline: {candidate['counts']['documents']:,} documents, {inputs['input_count']:,} unique inputs",flush=True)
+    if reuse_content_only:
+        print(f"Reusing {len(cm['parts'])}/{len(inputs['parts'])} BGE parts; corpus encoding disabled.",flush=True)
     print("Executed model: BAAI/bge-m3. Qwen models are deferred for this baseline.",flush=True)
     with profile.stage("disk_catalog_multilingual_bm25"):
         catalog = prepare_disk_catalog(build,candidate,inputs,root / "retrieval/catalogs",analyzer,work_dir=work)
@@ -134,9 +189,13 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
         with profile.stage("bge_loading"):
             encoder = TorchDenseEncoder(config["dense"])
         try:
-            with profile.stage("streamed_child_embeddings"):
-                cm = stream_embeddings(build / "index_inputs",inputs,encoder,run / "corpus_embeddings",
-                    batch_size=batch_size,work_dir=work,max_new_parts=max_new_embedding_parts)
+            if reuse_content_only:
+                if encoder.identity != cm["encoder"] or encoder.dimension != cm["dimension"]:
+                    raise ValueError("Query encoder differs from imported BGE producer. Use the Kaggle embedding runtime lock; corpus will not be reencoded.")
+            else:
+                with profile.stage("streamed_child_embeddings"):
+                    cm = stream_embeddings(build / "index_inputs",inputs,encoder,run / "corpus_embeddings",
+                        batch_size=batch_size,work_dir=work,max_new_parts=max_new_embedding_parts)
             if cm["state"] != "COMPLETE":
                 profile.finish("EMBEDDING_IN_PROGRESS")
                 return {"ready":{"state":"EMBEDDING_IN_PROGRESS","query_count":0},"status":{
@@ -149,7 +208,19 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             tokenizer = encoder.tokenizer
         finally:
             encoder.close()
-        store = VectorParts(run / "corpus_embeddings",cm,work / "vector_cache")
+        if reuse_content_only:
+            cache_dir = work / "vector_cache"
+            cache_path = cache_dir / digest_json([str(content_view),cm["manifest_sha256"]])[:16]
+            retained = sum(p.stat().st_size for p in cache_path.glob("*") if p.is_file())
+            # Keep this corpus locally when disk permits: a 4 GiB cache would
+            # repeatedly fetch the 16 GB BGE corpus during per-document ranking.
+            desired = int(inputs["input_count"] * cm["dimension"] * 4 * 1.1) + 256 * 2**20
+            available = shutil.disk_usage(work).free + retained - 2 * 2**30
+            cache_bytes = max(1,min(desired,available))
+            store = ContentVectorParts(root,content_view,cm,cache_dir,local_cache_bytes=cache_bytes)
+            print(f"Local BGE cache budget: {cache_bytes / 2**30:.2f} GiB",flush=True)
+        else:
+            store = VectorParts(run / "corpus_embeddings",cm,work / "vector_cache")
         with profile.stage("all_query_exact_dense_search"):
             scores,positions,search = search_parts(store,qv,run / "dense_search",k=config["retrieval"]["dense_top_k"],work_dir=work)
         with profile.stage("bm25_rrf_source_parent_predictions"):
@@ -164,6 +235,7 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             "executed_models":[config["dense"]],"parameters_before_quantization":budget["parameters"],
             "model_limit_parameters":15_000_000_000,"fine_tuned":False,"neural_reranker_used":False,
             "inference_scope":"LARGE_PARTIAL_CORPUS_BGE_BM25_BASELINE",
+            "corpus_embedding_source":"verified_content_cache_only" if reuse_content_only else "streamed_vectors",
             "corpus_embeddings":cm["manifest_sha256"],"query_embeddings":qm["manifest_sha256"],
             "search":search["manifest_sha256"],"config":config,"score_semantics":"weighted_rrf_no_neural_reranker"}
         with profile.stage("source_schema_zip_validation"):
@@ -173,6 +245,7 @@ def run_large_baseline(data_root,checkout,*,code_commit,work_dir,batch_size=32,
             "children":candidate["counts"]["children"],"unique_child_inputs":inputs["input_count"],
             "complete_master_plan":False,"fine_tuned":False,"official_score":None,
             "architecture":config["architecture"],"executed_models":[config["dense"]],
+            "corpus_embeddings_reused":reuse_content_only,"corpus_reencoded":False if reuse_content_only else None,
             "deferred":["Qwen embedding","query translation/expansion","neural reranker","document dense","adaptive source parents","supervised training"],
             "limitations":["Only the imported partial corpus is searchable","Dense document candidates derive from top child hits; not a document-dense branch",
                 "Uncalibrated top-k; no relevance labels or score guarantee"],

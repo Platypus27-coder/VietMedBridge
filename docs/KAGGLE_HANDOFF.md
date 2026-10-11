@@ -111,6 +111,33 @@ traceback; receipts đã hoàn tất vẫn nhập được. Số part BGE/Qwen c
 Query translation, document embeddings, search, reranker và submission vẫn do
 coordinator 04 thực hiện sau khi đủ corpus vectors.
 
+### Xuất baseline trước khi Qwen hoàn tất
+
+Nếu BGE đã đủ mọi input part của active candidate, có thể nộp một baseline
+BGE + BM25 ngay. Dùng bản mới của **04_colab_retrieval_baseline.ipynb** trên
+**Colab GPU**, giữ nguyên DATA_ROOT đã nhập cả hai Kaggle Outputs. Trong cell 2:
+
+```python
+PREPARE_ONLY = False
+INFERENCE_MODE = "bge_bm25_cached"
+TEAM_SIZE = 1
+TEAM_WORKER_ID = None
+MAX_NEW_QUERIES = None
+```
+
+Run all. Nhánh này đọc đúng native BGE maps đã nhập, kiểm input/model/runtime,
+dùng lại catalog BM25 của bước CPU, encode 1.200 query, tìm kiếm trên toàn bộ
+candidate rồi chọn source chunks và xuất ZIP. Không chạy lại 00–03, không
+encode corpus và không đợi Qwen. Thiếu BGE thì báo WAITING, không tự tính bù.
+Query embeddings, dense search và từng query có checkpoint riêng. Cần thêm
+thời gian đọc vector/search/ranking; BGE đủ không đồng nghĩa ZIP đã có sẵn.
+
+Khi `READY_FOR_MANUAL_UPLOAD` và `query_count=1200`, cell cuối tải ZIP để Sếp
+nộp BTC. Báo cáo ghi rõ baseline, không giả đã chạy reranker/query LLM/fine-tune
+và không dự đoán điểm. Các Qwen checkpoint giữ nguyên để tiếp tục full system
+bằng `INFERENCE_MODE="full"` sau này. Không trộn Qwen mới đủ một phần vào
+truy hồi toàn corpus.
+
 File dưới `/kaggle/working` chỉ lấy về được sau khi Outputs của version đã lưu.
 Không chờ runtime bị quota ngắt cứng: nếu version không lưu Outputs thì không
 bảo đảm lấy được checkpoint phiên đó. Muốn chạy thêm phiên Kaggle, Add Input

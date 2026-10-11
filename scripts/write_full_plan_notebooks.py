@@ -42,6 +42,14 @@ def main():
         đặt `PREPARE_ONLY=False` để chạy embeddings/inference. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
 
+        **Nộp baseline ngay sau khi nhập BGE từ Kaggle:** chọn GPU, đặt
+        `PREPARE_ONLY=False`, `INFERENCE_MODE="bge_bm25_cached"`, `TEAM_SIZE=1`,
+        `TEAM_WORKER_ID=None`. Dùng toàn bộ BGE của active candidate và catalog
+        BM25 đã chuẩn bị; chỉ encode queries, tìm kiếm, chọn source chunks và
+        xuất ZIP 1.200 query. Thiếu BGE thì dừng WAITING, không encode lại corpus.
+        Phần Qwen đã chạy được giữ nguyên. Đây là baseline để đo điểm trước;
+        `INFERENCE_MODE="full"` vẫn chạy kiến trúc đầy đủ mô tả dưới đây.
+
         Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
         Corpus vượt giới hạn pilot (2.000 documents hoặc 50.000 children) chạy
         **đầy đủ các nhánh trên disk**: BGE child/document dense + Qwen embedding
@@ -109,7 +117,7 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v11-catalog-recovery")),
+        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v12-cached-baseline")),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
@@ -149,6 +157,7 @@ def main():
         from vietmedbridge.full_plan_runtime import run_full_pipeline
         from vietmedbridge.scale_benchmark import load_handoff
         from vietmedbridge.full_scale_runtime import run_scale_full_pipeline, prepare_scale_cpu_resources
+        from vietmedbridge.scale_baseline import run_large_baseline
         from vietmedbridge.artifacts import read_json, digest_json
         from vietmedbridge.index_inputs import read_candidate_lineage
 
@@ -160,8 +169,14 @@ def main():
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
         PREPARE_ONLY = True  # CPU: ghép/freeze/inputs/BM25; GPU workers/inference: False
+        INFERENCE_MODE = "full"  # "bge_bm25_cached": submit bằng BGE đã nhập, không chờ Qwen
         TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
+
+        if INFERENCE_MODE not in ("full", "bge_bm25_cached"):
+            raise ValueError("INFERENCE_MODE phải là full hoặc bge_bm25_cached.")
+        if INFERENCE_MODE == "bge_bm25_cached" and (TEAM_SIZE != 1 or TEAM_WORKER_ID is not None):
+            raise ValueError("Baseline dùng một coordinator: TEAM_SIZE=1, TEAM_WORKER_ID=None.")
 
         # Notebook 03 appends each newly frozen candidate to this Drive manifest.
         # The coordinator composes the old corpus plus new batch automatically.
@@ -205,6 +220,10 @@ def main():
                 "scope":"Frozen pilot inputs ready; set PREPARE_ONLY=False on GPU for inference"}
             RESULT = {"status":status,"ready":{"state":status["state"],"query_count":0},
                 "samples":[],"diagnostics_path":str(DATA_ROOT / "retrieval/cpu_preparation")}
+            READY = RESULT["ready"]
+        elif INFERENCE_MODE == "bge_bm25_cached":
+            RESULT = run_large_baseline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
+                work_dir=WORK_DIR, reuse_content_only=True, max_new_queries=MAX_NEW_QUERIES)
             READY = RESULT["ready"]
         elif LARGE_CANDIDATE:
             RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,

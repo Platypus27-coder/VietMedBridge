@@ -16,6 +16,7 @@ import pytest
 from test_external_import import external, run_import, SPEC, CONFIG, CharacterTokenizer
 from vietmedbridge.artifacts import atomic_json, code_fingerprint, digest_json, read_json, sha256_file
 from vietmedbridge.competition_pilot import MASTER_PLAN
+from vietmedbridge.content_embeddings import content_embeddings, seal
 from vietmedbridge.disk_catalog import prepare_disk_catalog
 from vietmedbridge.health import freeze_candidate, health_report
 from vietmedbridge.index_inputs import prepare_index_inputs, publish_data_handoff
@@ -175,13 +176,14 @@ def test_cuda_block_wiring_with_numpy_tensor_double(tmp_path,frozen,monkeypatch)
     assert matmul_policy.allow_tf32 is True
 
 
-def test_entrypoint_all_1200_queries_resume_source_zip_and_feedback(tmp_path,frozen,monkeypatch):
+@pytest.mark.parametrize("reuse_content_only", [False, True])
+def test_entrypoint_all_1200_queries_resume_source_zip_and_feedback(tmp_path,frozen,monkeypatch,reuse_content_only):
     from vietmedbridge import scale_baseline as runtime
     build,candidate,inputs = frozen
     checkout = Path(__file__).resolve().parents[1]
     config = read_json(checkout / "configs/retrieval_large_baseline.json")
     config.update(dense=SPEC,lexical_segmentation=False)
-    full = {"dense":SPEC}
+    full = {"dense":SPEC,"second_dense":{"model_id":"unused-test-Qwen"}}
     test_checkout = tmp_path / "checkout"
     atomic_json(test_checkout / "configs/retrieval_large_baseline.json",config)
     atomic_json(test_checkout / "configs/retrieval_full.json",full)
@@ -195,19 +197,54 @@ def test_entrypoint_all_1200_queries_resume_source_zip_and_feedback(tmp_path,fro
         "links_corpus.parquet":{"sha256":candidate["origin_corpus_sha256"]}}})
     monkeypatch.setitem(sys.modules,"torch",SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:True)))
     monkeypatch.setattr(runtime,"review_model_registry",lambda *_:None)
-    encoder = Encoder()
+    class CachedEncoder(Encoder):
+        dimension = 1024
+        def __init__(self):
+            super().__init__()
+            self.identity.update(SPEC)
+            self.encoded = []
+        def encode(self,texts,**kwargs):
+            self.encoded.extend(texts)
+            return np.pad(super().encode(texts,**kwargs),((0,0),(0,1020)))
+
+    encoder = CachedEncoder() if reuse_content_only else Encoder()
     monkeypatch.setattr(runtime,"TorchDenseEncoder",lambda _:encoder)
     real_search = runtime.search_parts
     monkeypatch.setattr(runtime,"search_parts",lambda *a,**kw:real_search(*a,**kw,device="cpu"))
-    embedding_partial = runtime.run_large_baseline(tmp_path,test_checkout,code_commit="CPU-test",work_dir=tmp_path / "work",max_new_embedding_parts=1)
-    assert embedding_partial["ready"]["state"] == "EMBEDDING_IN_PROGRESS"
-    partial = runtime.run_large_baseline(tmp_path,test_checkout,code_commit="CPU-test",work_dir=tmp_path / "work",max_new_queries=3)
+    kwargs = dict(code_commit="CPU-test",work_dir=tmp_path / "work",reuse_content_only=reuse_content_only)
+    if reuse_content_only:
+        # Native content maps use the same layout as verified Kaggle imports.
+        # Qwen is absent; no corpus encoder may be called by this entry point.
+        from vietmedbridge.portable_embeddings import resources_relative
+        view = tmp_path / resources_relative(candidate,full) / "bge"
+        monkeypatch.setattr(runtime,"stream_embeddings",lambda *a,**kw:pytest.fail("Corpus reencoding forbidden"))
+        monkeypatch.setattr(runtime,"prepare_disk_catalog",pytest.fail)
+        for existing_parts in (0,1):
+            if existing_parts:
+                content_embeddings(tmp_path,build / "index_inputs",inputs,encoder,view,
+                    work_dir=tmp_path / "work",max_new_parts=existing_parts)
+            before = encoder.calls
+            waiting = runtime.run_large_baseline(tmp_path,test_checkout,**kwargs)
+            assert waiting["ready"]["state"] == "WAITING_FOR_COMPLETE_BGE_CACHE"
+            assert waiting["status"]["completed_parts"] == existing_parts and encoder.calls == before
+        monkeypatch.setattr(runtime,"prepare_disk_catalog",prepare_disk_catalog)
+        content_embeddings(tmp_path,build / "index_inputs",inputs,encoder,view,work_dir=tmp_path / "work")
+        encoder.encoded.clear()
+    else:
+        embedding_partial = runtime.run_large_baseline(tmp_path,test_checkout,**kwargs,max_new_embedding_parts=1)
+        assert embedding_partial["ready"]["state"] == "EMBEDDING_IN_PROGRESS"
+    partial = runtime.run_large_baseline(tmp_path,test_checkout,**kwargs,max_new_queries=3)
     assert partial["ready"]["state"] == "QUERIES_IN_PROGRESS" and partial["ready"]["query_count"] == 3
     calls = encoder.calls
-    result = runtime.run_large_baseline(tmp_path,test_checkout,code_commit="CPU-test",work_dir=tmp_path / "work")
+    result = runtime.run_large_baseline(tmp_path,test_checkout,**kwargs)
     assert result["ready"]["state"] == "READY_FOR_MANUAL_UPLOAD"
     assert encoder.calls == calls
     assert result["status"]["query_count"] == 1200 and result["status"]["complete_master_plan"] is False
+    if reuse_content_only:
+        assert result["status"]["corpus_embeddings_reused"] is True
+        assert result["status"]["corpus_reencoded"] is False
+        assert encoder.encoded == [q["query"] for q in queries]
+        assert not (tmp_path / "retrieval" / (build.name+"-bge-bm25-cached-v1-"+candidate["candidate_manifest_sha256"][:8]) / "corpus_embeddings").exists()
     zip_path = Path(result["ready"]["zip_path"])
     with ZipFile(zip_path) as archive:
         assert archive.namelist() == ["results.json"]
@@ -220,9 +257,71 @@ def test_entrypoint_all_1200_queries_resume_source_zip_and_feedback(tmp_path,fro
     feedback = read_json(feedback_path)
     feedback["overall_score"] = .12345
     atomic_json(feedback_path,feedback)
-    repeated = runtime.run_large_baseline(tmp_path,test_checkout,code_commit="CPU-test",work_dir=tmp_path / "work")
+    repeated = runtime.run_large_baseline(tmp_path,test_checkout,**kwargs)
     assert repeated["ready"]["zip_sha256"] == result["ready"]["zip_sha256"]
     assert read_json(feedback_path)["overall_score"] == .12345 and encoder.calls == calls
+    if reuse_content_only:
+        encoder.identity = encoder.identity | {"torch":"different-query-runtime"}
+        with pytest.raises(ValueError,match="Query encoder differs"):
+            runtime.run_large_baseline(tmp_path,test_checkout,**kwargs)
+        assert encoder.calls == calls
+
+
+@pytest.mark.parametrize("fault",["map_checksum","map_order","view_identity"])
+def test_imported_bge_rejects_changed_mapping_or_corpus(tmp_path,frozen,fault):
+    from vietmedbridge.portable_embeddings import resources_relative
+    from vietmedbridge.scale_baseline import imported_bge_manifest
+    build,candidate,inputs = frozen
+    full = {"dense":SPEC,"second_dense":{"model_id":"unused-test-Qwen"}}
+    encoder = Encoder()
+    encoder.identity.update(SPEC)
+    # Only metadata coverage is exercised here. Vectors use the real bounded
+    # ContentVectorParts reader in the complete 1200-query test above.
+    encoder.dimension = 1024
+    encoder.encode = lambda texts,**_:np.tile(np.eye(1,1024,dtype=np.float32),(len(texts),1))
+    view = tmp_path / resources_relative(candidate,full) / "bge"
+    content_embeddings(tmp_path,build / "index_inputs",inputs,encoder,view,work_dir=tmp_path / "work")
+    _, manifest = imported_bge_manifest(tmp_path,candidate,inputs,full)
+    assert manifest["state"] == "COMPLETE"
+    marker = view / f"map-{inputs['parts'][0]['start']:012d}.done.json"
+    saved = read_json(marker)
+    if fault == "map_checksum":
+        (view / saved["path"]).write_bytes(b"corrupt")
+    elif fault == "map_order":
+        saved.pop("manifest_sha256")
+        saved["input_sha256"] = "wrong input order"
+        atomic_json(marker,seal(saved))
+    else:
+        identity = read_json(view / "config.json")
+        identity["input_count"] += 1
+        atomic_json(view / "config.json",identity)
+    with pytest.raises(ValueError):
+        imported_bge_manifest(tmp_path,candidate,inputs,full)
+
+
+def test_notebook_cached_baseline_routes_to_cache_only_coordinator(tmp_path,frozen,monkeypatch):
+    from vietmedbridge import full_plan_runtime, full_scale_runtime, scale_baseline
+    checkout = Path(__file__).resolve().parents[1]
+    cell = next(c["source"] for c in read_json(checkout / "notebooks/04_colab_retrieval_baseline.ipynb")["cells"]
+        if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
+    cell = (cell.replace("PREPARE_ONLY = True", "PREPARE_ONLY = False")
+        .replace('INFERENCE_MODE = "full"', 'INFERENCE_MODE = "bge_bm25_cached"')
+        .replace("TEAM_SIZE = 3", "TEAM_SIZE = 1"))
+    def forbidden(*args,**kwargs):
+        pytest.fail("Cached submission must not enter full inference/CPU preparation")
+    monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
+    monkeypatch.setattr(full_scale_runtime,"run_scale_full_pipeline",forbidden)
+    monkeypatch.setattr(full_scale_runtime,"prepare_scale_cpu_resources",forbidden)
+    calls = []
+    def cached(root,repo,**kwargs):
+        calls.append((root,repo,kwargs))
+        return {"ready":{"state":"READY_FOR_MANUAL_UPLOAD","query_count":1200},"status":{},"samples":[]}
+    monkeypatch.setattr(scale_baseline,"run_large_baseline",cached)
+    context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test"}
+    exec(compile(cell,"04-cached-baseline-routing","exec"),context)
+    assert calls == [(tmp_path,checkout,{"code_commit":"CPU-test","work_dir":tmp_path / "work",
+        "reuse_content_only":True,"max_new_queries":None})]
+    assert context["READY"]["query_count"] == 1200
 
 
 def build_source(root,doc_id):
