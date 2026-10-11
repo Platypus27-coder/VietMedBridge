@@ -134,15 +134,33 @@ sys.path.insert(0,str(CHECKOUT / "src"))
 importlib.invalidate_caches()
 from vietmedbridge import PIPELINE_API_VERSION
 from vietmedbridge.artifacts import atomic_json, read_json, runtime_versions
-from vietmedbridge.portable_embeddings import checked, runtime_install_commands
+from vietmedbridge.portable_embeddings import checked, runtime_install_commands, validate_runtime_lock, resources_relative
 from vietmedbridge.scale_benchmark import load_handoff
 from vietmedbridge.scale_baseline import imported_bge_manifest
 if PIPELINE_API_VERSION != EXPECTED_PIPELINE_API:
     raise RuntimeError("Pipeline API khác phiên bản notebook.")
 embedding_runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
-if not embedding_runtime_lock.is_file():
-    raise RuntimeError("Thiếu retrieval_embedding_runtime_lock.json từ bước nhập Kaggle; chưa nạp model hoặc encode corpus.")
-pinned_runtime = checked(read_json(embedding_runtime_lock))["runtime"]
+BUILD_DIR, CANDIDATE, INDEX_INPUTS = load_handoff(DATA_ROOT)
+if CANDIDATE["counts"]["input_records"] < MIN_EXPECTED_INPUT_RECORDS:
+    raise RuntimeError(f"Active candidate chỉ có {CANDIDATE['counts']['input_records']:,} input IDs; cần ít nhất {MIN_EXPECTED_INPUT_RECORDS:,}. Kiểm tra đúng DATA_ROOT/candidate 700k; không tự chạy lại union.")
+FULL_CONFIG = read_json(CHECKOUT / "configs/retrieval_full.json")
+if embedding_runtime_lock.is_file():
+    pinned_runtime = checked(read_json(embedding_runtime_lock))["runtime"]
+    runtime_source = "Drive Kaggle import lock"
+else:
+    # A verified imported BGE manifest records its producer's Torch and
+    # Transformers versions. If the small lock file was omitted during a
+    # storage copy, recover the pinned producer runtime only when those
+    # identities match; never guess from the current Colab environment.
+    pinned_runtime = read_json(CHECKOUT / "configs/kaggle_runtime.json")
+    validate_runtime_lock(pinned_runtime)
+    bge_config_path = DATA_ROOT / resources_relative(CANDIDATE, FULL_CONFIG) / "bge" / "config.json"
+    if not bge_config_path.is_file():
+        raise RuntimeError("Thiếu runtime lock và manifest BGE. Khôi phục đúng Kaggle Outputs hoặc snapshot Drive trước khi chạy retrieval.")
+    bge_encoder = read_json(bge_config_path).get("encoder", {})
+    if any(bge_encoder.get(name) != pinned_runtime[name] for name in ("torch", "transformers")):
+        raise RuntimeError("Thiếu runtime lock và phiên bản producer trong BGE cache không khớp configs/kaggle_runtime.json. Nhập lại đúng Kaggle Outputs để khôi phục lock; không tự đổi runtime.")
+    runtime_source = "verified BGE manifest + repository-pinned Kaggle runtime"
 commands = runtime_install_commands(pinned_runtime)
 if commands and "torch" in sys.modules:
     raise RuntimeError("Restart session trước khi cài runtime embedding đã khóa từ Kaggle.")
@@ -150,18 +168,17 @@ for command in commands:
     subprocess.run(command,check=True)
 importlib.invalidate_caches()
 subprocess.run([sys.executable,"-c", "import torch; print('PyTorch:',torch.__version__,'| CUDA:',torch.cuda.is_available()); assert torch.cuda.is_available(), 'Chọn Colab T4 GPU; PyTorch phải là bản CUDA.'"],check=True)
-BUILD_DIR, CANDIDATE, INDEX_INPUTS = load_handoff(DATA_ROOT)
-if CANDIDATE["counts"]["input_records"] < MIN_EXPECTED_INPUT_RECORDS:
-    raise RuntimeError(f"Active candidate chỉ có {CANDIDATE['counts']['input_records']:,} input IDs; cần ít nhất {MIN_EXPECTED_INPUT_RECORDS:,}. Kiểm tra đúng DATA_ROOT/candidate 700k; không tự chạy lại union.")
-FULL_CONFIG = read_json(CHECKOUT / "configs/retrieval_full.json")
 _, BGE_CACHE = imported_bge_manifest(DATA_ROOT,CANDIDATE,INDEX_INPUTS,FULL_CONFIG)
 if BGE_CACHE is None or BGE_CACHE["state"] != "COMPLETE":
     raise RuntimeError("BGE cache của active candidate chưa đủ. Không tự encode lại corpus.")
+if any(BGE_CACHE["encoder"].get(name) != pinned_runtime[name] for name in ("torch", "transformers")):
+    raise RuntimeError("Producer runtime trong manifest BGE không khớp runtime đã chọn; dừng trước khi nạp model.")
 PIPELINE_CONFIG = read_json(CHECKOUT / "configs/data_pipeline.json")
-atomic_json(RESULTS_ROOT / "runtime.json",{"git_commit":CODE_COMMIT,"source":str(DATA_ROOT),
+atomic_json(RESULTS_ROOT / "runtime.json",{"git_commit":CODE_COMMIT,"source":str(DATA_ROOT),"embedding_runtime_source":runtime_source,
     "source_read_only":True,"packages":runtime_versions()})
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("Drive source (read only):",DATA_ROOT)
+print("Embedding runtime:",runtime_source)
 print("Corpus:",json.dumps(CANDIDATE["counts"],ensure_ascii=False))
 print(f"BGE cache: {len(BGE_CACHE['parts'])}/{len(INDEX_INPUTS['parts'])} parts | {INDEX_INPUTS['input_count']:,} inputs")
 print("Checkpoint/ZIP:",RESULTS_ROOT,"| tải ZIP trước khi kết thúc runtime.")
