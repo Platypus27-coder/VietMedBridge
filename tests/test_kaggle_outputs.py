@@ -1,5 +1,6 @@
 """Preflight and cache behavior with a fake remote API; no Kaggle/GPU claims."""
 from pathlib import Path
+from contextlib import contextmanager
 import json
 import re
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ import pytest
 
 from vietmedbridge.artifacts import digest_json
 from vietmedbridge.kaggle_outputs import (
-    MANIFEST_PATTERN, download_kaggle_outputs, inspect_kaggle_output, output_handles,
+    MANIFEST_PATTERN, _download_pages, _stream_file, download_kaggle_outputs, inspect_kaggle_output, output_handles,
 )
 
 
@@ -164,10 +165,11 @@ def test_rejects_invalid_handles_before_api(value):
         output_handles(value)
 
 
-def test_version_handle_and_zero_receipts_reported_without_recounting(tmp_path, capsys):
+def test_version_handle_and_zero_receipts_reported_without_recounting(tmp_path, capsys, paged_api):
     handle = "owner/notebook/2"
     assert output_handles(f" {handle}, second/notebook ") == [handle, "second/notebook"]
-    api = FakeApi({handle: files(result(parts=0))})
+    _, modern_api, _ = paged_api
+    api = modern_api([files(result(parts=0))])
     probe = inspect_kaggle_output(api, handle, tmp_path)
     assert probe["manifest"]["receipts"] == []
     assert "saved_parts=0" in capsys.readouterr().out
@@ -178,3 +180,157 @@ def test_manifest_filter_is_recursive_and_does_not_fetch_vectors():
     assert re.search(MANIFEST_PATTERN, "result-manifest.json")
     assert re.search(MANIFEST_PATTERN, "vmb_checkpoints/result-manifest.json")
     assert not re.search(MANIFEST_PATTERN, "data/vector.npy")
+
+
+class HttpResponse:
+    def __init__(self, content, *, length=None, fail=False):
+        self.content = content
+        self.headers = {"Content-Length": str(len(content) if length is None else length)}
+        self.fail = fail
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def raise_for_status(self):
+        if self.fail:
+            raise RuntimeError("HTTP failure")
+
+    def iter_content(self, chunk_size):
+        # Test the streaming path, not response.content buffering.
+        for start in range(0, len(self.content), 3):
+            yield self.content[start:start + 3]
+
+
+@pytest.fixture
+def paged_api(monkeypatch):
+    """Old public API cannot accept page_token; its SDK still can."""
+    from vietmedbridge import kaggle_outputs
+    import requests
+
+    monkeypatch.setattr(kaggle_outputs, "_sdk_request", lambda: SimpleNamespace(version_label=None))
+    fetched, content = [], {}
+
+    def get(url, **kwargs):
+        fetched.append(url)
+        assert kwargs["stream"] is True
+        return HttpResponse(content[url])
+
+    monkeypatch.setattr(requests, "get", get)
+
+    class BasePaged(FakeApi):
+        def __init__(self, pages):
+            self.pages = pages
+            self.tokens, self.sdk_requests = [], []
+            super().__init__({"owner/notebook": pages[0]})
+
+        def _public_page(self, handle, path, token, options):
+            self.tokens.append(token)
+            index = int(token.split("-")[1]) if token else 0
+            self.remote[handle] = self.pages[index]
+            paths, _ = FakeApi.kernels_output(self, handle, path, **options)
+            return paths, f"page-{index + 1}" if index + 1 < len(self.pages) else ""
+
+        @contextmanager
+        def build_kaggle_client(self):
+            service = SimpleNamespace(list_kernel_session_output=self._sdk_page)
+            yield SimpleNamespace(kernels=SimpleNamespace(kernels_api_client=service))
+
+        def _sdk_page(self, request):
+            self.sdk_requests.append(request)
+            assert (request.user_name, request.kernel_slug) == ("owner", "notebook")
+            index = int(request.page_token.split("-")[1]) if request.page_token else 0
+            entries = []
+            for name, text in self.pages[index].items():
+                url = f"memory://{index}/{name}"
+                content[url] = text.encode()
+                entries.append(SimpleNamespace(file_name=name, url=url))
+            return SimpleNamespace(files=entries, next_page_token=(
+                f"page-{index + 1}" if index + 1 < len(self.pages) else ""))
+
+    class OldPaged(BasePaged):
+        # Exact public signature of kaggle==2.0.2: no page_token parameter.
+        def kernels_output(self, handle, path, *, file_pattern=None, force=False, quiet=True):
+            return self._public_page(handle, path, None,
+                {"file_pattern": file_pattern, "force": force, "quiet": quiet})
+
+    class NewPaged(BasePaged):
+        def kernels_output(self, handle, path, *, file_pattern=None, force=False, quiet=True, page_token=None):
+            return self._public_page(handle, path, page_token,
+                {"file_pattern": file_pattern, "force": force, "quiet": quiet})
+
+    return OldPaged, NewPaged, fetched
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_manifest_on_last_page_after_empty_filtered_pages(tmp_path, paged_api, modern):
+    old, new, fetched = paged_api
+    manifest = result()
+    pages = [{"vmb_checkpoints/data/first.npy": "first vector"}, {},
+             {"vmb_checkpoints/data/last.npy": "last vector"},
+             {"vmb_checkpoints/result-manifest.json": json.dumps(manifest)}]
+    api = (new if modern else old)(pages)
+    probe = inspect_kaggle_output(api, "owner/notebook", tmp_path)
+    assert probe["manifest"] == manifest
+    if modern:
+        assert api.tokens == ["", "page-1", "page-2", "page-3"]
+        assert not api.sdk_requests
+    else:
+        assert [request.page_token for request in api.sdk_requests] == ["page-1", "page-2", "page-3"]
+        assert len(fetched) == 1 and fetched[0].endswith("result-manifest.json")
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_bulk_download_includes_late_vector_and_reuses_complete_files(tmp_path, paged_api, modern):
+    old, new, _ = paged_api
+    pages = [{"vmb_checkpoints/data/first.npy": "first vector"}, {},
+             {"vmb_checkpoints/data/last.npy": "last vector"},
+             {"vmb_checkpoints/result-manifest.json": json.dumps(result())}]
+    api = (new if modern else old)(pages)
+    output = download_kaggle_outputs(api, ["owner/notebook"], tmp_path)[0]
+    vector = output / "data/last.npy"
+    before = vector.stat().st_mtime_ns
+    assert vector.read_text() == "last vector"
+    assert (output / "data/first.npy").read_text() == "first vector"
+    repeated = download_kaggle_outputs(api, ["owner/notebook"], tmp_path)[0]
+    assert repeated == output and vector.stat().st_mtime_ns == before
+
+
+def test_old_api_version_selection_uses_sdk_from_first_page(tmp_path, paged_api):
+    old, _, _ = paged_api
+    api = old([{"vmb_checkpoints/result-manifest.json": json.dumps(result())}])
+    probe = inspect_kaggle_output(api, "owner/notebook/2", tmp_path)
+    assert probe["manifest"] == result()
+    assert not api.tokens and api.sdk_requests[0].version_label == "v2"
+
+
+def test_repeated_token_stops_instead_of_looping_forever(tmp_path):
+    class Repeated:
+        def kernels_output(self, handle, path, *, page_token=None, **kwargs):
+            return [], "repeated-token"
+    with pytest.raises(RuntimeError, match="lặp token"):
+        _download_pages(Repeated(), "owner/notebook", tmp_path)
+
+
+def test_sdk_rejects_traversal_before_fetch_or_write(tmp_path, paged_api):
+    old, _, fetched = paged_api
+    api = old([{}, {"../result-manifest.json": json.dumps(result())}])
+    with pytest.raises(RuntimeError):
+        inspect_kaggle_output(api, "owner/notebook", tmp_path)
+    assert not fetched and not (tmp_path / "result-manifest.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["http", "short"])
+def test_failed_stream_preserves_previous_file_and_removes_temporary(tmp_path, monkeypatch, failure):
+    import requests
+
+    target = tmp_path / "vector.npy"
+    target.write_bytes(b"complete previous vector")
+    monkeypatch.setattr(requests, "get", lambda *_, **__: HttpResponse(
+        b"new bytes", length=100 if failure == "short" else None, fail=failure == "http"))
+    with pytest.raises(RuntimeError):
+        _stream_file("https://example.invalid/signed-file", target, force=True)
+    assert target.read_bytes() == b"complete previous vector"
+    assert list(tmp_path.iterdir()) == [target]

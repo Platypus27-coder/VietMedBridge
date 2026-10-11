@@ -145,6 +145,11 @@ khớp) rồi kiểm toàn bộ receipts trước khi ghi vào Drive:
 candidate, input manifest, model/runtime/source code, checksum file, shape/L2,
 source text hash và vector row tương ứng. Nếu không khớp thì dừng trước khi
 nhập. Ghi completion markers sau dữ liệu; nhập lại cùng kết quả là idempotent.
+Outputs có thể có nhiều trang metadata; một trang không có file khớp regex
+không có nghĩa là không có manifest. Trình nhập duyệt tới khi hết
+`next_page_token`, kể cả Kaggle 2.0.2 có public API chỉ tải trang đầu. Với
+phiên bản này, các trang sau được đọc qua SDK và file được tải streaming/atomic.
+Không cần cài lại môi trường hay tính lại embedding để sửa phân trang.
 Nếu Outputs đổi giữa preflight và tải vector, dừng trước khi nhập Drive và yêu
 cầu cố định số version. Bước nhập không chạy model hoặc tính lại embedding.
 
