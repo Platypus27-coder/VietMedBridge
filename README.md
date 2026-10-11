@@ -58,8 +58,9 @@ cho corpus pilot. Không chạy các notebook
    [notebook chuyển embedding](notebooks/04_kaggle_embedding_worker.ipynb) và
    [hướng dẫn Colab → Kaggle → Colab](docs/KAGGLE_HANDOFF.md). Username lấy từ
    Secrets của người chạy; checkpoint nhập về dùng trực tiếp trong 04 chính.
-   Hai tài khoản cùng `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`, đặt
-   `KAGGLE_ACCOUNT_ID=0/1` để chia thành bốn worker; dùng cùng một input dataset.
+   Với checkpoint 700k hiện tại, đặt `KAGGLE_ACCOUNTS=1`,
+   `KAGGLE_ACCOUNT_ID=0`, `GPUS_PER_ACCOUNT=2`. Notebook chuyển tiếp từ
+   checkpoint Drive, bỏ qua BGE đã hoàn tất và chạy phần Qwen còn thiếu theo lượt.
    Khi Drive đầy, dùng [utility chuyển storage](notebooks/tools/drive_hf_storage.ipynb)
    trên Colab CPU, rồi bật `USE_HF_STORAGE=True` trong 04 để chạy baseline từ
    BGE/catalog đã lưu trên HF. Không tính lại corpus embeddings. Xem

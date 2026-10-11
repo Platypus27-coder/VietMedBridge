@@ -22,24 +22,24 @@ def main():
            Kaggle Settings → API → Legacy API Credentials. Bật quyền notebook đọc
            Secret. Username tự lấy từ Secret của người chạy; không gửi token vào chat.
         2. **Kaggle:** import notebook này, giữ Private, Add Input dataset vừa xuất, bật Internet
-           và GPU **T4 x2**, rồi **Save Version → Save & Run All**. Chạy hai tài khoản:
-           cùng `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`; tài khoản thứ nhất đặt
-           `KAGGLE_ACCOUNT_ID=0`, tài khoản thứ hai đặt `KAGGLE_ACCOUNT_ID=1`.
-           Notebook tự gán worker toàn nhóm: 0–1 và 2–3. Hai bên chạy cùng lúc.
+           và GPU **T4 x2**, rồi **Save Version → Save & Run All**. Mặc định một tài
+           khoản chạy cả hai GPU: `KAGGLE_ACCOUNTS=1`, `KAGGLE_ACCOUNT_ID=0`,
+           `GPUS_PER_ACCOUNT=2`. Notebook tự gán hai worker 0–1.
         3. **Colab CPU:** sau khi Kaggle version hoàn tất và có Outputs, điền
-           `KAGGLE_NOTEBOOK_OUTPUT="owner-a/notebook-a, owner-b/notebook-b"`, Run all. Notebook
-           kiểm trạng thái/manifest của cả hai acc trước khi tải vector, rồi kiểm
+           `KAGGLE_NOTEBOOK_OUTPUT="owner/notebook"`, Run all. Nếu nhập lượt cũ
+           của hai tài khoản, ghi cả hai notebook, cách nhau dấu phẩy. Notebook
+           kiểm trạng thái/manifest của Outputs trước khi tải vector, rồi kiểm
            checksum, model, source text và từng vector row trước khi nhập Drive.
            Nếu còn thiếu, tự xuất một dataset tiếp tục chỉ giao phần thiếu từ checkpoint
-           Drive; dùng dataset đó cho lượt Kaggle kế tiếp. Khi cả BGE và Qwen đủ,
+           Drive và chuyển sang một tài khoản; dùng dataset đó cho lượt Kaggle kế tiếp.
+           Khi cả BGE và Qwen đủ,
            mới tiếp tục notebook 04 chính trên Colab GPU.
 
         Người nào cũng chạy được bằng Secret tài khoản của mình và quyền đọc Drive.
         Nếu dùng private dataset/output của người khác, chủ sở hữu cần cấp quyền
         truy cập trên Kaggle. Không chia sẻ API key cho nhau.
-        Xuất **một dataset chung** rồi cấp quyền đọc cho tài khoản thứ hai; cả hai
-        Add Input đúng dataset đó. Gói khóa số tài khoản/GPU để không chia lệch.
-        Chạy một tài khoản thì đặt `KAGGLE_ACCOUNTS=1` trước khi xuất gói.
+        Dataset continuation mới khóa một tài khoản và hai GPU. Không Add Input
+        dataset cũ đã khóa hai tài khoản; Colab CPU xuất dataset mới từ checkpoint Drive.
         `RUNTIME_PLATFORM="auto"` nhận diện runtime đang chạy, không dựa vào thư mục
         `/kaggle/input`. Có thể chọn rõ `"colab"` hoặc `"kaggle"` tại đầu cell 1.
         Runtime GPU được khóa riêng, không lấy bản PyTorch CPU của máy xuất gói.
@@ -53,6 +53,9 @@ def main():
         chưa phải toàn bộ 700k đã embedding và chưa xuất submission. Giữ các model
         BGE-M3 + Qwen3-Embedding-8B đúng config của hệ thống, không đổi model cho nhanh.
         Chỉ các đoạn thiếu được encode; query LLM/reranker chạy ở coordinator sau.
+        Một tài khoản giảm thao tác phối hợp nhưng không tăng tổng tốc độ GPU.
+        Giới hạn output buộc lưu Outputs và nhập Drive sau mỗi lượt, rồi xuất
+        dataset continuation mới cho lượt sau.
 
         `/kaggle/working` cần được lưu thành notebook version thành công mới lấy
         được từ Colab. Không cố chờ quota ngắt cứng. Có thể Add Input Outputs của
@@ -77,10 +80,10 @@ def main():
 
         SESSION_STARTED = globals().get("SESSION_STARTED", time.time())
         DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")
-        KAGGLE_NOTEBOOK_OUTPUT = ""  # Nhập về Drive: owner-a/notebook-a, owner-b/notebook-b
-        KAGGLE_ACCOUNTS = 2  # Giống nhau trên cả hai tài khoản và lúc xuất input
-        KAGGLE_ACCOUNT_ID = 0  # Tài khoản thứ nhất: 0; tài khoản thứ hai: 1
-        GPUS_PER_ACCOUNT = 2  # Chọn T4 x2 ở cả hai tài khoản
+        KAGGLE_NOTEBOOK_OUTPUT = ""  # Nhập về Drive: owner/notebook (lượt cũ hai acc: hai handles)
+        KAGGLE_ACCOUNTS = 1  # Một tài khoản dùng cả hai GPU
+        KAGGLE_ACCOUNT_ID = 0
+        GPUS_PER_ACCOUNT = 2  # Chọn T4 x2
         SESSION_HOURS = 10.0
         RUNTIME_PLATFORM = "auto"  # "auto", "colab" hoặc "kaggle"
         REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
@@ -328,29 +331,30 @@ def main():
                 api.authenticate()
                 outputs = download_kaggle_outputs(api, handles, WORK_DIR)
                 if len({read_json(path / "job.json")["manifest_sha256"] for path in outputs}) != 1:
-                    raise ValueError("Hai Outputs thuộc hai input job khác nhau. Chạy cùng dataset chung.")
+                    raise ValueError("Các Outputs thuộc các input job khác nhau. Nhập mỗi job theo lượt riêng.")
                 account_ids = [read_json(path / "result-manifest.json")["assignment"]["account_id"]
                                for path in outputs if read_json(path / "result-manifest.json").get("assignment") is not None]
                 if len(set(account_ids)) != len(account_ids):
-                    raise ValueError("Các Outputs trùng KAGGLE_ACCOUNT_ID. Chọn một version mới nhất cho mỗi tài khoản; hai tài khoản phải là 0 và 1.")
+                    raise ValueError("Các Outputs trùng KAGGLE_ACCOUNT_ID. Chọn một version mới nhất cho mỗi tài khoản.")
                 for handle, path in zip(handles, outputs, strict=True):
                     print("Nhập Outputs:", handle)
                     report = install_result(path, DATA_ROOT, CHECKOUT)
                     print(json.dumps(report, ensure_ascii=False, indent=2))
                 if not report["corpus_embeddings_complete"]:
                     upload_continuation(DATA_ROOT, CHECKOUT, WORK_DIR / "continuations",
-                        read_json(outputs[0] / "job.json"), owner=owner, worker_code_commit=CODE_COMMIT)
+                        read_json(outputs[0] / "job.json"), owner=owner, worker_code_commit=CODE_COMMIT,
+                        accounts=KAGGLE_ACCOUNTS, gpu_count=GPUS_PER_ACCOUNT)
                 else:
                     print("Cả BGE và Qwen đã đủ. Tiếp tục notebook 04 chính; giữ checkpoint đã nhập.")
-            elif (previous_job := find_imported_job(DATA_ROOT, CHECKOUT)) is not None:
+            elif (previous_job := find_imported_job(DATA_ROOT, CHECKOUT,
+                    accounts=KAGGLE_ACCOUNTS, gpu_count=GPUS_PER_ACCOUNT)) is not None:
                 from vietmedbridge.portable_embeddings import embedding_coverage
                 if all(value["complete"] for value in embedding_coverage(DATA_ROOT, previous_job).values()):
                     print("Cả BGE và Qwen đã đủ. Tiếp tục notebook 04 chính; không xuất lại embedding job.")
                 else:
-                    if previous_job.get("team") != {"accounts": KAGGLE_ACCOUNTS, "gpu_count": GPUS_PER_ACCOUNT}:
-                        raise ValueError("Tiếp tục với số tài khoản/GPU của job đã nhập; không đổi cách chia giữa các lượt.")
                     upload_continuation(DATA_ROOT, CHECKOUT, WORK_DIR / "continuations",
-                        previous_job, owner=owner, worker_code_commit=CODE_COMMIT)
+                        previous_job, owner=owner, worker_code_commit=CODE_COMMIT,
+                        accounts=KAGGLE_ACCOUNTS, gpu_count=GPUS_PER_ACCOUNT)
             else:
                 from vietmedbridge.portable_embeddings import cuda_embedding_runtime
                 runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
@@ -384,8 +388,7 @@ def main():
                     raise ValueError("Uploaded Kaggle job differs; do not run it.")
                 atomic_json(pointer, {"dataset_handle": handle, "job": job["manifest_sha256"], "code_commit": CODE_COMMIT})
                 print("Private dataset đã kiểm:", "https://www.kaggle.com/datasets/" + handle)
-                print("Cấu hình chung:", job["team"], "| Cấp quyền đọc dataset này cho thành viên chạy tài khoản thứ hai.")
-                print("Tài khoản thứ nhất KAGGLE_ACCOUNT_ID=0; tài khoản thứ hai KAGGLE_ACCOUNT_ID=1.")
+                print("Cấu hình Kaggle:", job["team"], "| KAGGLE_ACCOUNT_ID=0.")
                 print("Kaggle: import notebook này → Add Input dataset trên → Internet ON → T4 x2 → Save Version / Save & Run All.")
         '''),
     ])

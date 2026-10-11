@@ -77,6 +77,41 @@ def test_repeated_capacity_bounded_rounds_finish_all_missing_qwen_once(tmp_path,
     assert len(seen) == len(inputs["parts"]) - before["qwen"]["completed_parts"]
 
 
+def test_two_account_checkpoint_continues_on_one_account_without_reencoding(tmp_path, partial):
+    original, _, inputs = partial
+    before = embedding_coverage(tmp_path, original)
+    directory, plan = export_continuation(tmp_path, REPO, tmp_path / "one-account", original,
+                                           worker_code_commit="c" * 40, accounts=1, gpu_count=2)
+    next_job = read_json(directory / "job.json")
+    assert original["team"] == {"accounts": 2, "gpu_count": 2}
+    assert next_job["team"] == {"accounts": 1, "gpu_count": 2}
+    assert next_job["manifest_sha256"] != original["manifest_sha256"]
+    assert {k: v for k, v in next_job.items() if k not in {"team", "manifest_sha256"}} == {
+        k: v for k, v in original.items() if k not in {"team", "manifest_sha256"}}
+    assert not plan["scheduled"]["bge"]
+    assert set(plan["scheduled"]["qwen"]) == {
+        part["start"] for part in inputs["parts"]} - set(plan["completed"]["qwen"])
+    assert find_imported_job(tmp_path, REPO, accounts=1, gpu_count=2) == next_job
+    assert embedding_coverage(tmp_path, next_job) == before
+
+    scratch, output = tmp_path / "one-scratch", tmp_path / "one-output"
+    hydrate_job(directory, scratch, REPO)
+    assignment = kaggle_assignment(accounts=1, account_id=0, gpu_count=2)
+    atomic_json(output / "assignment.json", assignment)
+    shutil.copyfile(directory / "continuation-plan.json", output / "continuation-plan.json")
+    def qwen_only(spec):
+        assert spec["model_id"] != "BAAI/bge-m3"
+        return FakeEncoder(spec)
+    for worker_id in assignment["worker_ids"]:
+        run_worker(directory, scratch, output, REPO, worker_id=worker_id, workers=2,
+                   deadline=time.time() + 60, encoder_factory=qwen_only)
+    result = finalize_result(output, next_job, processes=[0, 0], inputs=inputs)
+    assert result["state"] == "ACCOUNT_ASSIGNMENT_COMPLETE"
+    report = install_result(output, tmp_path, REPO, update_lock=False)
+    assert report["corpus_embeddings_complete"]
+    assert FakeEncoder.calls == inputs["input_count"] - before["qwen"]["input_rows"]
+
+
 def test_continuation_rejects_wrong_job_invalid_selection_and_broken_drive_map(tmp_path, partial):
     job, _, inputs = partial
     directory, plan = export_continuation(tmp_path, REPO, tmp_path / "continuation", job, worker_code_commit="c" * 40)

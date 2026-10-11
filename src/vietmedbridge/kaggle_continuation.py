@@ -13,7 +13,7 @@ from .scale_benchmark import load_handoff
 from .scale_vectors import bound
 
 
-def find_imported_job(data_root, checkout):
+def find_imported_job(data_root, checkout, *, accounts=None, gpu_count=None):
     """Reuse the original small bundle instead of exporting the growing vector cache."""
     from .portable_embeddings import validate_job
     root = Path(data_root)
@@ -23,7 +23,27 @@ def find_imported_job(data_root, checkout):
         job = read_json(path)
         if job["candidate"] == candidate["candidate_manifest_sha256"] and job["inputs"] == inputs["manifest_sha256"]:
             jobs.append(validate_job(job, checkout))
+    if accounts is not None or gpu_count is not None:
+        matching = [job for job in jobs if job.get("team") == {
+            "accounts": accounts, "gpu_count": gpu_count}]
+        if matching:
+            jobs = matching
     return min(jobs, key=lambda job: sum(entry["bytes"] for entry in job["files"])) if jobs else None
+
+
+def continuation_job(job, checkout, *, accounts=None, gpu_count=None):
+    """Change only worker ownership; preserve corpus, model and runtime identities."""
+    from .portable_embeddings import kaggle_assignment, validate_job
+    original = validate_job(job, checkout)
+    team = original.get("team") or {"accounts": 1, "gpu_count": 2}
+    accounts = team["accounts"] if accounts is None else accounts
+    gpu_count = team["gpu_count"] if gpu_count is None else gpu_count
+    kaggle_assignment(accounts=accounts, account_id=0, gpu_count=gpu_count)
+    if original.get("team") == {"accounts": accounts, "gpu_count": gpu_count}:
+        return original
+    payload = {key: value for key, value in original.items() if key != "manifest_sha256"}
+    payload["team"] = {"accounts": accounts, "gpu_count": gpu_count}
+    return validate_job(seal(payload), checkout)
 
 
 def load_plan(directory, job, inputs):
@@ -53,11 +73,11 @@ def load_plan(directory, job, inputs):
 
 
 def export_continuation(data_root, checkout, destination, job, *, worker_code_commit=None,
-                        round_output_bytes=16_000_000_000):
-    """Keep the original job/model identities; export inputs and a small skip plan only."""
-    from .portable_embeddings import _copy_checked, embedding_coverage, validate_job
+                        round_output_bytes=16_000_000_000, accounts=None, gpu_count=None):
+    """Keep corpus/model identities; export inputs and a small skip plan only."""
+    from .portable_embeddings import _copy_checked, embedding_coverage
     root, checkout = Path(data_root), Path(checkout)
-    job = validate_job(job, checkout)
+    job = continuation_job(job, checkout, accounts=accounts, gpu_count=gpu_count)
     _, candidate, inputs = load_handoff(root)
     if candidate["candidate_manifest_sha256"] != job["candidate"] or inputs["manifest_sha256"] != job["inputs"]:
         raise ValueError("Continuation belongs to another frozen corpus.")
@@ -135,13 +155,16 @@ def assignment_progress(inputs, assignment, plan, receipts):
     return result
 
 
-def upload_continuation(data_root, checkout, destination, job, *, owner, worker_code_commit=None):
+def upload_continuation(data_root, checkout, destination, job, *, owner, worker_code_commit=None,
+                        accounts=None, gpu_count=None):
     """Publish one private input bundle per plan, reusing the upload on retries."""
     import kagglehub
     if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", owner):
         raise ValueError("Invalid Kaggle owner.")
     target, plan = export_continuation(data_root, checkout, destination, job,
-                                       worker_code_commit=worker_code_commit)
+                                       worker_code_commit=worker_code_commit,
+                                       accounts=accounts, gpu_count=gpu_count)
+    job = read_json(target / "job.json")
     pointer = Path(data_root) / "retrieval/kaggle_exports" / (
         owner + "-continue-" + plan["manifest_sha256"][:16] + ".json")
     if pointer.exists():
@@ -173,5 +196,7 @@ def upload_continuation(data_root, checkout, destination, job, *, owner, worker_
               f"remaining {value['total_parts'] - value['completed_parts']}", flush=True)
     print("Round capacity plan:", plan["round_estimates"], flush=True)
     print("Kaggle: Add Input ONLY this continuation dataset; use the updated worker notebook. "
-          "Keep account IDs 0/1 and T4 x2. Old Outputs stay on Drive; do not attach them.", flush=True)
+          f"Set KAGGLE_ACCOUNTS={job['team']['accounts']}, KAGGLE_ACCOUNT_ID in "
+          f"0..{job['team']['accounts'] - 1}, GPUS_PER_ACCOUNT={job['team']['gpu_count']}. "
+          "Old Outputs stay on Drive; do not attach them.", flush=True)
     return {"dataset_handle": handle, "plan": plan["manifest_sha256"], "coverage": plan["coverage"]}
