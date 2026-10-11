@@ -53,7 +53,7 @@ def training_source_pool(catalog,limit):
     return SimpleNamespace(documents=documents,children=children,identity=catalog.identity)
 
 
-def load_scale_catalog(root,checkout,work,tokenizer):
+def load_scale_catalog(root,checkout,work,tokenizer,*,read_only=False):
     build,candidate,inputs = load_handoff(root)
     config = read_json(Path(checkout) / "configs/retrieval_full.json")
     if any(candidate["golden"]["tokenizer"].get(k) != config["dense"].get(k) for k in ("model_id","revision")):
@@ -63,7 +63,8 @@ def load_scale_catalog(root,checkout,work,tokenizer):
         raise ValueError("Full system/official snapshot mismatch.")
     glossary = Path(root) / "labels/medical_aliases.json"
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"],glossary_path=glossary if glossary.is_file() else None)
-    base = prepare_disk_catalog(build,candidate,inputs,Path(root) / "retrieval/catalogs",analyzer,work_dir=work)
+    base = prepare_disk_catalog(build,candidate,inputs,Path(root) / "retrieval/catalogs",analyzer,work_dir=work,
+        **({"read_only":True} if read_only else {}))
     policy = StrongConfig(**config["retrieval"])
     return AdaptiveDiskCatalog(base,tokenizer,(policy.parent_short_tokens,policy.parent_long_tokens)),analyzer
 
@@ -114,6 +115,27 @@ def _document_inputs(catalog,tokenizer,target,max_length=512,part_size=1024):
         return saved
     target.mkdir(parents=True,exist_ok=True)
     rows,parts,cursor = [],[],0
+    total_documents = catalog.candidate["counts"]["documents"]
+    last_id = None
+    for marker in sorted(target.glob("units-*.done.json")):
+        part = checked(read_json(marker))
+        if (part.get("signature") != signature or part.get("start") != cursor or part.get("rows",0) < 1
+            or part.get("path") != f"units-{cursor:012d}.parquet"):
+            raise ValueError("Document input checkpoint order/policy changed.")
+        path = target / part["path"]
+        verify_file(path,part["sha256"])
+        restored = pq.read_table(path).to_pylist()
+        expected_ids = [r[0] for r in catalog.base.con.execute(
+            "SELECT doc_id FROM documents WHERE (? IS NULL OR doc_id > ?) ORDER BY doc_id LIMIT ?",
+            (last_id,last_id,part["rows"]))]
+        if (digest_json(restored) != part["rows_sha256"]
+            or [int(r["id"]) for r in restored] != expected_ids or len(restored) != part["rows"]):
+            raise ValueError("Document input checkpoint source coverage changed.")
+        parts.append(part)
+        cursor += part["rows"]
+        last_id = expected_ids[-1]
+    if parts:
+        print(f"Document inputs: reused {cursor:,}/{total_documents:,}; completed text is not retokenized.",flush=True)
     def publish():
         nonlocal rows,cursor
         path = target / f"units-{cursor:012d}.parquet"
@@ -135,7 +157,10 @@ def _document_inputs(catalog,tokenizer,target,max_length=512,part_size=1024):
         parts.append(part)
         cursor += len(rows)
         rows = []
-    for identifier in catalog.documents:
+        print(f"Document inputs: {cursor:,}/{total_documents:,}",flush=True)
+    identifiers = (r[0] for r in catalog.base.con.execute(
+        "SELECT doc_id FROM documents WHERE (? IS NULL OR doc_id > ?) ORDER BY doc_id",(last_id,last_id)))
+    for identifier in identifiers:
         doc = catalog.documents[identifier]
         title,source = doc.get("title","").strip(),doc["source_text"]
         offsets = tokenizer(title,add_special_tokens=False,return_offsets_mapping=True,truncation=False,verbose=False)["offset_mapping"]
@@ -163,6 +188,8 @@ def _document_inputs(catalog,tokenizer,target,max_length=512,part_size=1024):
             publish()
     if rows:
         publish()
+    if cursor != total_documents:
+        raise ValueError("Document input coverage differs from the frozen catalog.")
     saved = seal(identity | {"signature":signature,"state":"COMPLETE","input_count":cursor,"parts":parts})
     atomic_json(target / "units.json",saved)
     return saved
@@ -348,11 +375,25 @@ def scale_adapter(root,catalog,queries,config):
 
 
 def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=None,workers=1,
-                            max_new_embedding_parts=None,max_new_translations=None,max_new_queries=None):
+                            max_new_embedding_parts=None,max_new_translations=None,max_new_queries=None,
+                            execution_mode="full",output_root=None,second_dense_mode="if_complete",
+                            document_dense_enabled=True):
     root,checkout = Path(data_root),Path(checkout)
+    if execution_mode not in ("full", "cached_strong"):
+        raise ValueError("Unknown full inference execution mode.")
     queries = load_queries(parquet_path(root,"query.parquet"),expected_count=1200)
-    prepared = prepare_scale_resources(root,checkout,work_dir,queries,worker_id=worker_id,workers=workers,
-        max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations)
+    if execution_mode == "cached_strong":
+        if output_root is None or worker_id is not None or workers != 1:
+            raise ValueError("Cached strong requires one coordinator and a separate output_root.")
+        from .cached_strong_runtime import prepare_cached_strong_resources
+        prepared = prepare_cached_strong_resources(root,checkout,work_dir,queries,output_root=output_root,
+            second_dense_mode=second_dense_mode,document_dense_enabled=document_dense_enabled,
+            max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations)
+    else:
+        if output_root is not None:
+            raise ValueError("Separate output_root currently requires cached_strong execution.")
+        prepared = prepare_scale_resources(root,checkout,work_dir,queries,worker_id=worker_id,workers=workers,
+            max_new_embedding_parts=max_new_embedding_parts,max_new_translations=max_new_translations)
     if prepared["state"] != "FULL_RESOURCES_READY":
         return {"ready":{"state":prepared["state"],"query_count":0},"status":prepared,"samples":[],
             "diagnostics_path":prepared.get("resources",str(root / "retrieval/full_resources"))}
@@ -366,7 +407,8 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
                 policy = replace(policy,**calibration["policy"])
                 config["retrieval"] = asdict(policy)
         budget = model_budget_report(config,prepared["registry"],adapter_paths=[adapter] if adapter else [])
-        run = root / "retrieval/full_system" / digest_json({"catalog":index.catalog.identity,"config":config})[:20]
+        outputs = Path(output_root) if output_root is not None else root / "retrieval"
+        run = outputs / "full_system" / digest_json({"catalog":index.catalog.identity,"config":config})[:20]
         contract = bind_pilot_run(run,plan_path=checkout / MASTER_PLAN,catalog=index.catalog,queries=queries,config=config,code_commit=code_commit)
         model = TorchQwenReranker(config["reranker"],adapter_path=adapter)
         try:
@@ -376,11 +418,23 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
             model_identity = dict(model.identity)
         finally:
             model.close()
+        all_dense = execution_mode == "full" or (prepared["branches"]["document_dense"] == "COMPLETE"
+            and prepared["branches"]["qwen_child_dense"] == "COMPLETE")
+        branches = prepared.get("branches",{name:"COMPLETE" for name in (
+            "bge_child_dense","qwen_child_dense","document_dense","bm25_vi_en_zh","query_translation")}) | {"document_reranker":report["state"],
+            "child_maxp_reranker":report["state"],"adaptive_source_parents_512_640":report["state"],
+            "source_schema_submission": "PENDING"}
         status = {"state":report["state"],"architecture":config["architecture"],"query_count":len(records),
-            "documents":len(index.catalog.documents),"full_plan_inference":True,"fine_tuned":adapter is not None,
+            "documents":len(index.catalog.documents),"full_plan_inference":all_dense and report["state"] == "COMPLETE","fine_tuned":adapter is not None,
+            "all_dense_branches_ready":all_dense,
+            "strong_inference":True,"complete_master_plan":False,"execution_mode":execution_mode,
+            "branches":branches,"coverage":prepared.get("coverage"),
+            "executed_models":[config[k] for k in ("dense","translation","reranker")]
+                + ([config["second_dense"]] if branches.get("qwen_child_dense") == "COMPLETE" else []),
+            "source_read_only":execution_mode == "cached_strong","output_root":str(outputs),
             "model_parameter_budget":budget,"official_score":None,"full_corpus":False,
             "calibration":"DEV_SELECTED" if calibration and calibration["applies_to_current_corpus"] else "UNTUNED_ON_CURRENT_CORPUS",
-            "candidate_search":"bounded global child top-k plus document dense plus translated lexical",
+            "candidate_search":"bounded full BGE child search, translated lexical and enabled dense branches",
             "supervised_stage":"SELECTED_ADAPTER_LOADED" if adapter else "WAITING_FOR_REVIEWED_LABELS_AND_TRAINING",
             "index":index.manifest,"resources":prepared["resources"]}
         if records:
@@ -393,9 +447,11 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
         else:
             evidence = {"git_commit":code_commit,"master_plan":MASTER_PLAN,"index":index.manifest,"reranker":model_identity,
                 "model_parameter_budget":budget,"retrieval_config":asdict(policy),"calibration":calibration,
-                "inference_scope":"FULL_ARCHITECTURE_DISK_PARTIAL_CORPUS"}
+                "inference_scope":"FULL_ARCHITECTURE_DISK_PARTIAL_CORPUS" if all_dense else "CACHED_STRONG_DISK_PARTIAL_CORPUS",
+                "branches":branches,"coverage":prepared.get("coverage"),"execution_mode":execution_mode}
             _,ready = finish_pilot(records,queries,index.catalog,report,run,contract=contract,tokenizer=index.tokenizer,evidence=evidence,work_dir=work_dir)
             status["state"] = ready["state"]
+            branches["source_schema_submission"] = "COMPLETE"
         diagnostics = run / "full_plan_status.json"
         atomic_json(diagnostics,status)
         return {"ready":ready,"status":status,"diagnostics_path":str(diagnostics),

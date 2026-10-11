@@ -104,13 +104,15 @@ class Languages(Mapping):
 class DiskStrongIndex:
     """Preserve the strong cascade API without materializing corpus vectors/text."""
     def __init__(self,catalog,primary,secondary,query_vectors,auxiliary,queries,expansions,
-                 primary_search,secondary_search,document_search,document_ids,tokenizer,manifest):
+                 primary_search,secondary_search,document_search,document_ids,tokenizer,manifest,
+                 *, auxiliary_family="qwen"):
         self.catalog,self.base,self.tokenizer = catalog,catalog.base,tokenizer
         self.primary,self.secondary,self.auxiliary = primary,secondary,auxiliary
         self.query_vectors = {q["query"]:v for q,v in zip(queries,query_vectors,strict=True)}
         self.expansions = {q["query"]:e["variants"] for q,e in zip(queries,expansions,strict=True)}
         self.primary_search,self.secondary_search,self.document_search = primary_search,secondary_search,document_search
         self.document_ids = document_ids
+        self.auxiliary_family = auxiliary_family
         self.encoder = primary.manifest["encoder"]
         self.dense = SimpleNamespace(d=primary.manifest["dimension"])
         self.languages = Languages(catalog)
@@ -152,9 +154,14 @@ class DiskStrongIndex:
         scores,positions = self.primary_search[query]
         add("dense",self.base.dense_documents(positions,scores,config.doc_candidate_k),config.dense_weight)
         def second(name,text,weight):
+            if weight <= 0:
+                return
             ss,ii = self.secondary_search[digest_json(text)]
             add(name,self.base.dense_documents(ii,ss,config.doc_candidate_k),weight)
-        second("dense_qwen",query,config.second_dense_weight)
+        if config.second_dense_weight:
+            if self.secondary is None:
+                raise ValueError("Qwen dense weight requires a complete secondary corpus.")
+            second("dense_qwen",query,config.second_dense_weight)
         if config.document_dense_weight:
             ss,ii = self.document_search[query]
             add("dense_document",[(self.document_ids[int(i)],s) for i,s in zip(ii,ss,strict=True)],config.document_dense_weight)
@@ -172,7 +179,7 @@ class DiskStrongIndex:
         rows = [{"doc_id":d,"retrieval_score":fused[d],"branches":{name:{"rank":ranks[name][d],"score":values[name][d]}
             for name in orders if d in ranks[name]}} for d in ids]
         return rows,SimpleNamespace(query=query,vector=np.asarray(vector,np.float32),
-            secondary=self.auxiliary[digest_json(query)],global_rank={int(p):i+1 for i,p in enumerate(positions)})
+            secondary=self.auxiliary.get(digest_json(query)),global_rank={int(p):i+1 for i,p in enumerate(positions)})
 
     def child_candidates(self,doc_id,query,variants,unit_scores,config,limit):
         if doc_id not in self.local:
@@ -190,11 +197,13 @@ class DiskStrongIndex:
         if variants.get("query_"+language):
             sparse = np.maximum(sparse,bm25.scores(lexical_field(self.base.analyzer,variants["query_"+language],language)))
         dense = self.primary.gather(positions) @ unit_scores.vector
-        secondary = self.secondary.gather(positions) @ unit_scores.secondary
         order = lambda scores:sorted(range(len(rows)),key=lambda i:(-float(scores[i]),rows[i]["chunk_id"]))
         orders = {"dense":order(dense),"sparse":[i for i in order(sparse) if sparse[i] > 0]}
         weights = {"dense":1.,"sparse":.8}
         if config.second_dense_weight:
+            if self.secondary is None or unit_scores.secondary is None:
+                raise ValueError("Qwen child scoring requires complete secondary vectors.")
+            secondary = self.secondary.gather(positions) @ unit_scores.secondary
             orders["dense_qwen"],weights["dense_qwen"] = order(secondary),config.second_dense_weight
         fused = weighted_rrf(orders,weights,config.rrf_k)
         return [{"child_id":rows[i]["chunk_id"],"doc_id":doc_id,"retrieval_score":fused[i],

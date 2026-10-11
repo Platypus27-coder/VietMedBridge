@@ -41,6 +41,7 @@ if not (3,11) <= sys.version_info[:2] < (3,14):
     raise RuntimeError("Dùng Colab Python 3.11–3.13.")
 DATA_ROOT = Path("/content/vmb_data")  # dữ liệu/outputs ở ổ local, không dùng quota Drive
 WORK_DIR = Path("/content/vmb_work")
+RESULTS_ROOT = Path("/content/vmb_results")
 WORK_DIR.mkdir(parents=True,exist_ok=True)
 os.environ["HF_HOME"] = "/content/hf_cache"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -169,7 +170,10 @@ print("Code commit:",CODE_COMMIT)
 
 
 def retrieval_bootstrap():
-    settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = True  # ưu tiên submission bằng BGE/BM25 đã xong; Colab GPU
+    settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = True  # đọc cache Drive; hỗ trợ cả cached_strong và baseline
+CACHED_INFERENCE_MODE = "cached_strong"  # dịch + rerank + parents; "bge_bm25_cached": bản nhanh chỉ BGE/BM25
+DOCUMENT_DENSE_ENABLED = True  # thêm BGE title/opening embeddings; False: bỏ nhánh này và ghi rõ trong báo cáo
+QWEN_DENSE_MODE = "if_complete"  # đủ cache thì dùng; "require": chờ đủ; "off": tắt nhánh Qwen dense
 DRIVE_DATA_ROOT = "/content/drive/MyDrive/VietMedBridge/data"
 MIN_EXPECTED_INPUT_RECORDS = 700244  # chặn chạy nhầm candidate 100k cũ; tăng khi có batch mới
 USE_HF_STORAGE = False  # True sau HF_STORAGE_VERIFIED; khi đó tắt RUN_CACHED_BASELINE_FROM_DRIVE
@@ -193,14 +197,25 @@ def main():
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
         **Chạy submission trên Drive hiện có:** mặc định
         `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `USE_HF_STORAGE=False`.
+        Mặc định `CACHED_INFERENCE_MODE="cached_strong"`: dùng BGE child cache đã đủ,
+        BM25 VI/EN/ZH, Qwen 4B dịch/expansion, BGE document dense, Qwen 8B rerank
+        document và child/MaxP, source parents 512/640 và LCS dedup.
+        `QWEN_DENSE_MODE="if_complete"` không chờ phần Qwen corpus còn thiếu;
+        subqueries/HyDE dùng BGE khi Qwen dense chưa đủ. Không encode lại child corpus.
+        Document dense **tạo vectors mới** cho title/opening của mỗi document;
+        đặt `DOCUMENT_DENSE_ENABLED=False` nếu cần bỏ chi phí này, báo cáo ghi DISABLED.
+        Nhánh dịch và rerank vẫn cần GPU và thời gian; không phải đổi tên baseline thành full.
+        Muốn xuất bản BGE/BM25 trước: `CACHED_INFERENCE_MODE="bge_bm25_cached"`.
         Chọn **Colab T4 GPU**, Run all. Đọc active candidate, BGE đã nhập và
         catalog BM25 đã hoàn tất trên Drive; không chờ upload HF.
-        Chỉ encode 1.200 query, truy hồi và xuất ZIP. Catalog được khôi phục,
-        vectors được cache vào ổ local khi cần. Không crawl/chunk/encode lại corpus
+        Baseline chỉ encode 1.200 query. Cached strong thêm query variants và
+        document representations nếu bật; cả hai khôi phục catalog và cache
+        vectors vào ổ local khi cần. Không crawl/chunk/encode lại child corpus
         hoặc ghi thêm vào Drive đang đầy. Thiếu catalog/BGE phù hợp thì dừng.
         Checkpoint và ZIP ở `/content/vmb_results`, dùng lại khi chạy lại trong
         cùng runtime. Runtime bị thu hồi sẽ mất checkpoint local; corpus vẫn ở
-        Drive. Tải ZIP và bản checkpoint nhỏ ở cuối notebook trước khi ngắt phiên.
+        Drive. Tải ZIP và bản checkpoint ở cuối notebook trước khi ngắt phiên.
+        Backup cached strong có thêm document vectors mới nên có thể vài GB.
 
         **Quy trình full bên dưới:** đặt `RUN_CACHED_BASELINE_FROM_DRIVE=False`.
         Lần đầu hoặc khi ghép data mới: chọn **CPU**, giữ `PREPARE_ONLY=True`, Run all.
@@ -209,7 +224,8 @@ def main():
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
 
         **Nộp baseline ngay sau khi nhập BGE từ Kaggle:** chọn GPU, đặt
-        `PREPARE_ONLY=False`, `INFERENCE_MODE="bge_bm25_cached"`, `TEAM_SIZE=1`,
+        Trong chế độ Drive cached chỉ đổi `CACHED_INFERENCE_MODE="bge_bm25_cached"`.
+        Với bootstrap full cũ, đặt `PREPARE_ONLY=False`, `INFERENCE_MODE="bge_bm25_cached"`, `TEAM_SIZE=1`,
         `TEAM_WORKER_ID=None`. Dùng toàn bộ BGE của active candidate và catalog
         BM25 đã chuẩn bị; chỉ encode queries, tìm kiếm, chọn source chunks và
         xuất ZIP 1.200 query. Thiếu BGE thì dừng WAITING, không encode lại corpus.
@@ -221,9 +237,9 @@ def main():
         cell 1 notebook này đặt `RUN_CACHED_BASELINE_FROM_DRIVE=False`,
         `USE_HF_STORAGE=True`, giữ repo đã chuyển,
         `HF_STORAGE_PROFILE="bge_submit"`; chọn Colab GPU và Run all.
-        Tự tải metadata/catalog/BGE về /content/vmb_data và chọn baseline ở
-        cell 2. Không mount hoặc ghi Drive; Qwen và source shards không cần tải
-        cho lượt baseline. Checkpoint inference nằm ổ tạm; giữ runtime đến lúc
+        Tự tải metadata/catalog/BGE về /content/vmb_data rồi dùng
+        `CACHED_INFERENCE_MODE` như trên. Không mount hoặc ghi Drive; Qwen và source
+        shards không cần tải cho lượt cached. Checkpoint inference nằm ổ tạm; giữ runtime đến lúc
         tải ZIP. Profile "all" tải toàn snapshot để chạy các bước khác khi đủ disk.
 
         Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
@@ -281,8 +297,9 @@ def main():
 
         Với corpus nhỏ: chạy full inference và xuất submission như trước.
         Có code train/dev mining, QLoRA, checkpoint selection, dev F2 cutoff và
-        ablation trong module/05. **Hiện chưa có train/dev labels** nên 04 dùng
-        pretrained models và cutoff chưa tune; không giả lập fine-tune hoặc điểm.
+        ablation trong module/05. Bộ nhãn pilot 32/8/8 là AI-assisted, chưa được
+        người kiểm định; mining đang thiếu hard negatives đã review nên chưa fine-tune.
+        04 dùng pretrained models và cutoff chưa tune; không giả lập fine-tune hoặc điểm.
         Nếu đã chạy 05 với nhãn độc lập hợp lệ, 04 tự đọc adapter/dev policy đã chọn,
         tạo namespace -ft- mới. Nguồn/candidate cũ và các kết quả baseline được giữ.
 
@@ -336,6 +353,7 @@ def main():
         from vietmedbridge.scale_baseline import run_large_baseline
         from vietmedbridge.artifacts import read_json, digest_json
         from vietmedbridge.index_inputs import read_candidate_lineage
+        RESULTS_ROOT = globals().get("RESULTS_ROOT", WORK_DIR.parent / "vmb_results")
 
         BUILD_RUN = "stage-a-data-v3-laodong"
         CANDIDATE_NAME = "candidate-1cd220a4be956d5a.json"
@@ -350,19 +368,22 @@ def main():
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
 
         DRIVE_CACHED_MODE = globals().get("RUN_CACHED_BASELINE_FROM_DRIVE",False)
-        if DRIVE_CACHED_MODE or (globals().get("USE_HF_STORAGE") and HF_STORAGE_PROFILE == "bge_submit"):
+        CACHED_STORAGE_MODE = DRIVE_CACHED_MODE or (globals().get("USE_HF_STORAGE") and HF_STORAGE_PROFILE == "bge_submit")
+        if CACHED_STORAGE_MODE:
             PREPARE_ONLY = False
-            INFERENCE_MODE = "bge_bm25_cached"
+            INFERENCE_MODE = globals().get("CACHED_INFERENCE_MODE","cached_strong")
             TEAM_SIZE, TEAM_WORKER_ID = 1, None
 
-        if INFERENCE_MODE not in ("full", "bge_bm25_cached"):
-            raise ValueError("INFERENCE_MODE phải là full hoặc bge_bm25_cached.")
-        if INFERENCE_MODE == "bge_bm25_cached" and (TEAM_SIZE != 1 or TEAM_WORKER_ID is not None):
-            raise ValueError("Baseline dùng một coordinator: TEAM_SIZE=1, TEAM_WORKER_ID=None.")
+        if INFERENCE_MODE not in ("full", "bge_bm25_cached", "cached_strong"):
+            raise ValueError("INFERENCE_MODE phải là full, cached_strong hoặc bge_bm25_cached.")
+        if INFERENCE_MODE != "full" and (TEAM_SIZE != 1 or TEAM_WORKER_ID is not None):
+            raise ValueError("Cached inference dùng một coordinator: TEAM_SIZE=1, TEAM_WORKER_ID=None.")
+        print("Inference mode:",INFERENCE_MODE,"| document dense:",globals().get("DOCUMENT_DENSE_ENABLED",True),
+            "| Qwen dense:",globals().get("QWEN_DENSE_MODE","if_complete"))
 
         # Notebook 03 appends each newly frozen candidate to this Drive manifest.
         # The coordinator composes the old corpus plus new batch automatically.
-        LINEAGE_SOURCES = [] if INFERENCE_MODE == "bge_bm25_cached" else read_candidate_lineage(DATA_ROOT)
+        LINEAGE_SOURCES = [] if INFERENCE_MODE != "full" else read_candidate_lineage(DATA_ROOT)
         if PREPARE_ONLY and TEAM_WORKER_ID is not None:
             raise ValueError("Chuẩn bị CPU dùng TEAM_WORKER_ID=None; GPU workers đặt PREPARE_ONLY=False.")
         if len(LINEAGE_SOURCES) > 1:
@@ -407,6 +428,14 @@ def main():
             storage_options = {"output_root":RESULTS_ROOT,"read_only_source":True} if DRIVE_CACHED_MODE else {}
             RESULT = run_large_baseline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
                 work_dir=WORK_DIR, reuse_content_only=True, max_new_queries=MAX_NEW_QUERIES,**storage_options)
+            READY = RESULT["ready"]
+        elif INFERENCE_MODE == "cached_strong":
+            RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
+                work_dir=WORK_DIR, execution_mode="cached_strong", output_root=RESULTS_ROOT,
+                second_dense_mode=globals().get("QWEN_DENSE_MODE","if_complete"),
+                document_dense_enabled=globals().get("DOCUMENT_DENSE_ENABLED",True),
+                max_new_embedding_parts=MAX_NEW_EMBEDDING_PARTS,
+                max_new_translations=MAX_NEW_TRANSLATIONS, max_new_queries=MAX_NEW_QUERIES)
             READY = RESULT["ready"]
         elif LARGE_CANDIDATE:
             RESULT = run_scale_full_pipeline(DATA_ROOT, CHECKOUT, code_commit=CODE_COMMIT,
@@ -468,15 +497,16 @@ def main():
         md('''
         ## 5. Lưu checkpoint inference về máy — tùy chọn
 
-        Với chế độ Drive đọc nguồn, cell này chỉ gom checkpoint query embeddings,
-        dense search, query predictions và submission vào ZIP nhỏ; không gom
-        corpus vectors, catalog hoặc model weights. Chạy sau khi đã dừng cell 2.
+        Với chế độ cached, cell này gom query embeddings, dense search, scored
+        stages, predictions, submission và document vectors mới (nếu có).
+        Không gom child corpus vectors trên Drive, catalog hoặc model weights.
+        Backup cached strong có thể vài GB. Chạy sau khi đã dừng cell 2.
         Muốn resume ở runtime mới: upload ZIP vào `/content`, giải nén vào
         `/content/vmb_results`, giữ nguyên code/model/candidate/policy.
         Không tự đồng bộ lên Drive hoặc HF đang đầy/bị giới hạn.
         '''),
         code('''
-        if globals().get("RUN_CACHED_BASELINE_FROM_DRIVE",False):
+        if globals().get("CACHED_STORAGE_MODE",False):
             import shutil
             from google.colab import files
             checkpoint_zip = shutil.make_archive("/content/vmb-inference-checkpoints","zip",RESULTS_ROOT)

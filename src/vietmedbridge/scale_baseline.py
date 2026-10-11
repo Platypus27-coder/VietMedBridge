@@ -27,6 +27,10 @@ from .scale_vectors import VectorParts, search_parts, stream_embeddings
 
 
 def imported_bge_manifest(data_root, candidate, inputs, full_config):
+    return imported_content_manifest(data_root, candidate, inputs, full_config, family="bge")
+
+
+def imported_content_manifest(data_root, candidate, inputs, full_config, *, family):
     """Read native Kaggle/Colab maps without creating blocks or encoding texts.
 
     Vector checksums/shapes are verified lazily by ContentVectorParts during the
@@ -34,7 +38,10 @@ def imported_bge_manifest(data_root, candidate, inputs, full_config):
     """
     from .portable_embeddings import resources_relative
 
-    view = Path(data_root) / resources_relative(candidate, full_config) / "bge"
+    if family not in ("bge", "qwen"):
+        raise ValueError("Unknown cached embedding family.")
+    spec = full_config["dense" if family == "bge" else "second_dense"]
+    view = Path(data_root) / resources_relative(candidate, full_config) / family
     path = view / "config.json"
     if not path.is_file():
         return view, None
@@ -42,9 +49,10 @@ def imported_bge_manifest(data_root, candidate, inputs, full_config):
     if (identity.get("input_manifest_sha256") != inputs["manifest_sha256"]
         or identity.get("input_count") != inputs["input_count"]
         or identity.get("format") != "content-reference-v1"
-        or identity.get("dimension") != 1024
-        or any(identity.get("encoder", {}).get(k) != v for k, v in full_config["dense"].items())):
-        raise ValueError("Imported BGE view differs from the active frozen corpus/model.")
+        or identity.get("dimension") != (1024 if family == "bge" else 4096)
+        or any(identity.get("encoder", {}).get(k) != v for k, v in spec.items())
+        or (family == "qwen" and identity.get("encoder", {}).get("input_role") != "corpus")):
+        raise ValueError(f"Imported {family.upper()} view differs from the active frozen corpus/model.")
     signature = digest_json(identity)
     parts = []
     for source in inputs["parts"]:
@@ -55,7 +63,7 @@ def imported_bge_manifest(data_root, candidate, inputs, full_config):
         expected = {"signature":signature, "start":source["start"], "rows":source["rows"],
             "input_sha256":source["sha256"], "path":f"map-{source['start']:012d}.parquet"}
         if any(saved.get(k) != v for k, v in expected.items()):
-            raise ValueError("Imported BGE mapping differs from the frozen input order.")
+            raise ValueError(f"Imported {family.upper()} mapping differs from the frozen input order.")
         verify_file(view / saved["path"], saved["sha256"])
         parts.append(saved)
     return view, seal(identity | {"signature":signature, "parts":parts,

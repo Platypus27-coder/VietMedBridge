@@ -33,6 +33,12 @@ cho corpus pilot. Không chạy các notebook
    freeze rồi chia input embedding đã dedup trên disk. Chưa encode vector hoặc
    hoàn tất retrieval index; candidate chỉ được promote sau các gate review.
 5. **04 — Full retrieval và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
+   Candidate 700k có BGE đầy đủ: mặc định `CACHED_INFERENCE_MODE="cached_strong"`,
+   dùng BGE cache + dịch EN/ZH/expansion + document dense + Qwen rerank hai tầng
+   + source parents 512/640. Qwen dense chỉ dùng khi cache đủ, không chặn các
+   nhánh còn lại và không encode lại child corpus. Drive đọc nguồn; outputs mới
+   ở ổ tạm Colab, cần tải backup trước khi runtime bị thu hồi. Muốn nộp baseline
+   trước: `CACHED_INFERENCE_MODE="bge_bm25_cached"`.
    Đọc candidate active từ 03. Corpus lớn chạy BGE child/document dense +
    Qwen3-Embedding-8B + BM25 VI/EN/ZH → weighted RRF → Qwen3-Reranker-8B
    document/child MaxP → source parent 512/640 và LCS dedup. Qwen3-4B dịch,

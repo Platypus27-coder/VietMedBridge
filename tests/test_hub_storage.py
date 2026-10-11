@@ -252,7 +252,8 @@ def test_drive_notebook_routes_to_read_only_cached_inference(tmp_path,prepared,m
     monkeypatch.setattr(scale_baseline,"run_large_baseline",lambda *a,**kw:
         (calls.append(kw) or {"ready":{"state":"READY_FOR_MANUAL_UPLOAD","query_count":1200},"status":{},"samples":[]}))
     context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path.parent / "work",
-        "RESULTS_ROOT":tmp_path.parent / "results","CODE_COMMIT":"CPU-test","RUN_CACHED_BASELINE_FROM_DRIVE":True}
+        "RESULTS_ROOT":tmp_path.parent / "results","CODE_COMMIT":"CPU-test","RUN_CACHED_BASELINE_FROM_DRIVE":True,
+        "CACHED_INFERENCE_MODE":"bge_bm25_cached"}
     exec(compile(cell,"04-drive-routing","exec"),context)
     assert calls == [{"code_commit":"CPU-test","work_dir":context["WORK_DIR"],
         "reuse_content_only":True,"max_new_queries":None,"output_root":context["RESULTS_ROOT"],"read_only_source":True}]
@@ -357,7 +358,8 @@ def test_notebooks_are_valid_and_hf_profile_selects_cached_coordinator(tmp_path,
         return {"ready":{"state":"READY_FOR_MANUAL_UPLOAD","query_count":1200},"status":{},"samples":[]}
     monkeypatch.setattr(scale_baseline,"run_large_baseline",cached)
     context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path.parent / "work",
-        "CODE_COMMIT":"CPU-test","USE_HF_STORAGE":True,"HF_STORAGE_PROFILE":"bge_submit"}
+        "CODE_COMMIT":"CPU-test","USE_HF_STORAGE":True,"HF_STORAGE_PROFILE":"bge_submit",
+        "CACHED_INFERENCE_MODE":"bge_bm25_cached"}
     exec(compile(cell,"04-hf-routing","exec"),context)
     assert calls[0]["reuse_content_only"] is True
     assert context["TEAM_SIZE"] == 1 and context["TEAM_WORKER_ID"] is None and context["PREPARE_ONLY"] is False

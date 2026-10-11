@@ -1,5 +1,28 @@
 # Kiểm chứng data pipeline v2
 
+## Cached strong inference — 11/10/2026
+
+Regression liên quan disk full runtime, cached baseline, catalog và storage:
+**50 passed** trên CPU. Luồng mới dùng catalog/Parquet/checksums/source export
+thật, các neural models là doubles; chưa đo throughput hoặc relevance GPU 700k.
+Sau khi dùng chung local BGE cache với baseline, hai kiểm tra reuse/export
+tiếp tục pass; không phải tải lại child blocks/maps đã có trong cùng runtime.
+
+- Cache BGE đầy đủ được yêu cầu trước khi nạp model/catalog. Qwen vắng hoặc
+  chưa đủ không được search như corpus nhỏ và không kích hoạt encode lại corpus.
+- Dịch/expansion, BGE document dense, document/child rerank và parents 512/640
+  đi đến ZIP đủ 1.200 IDs. Kiểm source slices/official aliases/schema vẫn áp dụng.
+- Resume giữ query/scored-stage checkpoints, không encode lại phần hoàn tất;
+  document inputs chạy dở không token hóa lại documents đã lưu.
+- Chế độ đọc nguồn giữ nguyên hashes tất cả file source qua lượt đầu và resume;
+  outputs/caches mới nằm ngoài DATA_ROOT. Kiểm cả routing Drive và HF.
+- Có đường Qwen cache đầy đủ, đường defer Qwen và cờ tắt document dense;
+  manifest/status không ghi các nhánh bị tắt là đã thực thi.
+
+`complete_master_plan=false`: còn thiếu thực nghiệm GPU/current-corpus,
+supervised training/calibration và relevance evaluation thực tế. Các lần
+kiểm chứng lịch sử phía dưới không chứng minh đã chạy các bước đó trên 700k.
+
 ## Per-model rule và hoàn thiện luồng pilot — 06/10/2026
 
 Sếp xác nhận với BTC giới hạn ≤15B là **từng model**, thay yêu cầu tổng trước đó.

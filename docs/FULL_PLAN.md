@@ -9,7 +9,10 @@ search. Không cần chạy lại 02–03 cho candidate 100k đã freeze.
 
 Hướng dẫn hiện hành: [FULL_SYSTEM_RUNBOOK.md](FULL_SYSTEM_RUNBOOK.md).
 Baseline BGE + BM25 100k trước đây đã được Sếp submit đạt **0.0081**. Các artifacts
-baseline được giữ để đối chiếu và dùng lại vectors; 04 hiện chạy full architecture.
+baseline được giữ để đối chiếu và dùng lại vectors. 04 có hai lựa chọn cached:
+BGE/BM25 baseline và `cached_strong` nối dịch/expansion, document dense, rerank
+hai tầng, source parents 512/640. Nhánh Qwen dense được dùng khi cache đầy đủ;
+chưa đủ thì có thể defer để chạy các nhánh còn lại trên toàn bộ BGE.
 05 dùng candidate lớn đang active cho source review, mining và training. Nhãn đã
 review vẫn là đầu vào bắt buộc cho huấn luyện/dev/held-out.
 
@@ -102,8 +105,11 @@ coverage. Source/schema pass chưa chứng minh relevance.
 
 ## Tạo draft, duyệt nhãn và supervised workflow
 
-Sếp xác nhận hiện **chưa có reviewed train/dev labels**. 04 chạy pretrained và
-cutoffs chưa tune. [Notebook 05](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb)
+Kiểm tra Drive ngày 11/10/2026: có 32 train/8 dev/8 held-out pilot AI-assisted,
+`human_validated=false`, gắn với corpus pilot cũ. Mining đang dừng ở
+`MINING_REQUIRES_MORE_GOLD_COVERAGE_OR_REVIEWED_NEGATIVES`; chưa fine-tune,
+chưa có cutoff/dev/held-out chứng nhận cho 700k. 04 chạy pretrained và cutoffs
+chưa tune. [Notebook 05](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb)
 đã có luồng tạo draft và review theo master §38 trong cùng notebook, không thêm
 notebook/ACTION:
 

@@ -4,6 +4,48 @@ Nguồn quyết định: [R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2
 Notebook chính giữ nguyên 00–05. 04 và 05 dùng code lock retrieval/training riêng;
 không nâng code lock xử lý dữ liệu 02–03 đang chạy dở.
 
+## Candidate 700k đã có BGE: chạy các nhánh downstream trong 04
+
+Chọn Colab GPU, mở lại notebook 04 từ GitHub để nhận phần cấu hình hiện hành.
+Cell 1 giữ `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `USE_HF_STORAGE=False`,
+`CACHED_INFERENCE_MODE="cached_strong"`, `DOCUMENT_DENSE_ENABLED=True`,
+`QWEN_DENSE_MODE="if_complete"`. Chỉ một coordinator chạy luồng này.
+
+Luồng này đọc active candidate, catalog đã hoàn thành và BGE cache đầy đủ,
+không gọi union/import/chunk hoặc encode lại child corpus. Qwen dense chưa đủ
+thì ghi DEFERRED và vẫn tìm trên toàn bộ BGE; tuyệt đối không coi các phần Qwen
+đã có là một corpus đầy đủ. Khi Qwen đủ, query encoder được kiểm cùng producer
+và nhánh đó tự tham gia. `QWEN_DENSE_MODE="require"` dừng chờ khi chưa đủ;
+`"off"` tắt nhánh này có chủ đích.
+
+Các bước chạy: khôi phục catalog vào ổ local → dịch EN/ZH và expansion có
+guards → BGE query embeddings → **BGE document title/opening embeddings mới**
+→ global dense + multilingual BM25/RRF → Qwen document rerank → local child
+retrieval và MaxP rerank → exact-source parents 512/640 và LCS dedup → ZIP.
+Khi Qwen dense chưa đủ, accepted subqueries/HyDE được encode bằng BGE và tìm
+trên cùng toàn bộ BGE child corpus. Mỗi nhánh giữ original query.
+
+Đây có thêm chi phí GPU cho document embeddings, query LLM và reranker; chưa
+benchmark thời gian/chất lượng trên 700k. Nếu cần lấy score BGE/BM25 trước, chỉ
+đổi `CACHED_INFERENCE_MODE="bge_bm25_cached"`. Nếu muốn dịch/rerank nhưng bỏ
+document embeddings, đặt `DOCUMENT_DENSE_ENABLED=False`; báo cáo ghi DISABLED.
+Hai lựa chọn này không được báo là đã chạy đầy đủ mọi nhánh.
+
+Drive được mount read-only; outputs mới ở `/content/vmb_results`, spill/catalog
+và cache đọc ở `/content/vmb_work`. Query translation/expansion, document input
+parts, document vectors, dense-search progress, scored stages và query cuối có
+checkpoint. Chạy lại cùng code/model/candidate/policy trong runtime dùng lại
+checkpoint; input document đã hoàn thành không bị token hóa lại khi resume.
+Runtime bị thu hồi **mất outputs local** nếu chưa tải backup cuối notebook.
+Backup gồm document vectors mới nên có thể vài GB; không gồm BGE child corpus,
+catalog hoặc weights. Giải nén backup về đúng `/content/vmb_results` để resume
+ở runtime mới. Chưa tự đồng bộ outputs mới lên HF đang bị rate limit.
+
+`cache_coverage.json` ghi số input IDs, documents, toàn bộ input parts và phần
+Qwen hiện có. `full_plan_status.json` ghi riêng trạng thái nhánh, fine-tune,
+calibration, source validation và official score. Có code không có nghĩa đã
+chạy xong, và source/schema pass chưa chứng minh relevance.
+
 ## Chạy ngay với candidate 100k hiện có
 
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
