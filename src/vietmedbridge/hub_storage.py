@@ -32,12 +32,15 @@ def validate_plan(plan):
         or not re.fullmatch(r"[0-9a-f]{64}",plan.get("candidate",""))
         or not re.fullmatch(r"[0-9a-f]{64}",plan.get("inputs",""))):
         raise ValueError("Invalid pipeline storage snapshot.")
+    profile = plan.get("snapshot_profile","all")
+    if profile not in PROFILES:
+        raise ValueError("Invalid snapshot storage profile.")
     seen, sizes = set(), {}
     for item in plan["files"]:
         relative_path(item["path"])
         if (item["path"] in seen or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
             or type(item["bytes"]) is not int or item["bytes"] < 0
-            or not item["roles"] or not set(item["roles"]) <= PROFILES["all"]):
+            or not item["roles"] or not set(item["roles"]) <= PROFILES[profile]):
             raise ValueError("Invalid or duplicate snapshot file.")
         seen.add(item["path"])
         if item["sha256"] in sizes and sizes[item["sha256"]] != item["bytes"]:
@@ -46,13 +49,16 @@ def validate_plan(plan):
     return plan
 
 
-def plan_active_storage(data_root, checkout, *, include_sources=True):
+def plan_active_storage(data_root, checkout, *, include_sources=True, profile="all"):
     """Inventory only the active corpus, its catalog and referenced vector blocks.
 
     Known checksums come from sealed pipeline manifests, avoiding a preliminary
     rehash of all vectors on Drive. Upload verifies each new payload before commit.
     Incoming TARs, old builds, model weights and live temporary files are excluded.
     """
+    if profile not in PROFILES:
+        raise ValueError("Storage profile must be bge_submit or all.")
+    roles = PROFILES[profile]
     root = Path(data_root)
     build,candidate,inputs = load_handoff(root)
     full = read_json(Path(checkout) / "configs/retrieval_full.json")
@@ -80,14 +86,18 @@ def plan_active_storage(data_root, checkout, *, include_sources=True):
             add(path,"metadata")
     for entry in read_json(root / "raw/snapshot.json")["files"].values():
         add(entry["path"],"metadata",entry["sha256"])
-    for part in inputs["parts"]:
-        add(f"processed/{build.name}/index_inputs/{part['path']}","inputs",part["sha256"])
-    if include_sources:
+    if "inputs" in roles:
+        for part in inputs["parts"]:
+            add(f"processed/{build.name}/index_inputs/{part['path']}","inputs",part["sha256"])
+    if include_sources and "sources" in roles:
         for part in candidate["parts"]:
             for entry in part["files"].values():
                 add(f"processed/{build.name}/{entry['path']}","sources",entry["sha256"])
     coverage = {}
     for family,spec_name in (("bge","dense"),("qwen","second_dense")):
+        if family not in roles:
+            coverage[family] = {"included":False}
+            continue
         view = root / resources_relative(candidate,full) / family
         refs, complete = {},0
         if (view / "config.json").is_file():
@@ -137,7 +147,7 @@ def plan_active_storage(data_root, checkout, *, include_sources=True):
                 found.add(block["path"])
             if found != set(refs):
                 raise ValueError("A referenced vector block has no producer receipt.")
-        coverage[family] = {"completed_parts":complete,"total_parts":len(inputs["parts"]),
+        coverage[family] = {"included":True,"completed_parts":complete,"total_parts":len(inputs["parts"]),
                             "complete":complete == len(inputs["parts"])}
     catalogs, uncompressed = 0,0
     for marker in sorted((root / "retrieval/catalogs").glob("*/catalog.json")):
@@ -154,10 +164,13 @@ def plan_active_storage(data_root, checkout, *, include_sources=True):
         size = saved["storage"]["bytes"] if "storage" in saved else (marker.parent / saved["path"]).stat().st_size
         uncompressed = max(uncompressed,size)
         catalogs += 1
+    if profile == "bge_submit" and (not coverage["bge"]["complete"] or not catalogs):
+        raise ValueError("BGE submission snapshot requires complete BGE maps and a completed CPU catalog; no upload started.")
     return seal({"schema":SCHEMA,"candidate":candidate["candidate_manifest_sha256"],
         "inputs":inputs["manifest_sha256"],"counts":candidate["counts"],"coverage":coverage,
         "catalogs":catalogs,"catalog_uncompressed_bytes":uncompressed,
-        "includes_source_shards":include_sources,"retrieval_config_sha256":digest_json(full),
+        "snapshot_profile":profile,"includes_source_shards":include_sources and "sources" in roles,
+        "retrieval_config_sha256":digest_json(full),
         "files":sorted(files.values(),key=lambda item:item["path"])})
 
 
@@ -168,6 +181,7 @@ def storage_summary(plan):
         "files":len(plan["files"]),"unique_objects":len(objects),"bytes":sum(objects.values()),
         "decimal_GB":round(sum(objects.values()) / 1e9,3),"counts":plan["counts"],
         "coverage":plan["coverage"],"catalogs":plan["catalogs"],
+        "snapshot_profile":plan.get("snapshot_profile","all"),
         "scope":"Active candidate only; incoming archives and old builds remain at their source."}
 
 
@@ -282,6 +296,8 @@ def restore_storage(repo_id=DEFAULT_REPO,*,data_root,work_dir,profile="bge_submi
     plan = validate_plan(read_json(_download(repo_id,pointer["manifest"],revision,cache,api)))
     if plan["manifest_sha256"] != pointer["snapshot_sha256"]:
         raise ValueError("Hub storage locator/manifest differ.")
+    if profile == "all" and plan.get("snapshot_profile","all") != "all":
+        raise ValueError("This is a BGE submission snapshot. Upload profile=all separately before restoring the full pipeline.")
     if profile == "bge_submit" and (not plan["coverage"]["bge"]["complete"] or not plan["catalogs"]):
         raise ValueError("BGE submit requires complete BGE and a completed CPU catalog in this snapshot.")
     if checkout is not None and digest_json(read_json(Path(checkout) / "configs/retrieval_full.json")) != plan["retrieval_config_sha256"]:

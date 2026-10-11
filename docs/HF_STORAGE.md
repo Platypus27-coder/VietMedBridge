@@ -16,7 +16,9 @@ Mở [`tools/drive_hf_storage.ipynb`](../notebooks/tools/drive_hf_storage.ipynb)
    bật **Notebook access**. Token không được lưu trong notebook, plan hay locator.
 3. Cell 1: giữ đúng `DATA_ROOT` của thư mục data hiện tại. Repo đích đã điền sẵn.
    `MAX_SNAPSHOT_GB=90` là ngân sách của lượt chuyển, không phải quota đã đo.
-4. Run all trên **CPU**. Xem thống kê số file, GB, documents và BGE/Qwen coverage.
+4. Giữ `UPLOAD_PROFILE="bge_submit"` để lấy submission trước: chỉ chuyển metadata,
+   catalog BM25 và BGE. Qwen, source shards và input text Parquets giữ ở Drive.
+   Run all trên **CPU**. Xem thống kê số file, GB, documents và coverage đã chọn.
    Vượt ngân sách thì dừng trước upload; kiểm tra tài khoản HF trước khi đổi số.
 5. Chờ `HF_STORAGE_VERIFIED`, tải `hf-storage-locator.json` nhỏ về máy.
 
@@ -25,7 +27,8 @@ tài khoản Free có 100 GB private, PRO có 1 TB private đi kèm. Quota tính
 repo/snapshot đã lưu; mức 90 GB trong notebook không xác nhận tài khoản còn đủ
 dung lượng. Dữ liệu vài triệu URL có thể vượt mức này; cần kiểm kê thực tế.
 
-Snapshot mặc định gồm **active candidate**: metadata chính thức, source shards
+Sau khi có submission, đặt `UPLOAD_PROFILE="all"` để backup phần còn lại. HF dùng
+lại các objects BGE/catalog cùng checksum. Snapshot `all` gồm **active candidate**: metadata chính thức, source shards
 đã xử lý, index inputs, catalog BM25 đã hoàn tất và các vector BGE/Qwen được
 mapping của candidate đó tham chiếu. Không copy cả thư mục data một cách mù:
 incoming TAR, các build cũ, cache model weights, file tạm và run lỗi không nằm
@@ -76,7 +79,7 @@ HF_STORAGE_VERIFIED là đã hoàn tất retrieval hay đã có điểm BTC.
 
 ## 3. Các bước sau
 
-Profile `all` khôi phục toàn bộ snapshot khi đủ ổ local để dùng source shards,
+Sau khi đã upload snapshot `all`, profile `all` khôi phục toàn bộ snapshot khi đủ ổ local để dùng source shards,
 index inputs và Qwen checkpoints. Phần Qwen còn thiếu vẫn còn thiếu; snapshot
 không nâng coverage hoặc giả đã chạy full plan. Bản `bge_submit` chỉ xuất
 baseline trên candidate hiện tại. Fine-tune, reranker và full query understanding

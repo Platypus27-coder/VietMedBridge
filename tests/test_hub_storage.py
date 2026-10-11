@@ -158,6 +158,10 @@ def test_changed_payload_never_publishes_complete_pointer(tmp_path,prepared,hub)
 def test_snapshot_restore_and_full_1200_query_zip_without_drive_writes_or_corpus_encoding(tmp_path,prepared,hub,monkeypatch):
     from vietmedbridge import scale_baseline as runtime
     checkout,plan,encoder,queries = prepared
+    plan = storage.plan_active_storage(tmp_path,checkout,profile="bge_submit")
+    assert plan["snapshot_profile"] == "bge_submit" and not plan["includes_source_shards"]
+    assert plan["coverage"]["qwen"] == {"included":False}
+    assert all(set(i["roles"]) <= {"metadata","catalog","bge"} for i in plan["files"])
     result = storage.upload_storage(tmp_path,plan,work_dir=tmp_path.parent / "upload",api=hub)
     destination = tmp_path.parent / (tmp_path.name+"-runtime-data")
     local_work = tmp_path.parent / (tmp_path.name+"-gpu-work")
@@ -211,6 +215,25 @@ def test_full_profile_restores_every_planned_file(tmp_path,prepared,hub):
     assert restored["state"] == "HF_DATA_READY_LOCAL"
     assert restored["restored_files"] == len(plan["files"])
     assert all(sha256_file(destination / item["path"]) == item["sha256"] for item in plan["files"])
+
+
+def test_submission_snapshot_ignores_qwen_and_does_not_claim_full_pipeline(tmp_path,prepared,hub):
+    checkout,plan,_,_ = prepared
+    _,candidate,_ = storage.load_handoff(tmp_path)
+    full = read_json(checkout / "configs/retrieval_full.json")
+    qwen = tmp_path / resources_relative(candidate,full) / "qwen/config.json"
+    qwen.write_text("corrupted unrelated Qwen checkpoint",encoding="utf-8")
+    fast = storage.plan_active_storage(tmp_path,checkout,profile="bge_submit")
+    assert len(fast["files"]) < len(plan["files"])
+    result = storage.upload_storage(tmp_path,fast,work_dir=tmp_path.parent / "upload",api=hub)
+    with pytest.raises(ValueError,match="BGE submission snapshot"):
+        storage.restore_storage(data_root=tmp_path.parent / (tmp_path.name+"-full-data"),
+            work_dir=tmp_path.parent / "work",profile="all",revision=result["revision"],api=hub)
+    bge_marker = tmp_path / next(i["path"] for i in fast["files"]
+        if "bge" in i["roles"] and Path(i["path"]).name.startswith("map-") and i["path"].endswith(".done.json"))
+    bge_marker.unlink()
+    with pytest.raises(ValueError,match="requires complete BGE"):
+        storage.plan_active_storage(tmp_path,checkout,profile="bge_submit")
 
 
 def test_catalog_mismatch_stops_before_downloading_vectors(tmp_path,prepared,hub,monkeypatch):

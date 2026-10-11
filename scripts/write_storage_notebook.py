@@ -13,8 +13,13 @@ def main():
         đúng dataset repo. Không dán token vào code/chat. Chỉ một người chuyển
         dữ liệu và công bố snapshot ở một thời điểm; dừng writer đang sửa candidate.
 
-        Run all: thống kê active candidate, source shards, inputs, CPU catalog và
-        BGE/Qwen blocks được tham chiếu → upload theo batch → xác minh → công bố
+        Mặc định UPLOAD_PROFILE="bge_submit": chỉ chuyển metadata, catalog BM25
+        và BGE đã hoàn tất để xuất submission trước. Qwen, source shards và input
+        text Parquets giữ ở Drive, không bị xóa. Không chờ backup toàn bộ dữ liệu.
+        Sau khi có ZIP, chọn UPLOAD_PROFILE="all" để sao lưu phần còn lại;
+        objects BGE/catalog đã có trên HF được dùng lại.
+
+        Run all: thống kê bộ đã chọn → upload theo batch → xác minh → công bố
         HF_STORAGE_VERIFIED. Mặc định ngân sách snapshot 90 GB, không phải xác nhận
         quota còn trống của tài khoản; kiểm tra Storage của HF trước khi chạy.
         Upload ngắt: Run all lại; objects đã commit được kiểm và bỏ qua, kể cả
@@ -29,8 +34,9 @@ def main():
 
         DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")
         HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
+        UPLOAD_PROFILE = "bge_submit"  # ưu tiên ra ZIP; sau đó "all" để backup các phần khác
         MAX_SNAPSHOT_GB = 90  # ngân sách do team chọn; kiểm quota HF thực tế
-        INCLUDE_SOURCE_SHARDS = True  # giữ cả dữ liệu đã xử lý để dùng các bước sau
+        INCLUDE_SOURCE_SHARDS = True  # chỉ áp dụng khi UPLOAD_PROFILE="all"
         WORK_DIR = Path("/content/vmb_storage")
         CHECKOUT = Path("/content/VietMedBridge")
         REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
@@ -75,7 +81,8 @@ def main():
         from vietmedbridge.hub_storage import plan_active_storage, storage_summary, upload_storage
         from vietmedbridge.artifacts import atomic_json
 
-        PLAN = plan_active_storage(DATA_ROOT,CHECKOUT,include_sources=INCLUDE_SOURCE_SHARDS)
+        PLAN = plan_active_storage(DATA_ROOT,CHECKOUT,include_sources=INCLUDE_SOURCE_SHARDS,
+            profile=UPLOAD_PROFILE)
         atomic_json(WORK_DIR / "storage_plan.json",PLAN)
         print(json.dumps(storage_summary(PLAN),ensure_ascii=False,indent=2))
         STORAGE = upload_storage(DATA_ROOT,PLAN,HF_STORAGE_REPO,work_dir=WORK_DIR,
