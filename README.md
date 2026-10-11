@@ -2,7 +2,7 @@
 
 Chuẩn bị dữ liệu cho truy hồi y sinh đa ngôn ngữ ViBioMIR. Phần tính toán và thu
 thập dữ liệu chạy trên Google Colab; snapshot, checkpoint và Parquet đầu ra lưu
-trong Google Drive.
+trong Google Drive hoặc snapshot Hugging Face Private.
 
 ## Quy trình Colab đã chốt
 
@@ -49,6 +49,11 @@ cho corpus pilot. Không chạy các notebook
    Secrets của người chạy; checkpoint nhập về dùng trực tiếp trong 04 chính.
    Hai tài khoản cùng `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`, đặt
    `KAGGLE_ACCOUNT_ID=0/1` để chia thành bốn worker; dùng cùng một input dataset.
+   Khi Drive đầy, dùng [utility chuyển storage](notebooks/tools/drive_hf_storage.ipynb)
+   trên Colab CPU, rồi bật `USE_HF_STORAGE=True` trong 04 để chạy baseline từ
+   BGE/catalog đã lưu trên HF. Không tính lại corpus embeddings. Xem
+   [hướng dẫn Drive + Hugging Face](docs/HF_STORAGE.md), gồm phạm vi snapshot,
+   quota, resume upload và giới hạn checkpoint inference trên ổ tạm.
 6. **05 — Tạo draft từ source, duyệt nhãn và supervised training:**
    [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/05_colab_supervised_training.ipynb).
    Chọn GPU và Run all. Khi chưa có nhãn, Qwen 4B tạo draft train từ source;

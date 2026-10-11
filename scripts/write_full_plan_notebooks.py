@@ -1,4 +1,5 @@
 """Generate the full inference notebook and the supervised training notebook."""
+import textwrap
 from write_notebooks import BOOTSTRAP, code, md, save
 
 BOOT = (BOOTSTRAP
@@ -31,6 +32,80 @@ if embedding_runtime_lock.exists():
 PIPELINE_CONFIG = json.loads''')
 
 
+HF_BOOT = '''
+import importlib, json, os, subprocess, sys
+from pathlib import Path
+from google.colab import userdata
+
+if not (3,11) <= sys.version_info[:2] < (3,14):
+    raise RuntimeError("Dùng Colab Python 3.11–3.13.")
+DATA_ROOT = Path("/content/vmb_data")  # dữ liệu/outputs ở ổ local, không dùng quota Drive
+WORK_DIR = Path("/content/vmb_work")
+WORK_DIR.mkdir(parents=True,exist_ok=True)
+os.environ["HF_HOME"] = "/content/hf_cache"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+try:
+    token = userdata.get("HF_TOKEN")
+except Exception:
+    raise RuntimeError("Thêm Colab Secret HF_TOKEN có quyền đọc repo checkpoints, bật Notebook access.") from None
+if not token:
+    raise RuntimeError("HF_TOKEN đang rỗng.")
+os.environ["HF_TOKEN"] = token
+REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
+CODE_REVISION = None
+EXPECTED_PIPELINE_API = 2
+CHECKOUT = Path("/content/VietMedBridge")
+if not (CHECKOUT / ".git").exists():
+    subprocess.run(["git","clone","--no-checkout",REPO_URL,str(CHECKOUT)],check=True)
+if subprocess.check_output(["git","-C",str(CHECKOUT),"remote","get-url","origin"],text=True).strip() != REPO_URL:
+    raise ValueError("Checkout không thuộc VietMedBridge.")
+subprocess.run(["git","-C",str(CHECKOUT),"fetch","--depth","1","origin",CODE_REVISION or "main"],check=True)
+CODE_COMMIT = subprocess.check_output(["git","-C",str(CHECKOUT),"rev-parse","FETCH_HEAD"],text=True).strip()
+if "vietmedbridge" in sys.modules and globals().get("_VMB_IMPORTED_COMMIT") != CODE_COMMIT:
+    raise RuntimeError("Code đã đổi trong runtime; Restart session rồi chạy lại notebook.")
+subprocess.run(["git","-C",str(CHECKOUT),"checkout","--detach","FETCH_HEAD"],check=True)
+subprocess.run([sys.executable,"-m","pip","install","--disable-pip-version-check","-e",".[notebook,retrieval,strong]"],cwd=CHECKOUT,check=True)
+sys.path.insert(0,str(CHECKOUT / "src"))
+importlib.invalidate_caches()
+from huggingface_hub import HfApi
+from vietmedbridge import PIPELINE_API_VERSION
+from vietmedbridge.artifacts import atomic_json, runtime_versions
+from vietmedbridge.hub_storage import restore_storage
+if PIPELINE_API_VERSION != EXPECTED_PIPELINE_API:
+    raise RuntimeError("Pipeline API khác phiên bản notebook.")
+HF_STAGED = restore_storage(HF_STORAGE_REPO,data_root=DATA_ROOT,work_dir=WORK_DIR,
+    profile=HF_STORAGE_PROFILE,revision=HF_STORAGE_REVISION,api=HfApi(token=token),checkout=CHECKOUT)
+from vietmedbridge.portable_embeddings import checked, runtime_install_commands
+embedding_runtime_lock = DATA_ROOT / "retrieval_embedding_runtime_lock.json"
+if embedding_runtime_lock.exists():
+    pinned_runtime = checked(json.loads(embedding_runtime_lock.read_text()))["runtime"]
+    commands = runtime_install_commands(pinned_runtime)
+    if commands and "torch" in sys.modules:
+        raise RuntimeError("Restart session trước khi cài runtime embedding đã khóa từ Kaggle.")
+    for command in commands:
+        subprocess.run(command,check=True)
+    importlib.invalidate_caches()
+PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
+atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v13-hf-storage"})
+atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
+_VMB_IMPORTED_COMMIT = CODE_COMMIT
+print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
+print("DATA_ROOT:",DATA_ROOT,"| outputs ở ổ tạm Colab; tải ZIP trước khi kết thúc runtime.")
+print("Code commit:",CODE_COMMIT)
+'''
+
+
+def retrieval_bootstrap():
+    settings = '''USE_HF_STORAGE = False  # True sau khi notebook tools/drive_hf_storage báo HF_STORAGE_VERIFIED
+HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
+HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
+HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
+'''
+    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v13-hf-storage")
+    return settings + "\nif USE_HF_STORAGE:\n" + textwrap.indent(HF_BOOT.strip(),"    ") + "\nelse:\n" + textwrap.indent(legacy.strip(),"    ")
+
+
 def main():
     save("04_colab_retrieval_baseline.ipynb", [
         md('''
@@ -49,6 +124,15 @@ def main():
         xuất ZIP 1.200 query. Thiếu BGE thì dừng WAITING, không encode lại corpus.
         Phần Qwen đã chạy được giữ nguyên. Đây là baseline để đo điểm trước;
         `INFERENCE_MODE="full"` vẫn chạy kiến trúc đầy đủ mô tả dưới đây.
+
+        **Drive đầy, dữ liệu đã chuyển lên HF:** chạy utility
+        `tools/drive_hf_storage.ipynb` trên CPU đến HF_STORAGE_VERIFIED. Trong
+        cell 1 notebook này đặt `USE_HF_STORAGE=True`, giữ repo đã chuyển,
+        `HF_STORAGE_PROFILE="bge_submit"`; chọn Colab GPU và Run all.
+        Tự tải metadata/catalog/BGE về /content/vmb_data và chọn baseline ở
+        cell 2. Không mount hoặc ghi Drive; Qwen và source shards không cần tải
+        cho lượt baseline. Checkpoint inference nằm ổ tạm; giữ runtime đến lúc
+        tải ZIP. Profile "all" tải toàn snapshot để chạy các bước khác khi đủ disk.
 
         Nếu 03 đã publish active_data_candidate.json, tự nhận candidate đó.
         Corpus vượt giới hạn pilot (2.000 documents hoặc 50.000 children) chạy
@@ -117,7 +201,7 @@ def main():
         Model revisions của full pilot giữ nguyên.
         '''),
         md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
-        code(BOOT.replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-strong-v12-cached-baseline")),
+        code(retrieval_bootstrap()),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
@@ -172,6 +256,11 @@ def main():
         INFERENCE_MODE = "full"  # "bge_bm25_cached": submit bằng BGE đã nhập, không chờ Qwen
         TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
+
+        if globals().get("USE_HF_STORAGE") and HF_STORAGE_PROFILE == "bge_submit":
+            PREPARE_ONLY = False
+            INFERENCE_MODE = "bge_bm25_cached"
+            TEAM_SIZE, TEAM_WORKER_ID = 1, None
 
         if INFERENCE_MODE not in ("full", "bge_bm25_cached"):
             raise ValueError("INFERENCE_MODE phải là full hoặc bge_bm25_cached.")
