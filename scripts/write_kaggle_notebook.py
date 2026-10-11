@@ -28,7 +28,8 @@ def main():
            Notebook tự gán worker toàn nhóm: 0–1 và 2–3. Hai bên chạy cùng lúc.
         3. **Colab CPU:** sau khi Kaggle version hoàn tất và có Outputs, điền
            `KAGGLE_NOTEBOOK_OUTPUT="owner-a/notebook-a, owner-b/notebook-b"`, Run all. Notebook
-           kiểm checksum, model, source text và từng vector row trước khi nhập Drive.
+           kiểm trạng thái/manifest của cả hai acc trước khi tải vector, rồi kiểm
+           checksum, model, source text và từng vector row trước khi nhập Drive.
            Sau đó mới tiếp tục notebook 04 chính trên Colab GPU.
 
         Người nào cũng chạy được bằng Secret tài khoản của mình và quyền đọc Drive.
@@ -290,19 +291,12 @@ def main():
             os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"] = owner, api_key
             del credentials, api_key
             if KAGGLE_NOTEBOOK_OUTPUT:
-                handles = [h.strip() for h in KAGGLE_NOTEBOOK_OUTPUT.split(",")]
-                if len(set(handles)) != len(handles) or any(not re.fullmatch(
-                    r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+(?:/[0-9]+)?", handle) for handle in handles):
-                    raise ValueError("Điền các username/notebook-slug khác nhau, cách nhau bởi dấu phẩy; có thể thêm /version.")
-                outputs = []
-                for handle in handles:
-                    download = WORK_DIR / "outputs" / digest_json(handle)[:16]
-                    download.mkdir(parents=True, exist_ok=True)
-                    subprocess.run(["kaggle", "kernels", "output", handle, "-p", str(download), "-o"], check=True)
-                    manifests = list(download.glob("**/result-manifest.json"))
-                    if len(manifests) != 1:
-                        raise RuntimeError("Mỗi Outputs phải có đúng một result-manifest.json; kiểm tra version đã lưu thành công.")
-                    outputs.append(manifests[0].parent)
+                from kaggle.api.kaggle_api_extended import KaggleApi
+                from vietmedbridge.kaggle_outputs import download_kaggle_outputs, output_handles
+                handles = output_handles(KAGGLE_NOTEBOOK_OUTPUT)
+                api = KaggleApi()
+                api.authenticate()
+                outputs = download_kaggle_outputs(api, handles, WORK_DIR)
                 if len({read_json(path / "job.json")["manifest_sha256"] for path in outputs}) != 1:
                     raise ValueError("Hai Outputs thuộc hai input job khác nhau. Chạy cùng dataset chung.")
                 account_ids = [read_json(path / "result-manifest.json")["assignment"]["account_id"]

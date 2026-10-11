@@ -96,6 +96,44 @@ def test_roundtrip_two_gpus_then_three_colab_workers_no_reencoding(tmp_path, fro
         np.testing.assert_allclose(store.part(0), encoder.encode(source), atol=1e-6)
 
 
+def test_kaggle_transfer(tmp_path, frozen, job):
+    import re
+    from vietmedbridge.kaggle_outputs import download_kaggle_outputs
+
+    hydrate_job(tmp_path / "bundle", tmp_path / "scratch", REPO)
+    worker(tmp_path)
+    result = finalize_result(tmp_path / "output", job)
+
+    class SavedOutputApi:
+        def kernels_status(self, handle):
+            return {"status": "complete"}
+
+        def kernels_output(self, handle, path, *, file_pattern=None, force=False, quiet=True):
+            copied = []
+            for source in (tmp_path / "output").rglob("*"):
+                if not source.is_file():
+                    continue
+                relative = Path("vmb_checkpoints") / source.relative_to(tmp_path / "output")
+                if file_pattern and not re.search(file_pattern, relative.as_posix()):
+                    continue
+                target = Path(path) / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if force or not target.exists():
+                    shutil.copyfile(source, target)
+                copied.append(str(target))
+            return copied, ""
+
+    downloaded = download_kaggle_outputs(SavedOutputApi(), ["owner/notebook"], tmp_path / "h")
+    assert len(downloaded) == 1
+    report = install_result(downloaded[0], tmp_path, REPO, update_lock=False)
+    assert report["parts"] == len(result["receipts"])
+    assert report["corpus_embeddings_complete"]
+    before = FakeEncoder.calls
+    repeated = download_kaggle_outputs(SavedOutputApi(), ["owner/notebook"], tmp_path / "h")
+    assert install_result(repeated[0], tmp_path, REPO, update_lock=False)["corpus_embeddings_complete"]
+    assert FakeEncoder.calls == before
+
+
 def test_bounded_partial_and_saved_output_resume_carries_previous_parts(tmp_path, frozen, job):
     hydrate_job(tmp_path / "bundle", tmp_path / "scratch", REPO)
     worker(tmp_path, workers=2, max_output_bytes=1)  # output budget stops before inference

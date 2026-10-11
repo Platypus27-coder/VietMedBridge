@@ -128,15 +128,25 @@ KAGGLE_NOTEBOOK_OUTPUT = "owner-a/notebook-a, owner-b/notebook-b"
 ```
 
 Có thể dùng `username/notebook-slug/version` để lấy đúng version; một handle
-đơn vẫn dùng được. Chọn một version mới nhất cho mỗi account ID. Secret của
+đơn lấy phiên mới nhất. `version` là số Version hiển thị trên Kaggle (ví dụ
+`/2`), không phải `scriptVersionId` trong URL. Chọn một version chứa checkpoint
+cho mỗi account ID; nếu vừa Save một bản mới không có Outputs, phải chọn lại
+đúng bản đã chạy. Secret của
 người tải phải có quyền đọc cả hai Outputs (chủ notebook cần cấp quyền trên
 Kaggle). Nếu không dùng chung quyền đọc, mỗi thành viên nhập Outputs của mình
 bằng Secret riêng, **lần lượt** vào cùng DATA_ROOT. Run all: notebook dùng
-[`kaggle kernels output`](https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md),
-tải vào ổ tạm Colab rồi kiểm toàn bộ receipts trước khi ghi vào Drive:
+Kaggle API kiểm trạng thái và tải riêng `result-manifest.json` của **tất cả**
+notebook trước. Log ghi rõ handle, trạng thái, số manifest, số saved parts và
+account ID. Nếu thiếu, trùng manifest, khác job hoặc trùng account ID thì dừng
+trước khi tải vector. Chỉ file được API trả trong lượt hiện tại mới được tính;
+manifest cũ ở thư mục tạm không gây báo trùng hoặc che lỗi thiếu Outputs.
+Sau preflight hợp lệ, tải vào ổ tạm Colab (tận dụng file đã tải nếu manifest
+khớp) rồi kiểm toàn bộ receipts trước khi ghi vào Drive:
 candidate, input manifest, model/runtime/source code, checksum file, shape/L2,
 source text hash và vector row tương ứng. Nếu không khớp thì dừng trước khi
 nhập. Ghi completion markers sau dữ liệu; nhập lại cùng kết quả là idempotent.
+Nếu Outputs đổi giữa preflight và tải vector, dừng trước khi nhập Drive và yêu
+cầu cố định số version. Bước nhập không chạy model hoặc tính lại embedding.
 
 Mỗi lượt nhập in `coverage.bge` và `coverage.qwen`: số part đã có/tổng part và
 số input text đã phủ, tính gộp trên Drive. `corpus_embeddings_complete=true`
