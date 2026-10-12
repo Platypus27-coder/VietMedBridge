@@ -160,6 +160,60 @@ def test_notebook_cpu_preparation_builds_reusable_catalog_without_gpu_weights(tm
     assert (sha256_file(marker),marker.stat().st_mtime_ns) == before
 
 
+def test_notebook_qwen_only_mode_resumes_only_the_missing_corpus_embedding(tmp_path,monkeypatch):
+    from vietmedbridge import full_scale_runtime as runtime, full_plan_runtime, index_inputs
+    checkout=Path(__file__).resolve().parents[1]
+    notebook=read_json(checkout/"notebooks/04_colab_retrieval_baseline.ipynb")
+    cell=next(c["source"] for c in notebook["cells"] if c["cell_type"]=="code" and "PREPARE_ONLY =" in c["source"])
+    calls=[]
+    monkeypatch.setattr(runtime,"resume_qwen_corpus_embeddings",lambda *args,**kwargs:
+        (calls.append((args,kwargs)) or {"state":"QWEN_CORPUS_CHECKPOINTED_PARTIAL",
+            "completed_parts":151,"requested_parts":937,"checkpoint":"qwen/embeddings.json"}))
+    def forbidden(*args,**kwargs):
+        pytest.fail("Qwen-only mode must not enter the rest of retrieval or rebuild CPU resources")
+    monkeypatch.setattr(runtime,"run_scale_full_pipeline",forbidden)
+    monkeypatch.setattr(runtime,"prepare_scale_cpu_resources",forbidden)
+    monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
+    monkeypatch.setattr(index_inputs,"read_candidate_lineage",forbidden)
+    data_root=tmp_path/"data"
+    context={"DATA_ROOT":data_root,"CHECKOUT":checkout,"WORK_DIR":tmp_path/"work",
+        "CODE_COMMIT":"test","RUN_QWEN_CORPUS_ONLY":True}
+    exec(compile(cell,"04-qwen-only-routing","exec"),context)
+    assert calls==[((data_root,checkout,context["WORK_DIR"]),{})]
+    assert context["RESULT"]["status"]["completed_parts"]==151
+    assert context["TEAM_SIZE"]==1 and context["TEAM_WORKER_ID"] is None
+    assert context["PREPARE_ONLY"] is False
+
+
+def test_qwen_resume_recovers_missing_runtime_lock_from_verified_partial_manifest(tmp_path,monkeypatch):
+    from shutil import copy2
+    from vietmedbridge import full_scale_runtime as runtime, scale_baseline
+    checkout=Path(__file__).resolve().parents[1]
+    config=read_json(checkout/"configs/retrieval_full.json")
+    runtime_lock=read_json(checkout/"configs/kaggle_runtime.json")
+    checkout_copy=tmp_path/"checkout"
+    atomic_json(checkout_copy/"configs/retrieval_full.json",config)
+    atomic_json(checkout_copy/"configs/kaggle_runtime.json",runtime_lock)
+    code_copy=checkout_copy/"src/vietmedbridge/qwen_models.py"
+    code_copy.parent.mkdir(parents=True,exist_ok=True)
+    copy2(checkout/"src/vietmedbridge/qwen_models.py",code_copy)
+    candidate={"candidate_manifest_sha256":"a"*64}
+    build=tmp_path/"build"
+    inputs={"input_count":3,"parts":[{"start":0,"rows":3}]}
+    encoder={**config["second_dense"],"input_role":"corpus",**runtime_lock,
+        "inference_code_sha256":sha256_file(code_copy)}
+    previous={"state":"IN_PROGRESS","parts":[{"start":0}],"encoder":encoder}
+    monkeypatch.setattr(runtime,"load_handoff",lambda root:(build,candidate,inputs))
+    monkeypatch.setattr(scale_baseline,"imported_content_manifest",lambda *a,**k:(None,previous))
+
+    resolved=runtime.qwen_checkpoint_runtime(tmp_path,checkout_copy)
+
+    assert resolved[0]==runtime_lock
+    assert resolved[1] is previous
+    assert resolved[-1]=="verified partial Qwen producer manifest + repository-pinned runtime"
+    assert not (tmp_path/"retrieval_embedding_runtime_lock.json").exists()
+
+
 def test_union_preserves_official_aliases_outcomes_and_resume(tmp_path,frozen,external,monkeypatch):
     from dataclasses import asdict
     from test_external_import import CONFIG,SPEC

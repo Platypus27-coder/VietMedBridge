@@ -104,6 +104,91 @@ def prepare_scale_cpu_resources(root,checkout,work):
         raise
 
 
+def qwen_checkpoint_runtime(root,checkout):
+    """Resolve a Qwen checkpoint's producer runtime without guessing versions."""
+    from .portable_embeddings import (
+        checked as checked_runtime_lock, resources_relative, validate_runtime_lock,
+    )
+    from .scale_baseline import imported_content_manifest
+
+    root,checkout=Path(root),Path(checkout)
+    build,candidate,inputs=load_handoff(root)
+    config=read_json(checkout/"configs/retrieval_full.json")
+    qwen_root=root/resources_relative(candidate,config)/"qwen"
+    _,previous=imported_content_manifest(root,candidate,inputs,config,family="qwen")
+    if previous is None or not previous["parts"]:
+        raise RuntimeError("No verified Qwen corpus checkpoint exists for this candidate; refusing to start a full corpus encode.")
+
+    lock_path=root/"retrieval_embedding_runtime_lock.json"
+    if lock_path.is_file():
+        runtime=checked_runtime_lock(read_json(lock_path))["runtime"]
+        source="verified Drive runtime lock"
+    else:
+        # Some Drive imports retained the verified Qwen maps but omitted the
+        # small shared lock. Recover versions only from that partial producer
+        # manifest, and require them to match the repository's pinned runtime.
+        producer=previous["encoder"]
+        runtime={name:producer.get(name) for name in ("torch","transformers","bitsandbytes")}
+        pinned=read_json(checkout/"configs/kaggle_runtime.json")
+        validate_runtime_lock(runtime)
+        validate_runtime_lock(pinned)
+        if runtime!=pinned:
+            raise RuntimeError("Qwen checkpoint runtime differs from the repository-pinned CUDA runtime; restore the matching Kaggle runtime lock.")
+        source="verified partial Qwen producer manifest + repository-pinned runtime"
+
+    validate_runtime_lock(runtime)
+    producer=previous["encoder"]
+    if any(producer.get(name)!=value for name,value in runtime.items()):
+        raise RuntimeError("Qwen checkpoint producer differs from the verified embedding runtime lock.")
+    if producer.get("inference_code_sha256")!=sha256_file(checkout/"src/vietmedbridge/qwen_models.py"):
+        raise RuntimeError("Qwen checkpoint was produced by different model code; restore the matching checkpoint code before resuming.")
+    return runtime,previous,build,candidate,inputs,config,qwen_root,source
+
+
+def resume_qwen_corpus_embeddings(root,checkout,work,*,max_new_parts=None):
+    """Resume only the frozen corpus's Qwen dense cache on a Colab GPU.
+
+    This deliberately avoids catalog creation, BGE, document vectors,
+    translation, query encoding, search, and submission generation. Existing
+    imported Qwen part maps are verified and reused by content_embeddings.
+    """
+    from .portable_embeddings import embedding_runtime
+
+    root,checkout,work=Path(root),Path(checkout),Path(work)
+    runtime,previous,build,candidate,inputs,config,qwen_root,runtime_source=qwen_checkpoint_runtime(root,checkout)
+    if previous["state"]=="COMPLETE":
+        return {"state":"QWEN_CORPUS_COMPLETE","completed_parts":len(previous["parts"]),
+            "requested_parts":len(inputs["parts"]),"new_parts_this_call":0,
+            "unique_dense_inputs":inputs["input_count"],"checkpoint":str(qwen_root/"embeddings.json"),
+            "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
+            "scope":"Qwen corpus embeddings only; existing verified parts reused"}
+    if embedding_runtime()!=runtime:
+        raise RuntimeError(f"Colab packages differ from {runtime_source}; run the notebook bootstrap and restart the runtime before Qwen.")
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError("Qwen corpus embeddings require a Colab GPU. Select GPU runtime before running this cell.")
+
+    from .qwen_models import TorchQwenEncoder
+    from .content_embeddings import content_embeddings
+    from .runtime_profile import inference_batches
+
+    encoder=TorchQwenEncoder(config["second_dense"])
+    try:
+        corpus_encoder=encoder.for_role("corpus")
+        if previous["encoder"]!=corpus_encoder.identity:
+            raise ValueError("Imported Qwen checkpoint producer differs from the Colab model/runtime/code identity.")
+        report=content_embeddings(root,build/"index_inputs",inputs,corpus_encoder,qwen_root,
+            work_dir=work,batch_size=inference_batches()["embedding"],max_new_parts=max_new_parts)
+    finally:
+        encoder.close()
+    state="QWEN_CORPUS_COMPLETE" if report["state"]=="COMPLETE" else "QWEN_CORPUS_CHECKPOINTED_PARTIAL"
+    profile=read_json(qwen_root/"profile.json") if (qwen_root/"profile.json").is_file() else {}
+    return {"state":state,"completed_parts":len(report["parts"]),"requested_parts":len(inputs["parts"]),
+        "new_parts_this_call":profile.get("new_parts",0),"unique_dense_inputs":inputs["input_count"],
+        "checkpoint":str(qwen_root/"embeddings.json"),"candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
+        "scope":"Qwen corpus embeddings only; verified parts reused"}
+
+
 def _document_inputs(catalog,tokenizer,target,max_length=512,part_size=1024):
     """Document title/opening representations streamed to bounded Parquet parts."""
     target = Path(target)
