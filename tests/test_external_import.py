@@ -9,7 +9,8 @@ import pytest
 from vietmedbridge.archive_parts import restore_archive
 from vietmedbridge.artifacts import atomic_json, code_fingerprint, digest_json, read_json, sha256_file
 from vietmedbridge.chunks import ChunkConfig
-from vietmedbridge.external_import import MEMBERS, find_external_source, import_external_corpus
+from vietmedbridge.external_import import (MEMBERS, find_external_source, import_external_corpus,
+                                           select_external_source_names)
 from vietmedbridge.health import freeze_candidate, health_report
 from vietmedbridge.index_inputs import prepare_index_inputs, publish_data_handoff
 from vietmedbridge.scale_benchmark import load_handoff, sample_inputs
@@ -18,6 +19,24 @@ from vietmedbridge.scale_benchmark import load_handoff, sample_inputs
 class CharacterTokenizer:
     def __call__(self, text, **kwargs):
         return {"offset_mapping": [(i,i+1) for i in range(len(text))]}
+
+
+def test_select_external_source_names_filters_exact_files_and_preserves_order(tmp_path):
+    sources = [tmp_path / f"vibiomir_shard_{index:05d}.tar" for index in range(14)]
+    selected = select_external_source_names(
+        sources, "vibiomir_shard_00007.tar, vibiomir_shard_00008.tar;\nvibiomir_shard_00013.tar")
+    assert selected == [sources[7], sources[8], sources[13]]
+    assert select_external_source_names(sources, "") == sources
+
+
+def test_select_external_source_names_rejects_missing_duplicate_and_path_names(tmp_path):
+    sources = [tmp_path / "vibiomir_shard_00007.tar"]
+    with pytest.raises(FileNotFoundError, match="not found"):
+        select_external_source_names(sources, "vibiomir_shard_00008.tar")
+    with pytest.raises(ValueError, match="duplicate"):
+        select_external_source_names(sources, "vibiomir_shard_00007.tar,vibiomir_shard_00007.tar")
+    with pytest.raises(ValueError, match="basenames"):
+        select_external_source_names(sources, "subdir/vibiomir_shard_00007.tar")
 
 
 SPEC = {"model_id":"test", "revision":"test", "special_tokens":False}

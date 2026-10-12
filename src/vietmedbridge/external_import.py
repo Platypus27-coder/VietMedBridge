@@ -108,6 +108,38 @@ def list_external_source_batches(data_root, explicit=None):
     return sorted(unique, key=lambda path: (path.name.casefold(), str(path).casefold()))
 
 
+def select_external_source_names(sources, requested_names):
+    """Select exact archive basenames from a discovered external batch.
+
+    ``requested_names`` may be a comma/semicolon/newline separated string, as
+    used by Colab's simple text parameter, or an iterable of names. An empty
+    selection means all discovered sources. Exact matching prevents a new-data
+    run from silently re-importing older archives in the same folder.
+    """
+    if isinstance(requested_names, str):
+        requested = [name.strip() for name in re.split(r"[,;\n]+", requested_names)
+                     if name.strip()]
+    else:
+        requested = [str(name).strip() for name in requested_names if str(name).strip()]
+    sources = list(sources)
+    if not requested:
+        return sources
+    if any("/" in name or "\\" in name or Path(name).name != name for name in requested):
+        raise ValueError("External archive selection must contain exact file basenames only.")
+    if len(requested) != len(set(requested)):
+        raise ValueError("External archive selection contains duplicate names.")
+    by_name = {}
+    for source in sources:
+        name = Path(source).name
+        if name in by_name:
+            raise ValueError(f"Ambiguous external archive basename: {name}")
+        by_name[name] = source
+    missing = [name for name in requested if name not in by_name]
+    if missing:
+        raise FileNotFoundError(f"Selected external archive(s) not found: {missing}")
+    return [by_name[name] for name in requested]
+
+
 def find_external_source(data_root, explicit=None):
     """Resolve an exact source or the sole discovered handoff."""
     if explicit:
