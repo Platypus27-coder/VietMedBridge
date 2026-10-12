@@ -63,7 +63,8 @@ def _selected_adapter(source, destination):
     return manifest
 
 
-def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v3-per-model-15b", run_ablations=False):
+def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage-a-qlora-v3-per-model-15b", run_ablations=False,
+                          run_output_sweeps=True):
     root, checkout = Path(data_root), Path(checkout)
     base_run = run = root / "training" / run_name
     train_path, dev_path = root / "labels/retrieval_train.json", root / "labels/retrieval_dev.json"
@@ -273,6 +274,9 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
                     translations=dev_translations, config=policy, batch_size=batches["reranker"])
                 sweep = cutoff_sweep(records, dev_doc, catalog, tokenizer, policy)
                 atomic_json(run / "finalist_evaluation" / label_version / checkpoint.name / "cutoff_sweep.json", sweep)
+                from .retrieval_audit import audit_rankings
+                atomic_json(run / "finalist_evaluation" / label_version / checkpoint.name / "stage_audit.json",
+                    audit_rankings(records, dev_queries, catalog, tokenizer, labels_document=dev_doc))
                 trials.append({"checkpoint": str(checkpoint), "best_dev_policy": sweep["best_dev_policy"],
                     "prediction_signature": report["signature"], "recall": evaluate_candidate_recall(records, dev_doc["queries"], catalog, tokenizer)})
             finally:
@@ -297,6 +301,18 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
         calibration["manifest_sha256"] = digest_json(calibration)
         atomic_json(base_run / "calibrated_policy.json", calibration)
         selected_policy = replace(policy,**calibration["policy"])
+        output_sweep = None
+        if run_output_sweeps:
+            from .selection_replay import sweep_parent_windows
+            winner = run / "finalist_evaluation" / label_version / Path(trials[0]["checkpoint"]).name / "queries"
+            dev_records = [read_json(winner / f"query-{q['id']}.done.json") for q in dev_queries]
+            with profile.stage("cpu_parent_output_sweep"):
+                output_sweep = sweep_parent_windows(dev_records, dev_queries, catalog, tokenizer,
+                    {"model_id": config["dense"]["model_id"], "revision": config["dense"]["revision"], "special_tokens": False},
+                    selected_policy, dev_doc, contest, run / "output_sweeps" / label_version)
+            # This is research evidence. Parent policies require independent
+            # held-out validation before replacing the selected inference policy.
+        heldout_parent_policy = None
         stage_started = time.perf_counter()
         selected_model = TorchQwenReranker(config["reranker"],adapter_path=base_run / "selected_adapter")
         try:
@@ -312,6 +328,20 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
                     query_embedding_manifest=manifest,translations=[translated[q["id"]] for q in heldout_queries],
                     config=selected_policy,batch_size=batches["reranker"])
                 heldout_report = evaluate_frozen_selection(records,heldout_doc,catalog,tokenizer,calibration,base_run / "heldout_evaluation.json")
+                if output_sweep is not None:
+                    from .selection_replay import evaluate_frozen_parent_window
+                    selected_parent = next((trial for trial in output_sweep["trials"]
+                        if trial["variant"] == output_sweep["best_dev_variant"]), None)
+                    if selected_parent is None:
+                        raise ValueError("Dev parent sweep winner is absent from its signed trial list.")
+                    heldout_parent_policy = evaluate_frozen_parent_window(records, heldout_queries,
+                        catalog, tokenizer,
+                        {"model_id": config["dense"]["model_id"],
+                         "revision": config["dense"]["revision"], "special_tokens": False},
+                        selected_policy, heldout_doc, train_doc, dev_doc, contest,
+                        base_run / "heldout_parent_policy" / label_version / selected_parent["variant"],
+                        parent_tokens=selected_parent["parent_tokens"],
+                        merge_tokens=selected_parent["merge_tokens"])
             else:
                 heldout_report = {"state":"WAITING_FOR_INDEPENDENT_REVIEWED_HELD_OUT_LABELS",
                     "required_file":str(heldout_path),"used_for_checkpoint_or_cutoff_selection":False}
@@ -324,12 +354,17 @@ def run_training_workflow(data_root, checkout, *, work_dir=None, run_name="stage
             "label_review_mode": train_doc.get("review_mode", "HUMAN_REVIEW"),
             "label_evaluation_scope": dev_doc.get("evaluation_scope", "HUMAN_REVIEWED_LOCAL_PROXY"),
             "heldout_evaluation":heldout_report,
+            "parent_output_sweep":output_sweep,
+            "heldout_parent_policy":heldout_parent_policy,
             "model_parameter_budget": selected_budget,
             "adapter": str(base_run / "selected_adapter"), "dev_proxy_f2": best["combined_f2"],
             "official_btc_score": None, "corpus_promoted": False}
         if heldout_doc is not None:
             status["state"] = "TRAINED_DEV_SELECTED_HELD_OUT_EVALUATED_LOCAL_PROXY"
         status["research_ablations"] = "EXECUTED" if run_ablations else "DEFERRED_UNTIL_FIRST_MEASURED_RESULT"
+        status["cpu_output_sweeps"] = ("DEV_SWEEP_AND_FROZEN_WINNER_HELDOUT_EVALUATED_NOT_AUTO_APPLIED"
+            if heldout_parent_policy is not None else
+            "DEV_EVALUATED_HELDOUT_POLICY_PENDING_NOT_AUTO_APPLIED" if output_sweep is not None else "DISABLED")
         status["runtime_profile"] = str(profile.path)
         atomic_json(base_run / "status.json", status)
         profile.finish(status["state"])

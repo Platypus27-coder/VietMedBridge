@@ -235,7 +235,11 @@ def run_full_pipeline(data_root, checkout, *, code_commit, work_dir=None,
         "inference_scope": "COLAB_GPU_DEV_SELECTED_ADAPTER" if calibration else "COLAB_GPU_FULL_PRETRAINED_ARCHITECTURE"}
     _, ready = finish_pilot(records, queries, catalog, report, run, contract=contract, tokenizer=tokenizer,
         evidence=evidence, reference_labels_path=root / "labels/retrieval_reference.json", work_dir=work_dir)
-    diagnostics = diagnose(records, queries, index, run / "diagnostics.json")
+    reference_path = root / "labels/retrieval_reference.json"
+    reference_labels = read_json(reference_path) if reference_path.is_file() else None
+    if reference_labels is not None and reference_labels.get("reviewed") is not True:
+        reference_labels = None
+    diagnostics = diagnose(records, queries, index, run / "diagnostics.json", labels=reference_labels)
     heldout_state = "WAITING_FOR_INDEPENDENT_REVIEWED_HELD_OUT_LABELS"
     heldout_path = root / "training/stage-a-qlora-v3-per-model-15b/heldout_evaluation.json"
     if calibration is not None and heldout_path.exists():

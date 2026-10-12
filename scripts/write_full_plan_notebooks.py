@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v14-vector-index"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v15-release-audit"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -201,7 +201,7 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v14-vector-index")
+    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v15-release-audit")
     vector_boot = '''
 import os
 if VECTOR_BACKEND == "qdrant":
@@ -509,7 +509,9 @@ def main():
         ghi các model/stages thực thi, corpus, cache và adapter/dev calibration;
         coordinator-profile.json và worker-<id>-profile.json ghi thời gian các stage resource. Với full pilot, diagnostics.json
         có language coverage, branch contributions, output counts và logit distributions. Không có nhãn
-        thì không tính F2 giả. full_plan_status.json phân biệt code đã thực thi với
+        thì không tính F2 giả; `labels/retrieval_reference.json` chỉ được chấm local
+        khi `reviewed=true` và vẫn là proxy theo plan, không phải điểm BTC.
+        full_plan_status.json phân biệt code đã thực thi với
         supervised/scale gates còn cần dữ liệu và đo đạc. Corpus nhỏ và chất lượng
         nguồn vẫn giới hạn recall.
         '''),
@@ -527,12 +529,16 @@ def main():
 
         ZIP chỉ chứa results.json ở root, đủ 1.200 official IDs; kiểm source/schema
         và checksum trước download. Manifest/model/runtime evidence nằm ngoài ZIP.
+        Mỗi ZIP hợp lệ tự được đóng băng vào `releases/<release_id>` cùng manifest
+        và run contract; đây là bản lưu/rollback local, chưa được xem là quality pass.
         Upload ZIP lên Dashboard BTC; score_feedback.json giữ submission ID và
         điểm thật, không bị reset khi resume. Chưa có official score trước upload.
         '''),
         code('''
         from google.colab import files
         from vietmedbridge.artifacts import verify_file
+        if READY.get("release_id"):
+            print("Release đã lưu:", READY["release_id"], "| manifest:", READY["release_manifest"])
         if READY["state"] == "CPU_PREPARATION_COMPLETE":
             print("Chuẩn bị CPU hoàn tất. Chuyển runtime GPU, đặt PREPARE_ONLY=False.")
             print("Team 3 người: TEAM_SIZE=3, TEAM_WORKER_ID=0/1/2; coordinator sau đó dùng None.")
@@ -544,7 +550,62 @@ def main():
             files.download(READY["zip_path"])
         '''),
         md('''
-        ## 5. Lưu checkpoint inference về máy — tùy chọn
+        ## 5. Ghi điểm dashboard hoặc chọn lại một release — tùy chọn
+
+        Sau khi nộp thủ công và BTC hiện kết quả, bật `RECORD_BTC_SCORE`, điền
+        submission ID, phase, tài khoản, giờ có timezone, bảy metric và hypothesis.
+        Event được lưu trong `DATA_ROOT/submission_journal` và gắn vào ZIP hash.
+        Đây chỉ là nhật ký dữ liệu Sếp nhập, không đọc hay sửa Dashboard.
+
+        Có thể chọn lại một ZIP đã đóng băng trong release folder của run hiện tại
+        bằng `ROLLBACK_RELEASE_ID`; notebook xác minh hash trước khi tải ZIP đó.
+        '''),
+        code('''
+        from pathlib import Path
+        import json
+        from google.colab import files
+        from vietmedbridge.release_registry import record_dashboard_result, select_release, verify_release
+
+        RECORD_BTC_SCORE = False  #@param {type:"boolean"}
+        BTC_SUBMISSION_ID = ""  #@param {type:"string"}
+        BTC_PHASE = "public"  #@param ["public", "private"]
+        BTC_ACCOUNT = ""  #@param {type:"string"}
+        BTC_SUBMITTED_AT = ""  #@param {type:"string"}
+        BTC_HYPOTHESIS = ""  #@param {type:"string"}
+        BTC_FINAL_SCORE = 0.0  #@param {type:"number"}
+        BTC_DOCUMENT_F2 = 0.0  #@param {type:"number"}
+        BTC_CHUNK_F2 = 0.0  #@param {type:"number"}
+        BTC_DOCUMENT_PRECISION = 0.0  #@param {type:"number"}
+        BTC_DOCUMENT_RECALL = 0.0  #@param {type:"number"}
+        BTC_CHUNK_PRECISION = 0.0  #@param {type:"number"}
+        BTC_CHUNK_RECALL = 0.0  #@param {type:"number"}
+        BTC_METRICS = {"final_score": BTC_FINAL_SCORE, "document_f2": BTC_DOCUMENT_F2,
+            "chunk_f2": BTC_CHUNK_F2, "document_precision": BTC_DOCUMENT_PRECISION,
+            "document_recall": BTC_DOCUMENT_RECALL, "chunk_precision": BTC_CHUNK_PRECISION,
+            "chunk_recall": BTC_CHUNK_RECALL}
+        if RECORD_BTC_SCORE:
+            if not READY.get("release_manifest"):
+                raise RuntimeError("Không có release manifest gắn với ZIP đang mở.")
+            event = record_dashboard_result(READY["release_manifest"], DATA_ROOT / "submission_journal",
+                submission_id=BTC_SUBMISSION_ID, phase=BTC_PHASE, submitted_at=BTC_SUBMITTED_AT,
+                metrics=BTC_METRICS, hypothesis=BTC_HYPOTHESIS, account=BTC_ACCOUNT)
+            print(json.dumps(event, ensure_ascii=False, indent=2))
+        else:
+            print("Chưa ghi điểm. Sau khi dashboard có kết quả, bật RECORD_BTC_SCORE và điền số liệu.")
+
+        ROLLBACK_RELEASE_ID = ""  #@param {type:"string"}
+        ROLLBACK_REASON = ""  #@param {type:"string"}
+        if ROLLBACK_RELEASE_ID:
+            run_dir = Path(READY["zip_path"]).parent.parent
+            release_path = run_dir / "releases" / ROLLBACK_RELEASE_ID / "release.json"
+            release = verify_release(release_path)
+            pointer = select_release(release_path, DATA_ROOT / "submission_active_release.json",
+                reason=ROLLBACK_REASON)
+            print("Đã chọn release để tải:", json.dumps(pointer, ensure_ascii=False, indent=2))
+            files.download(str(release_path.parent / "submission.zip"))
+        '''),
+        md('''
+        ## 6. Lưu checkpoint inference về máy — tùy chọn
 
         Với chế độ cached, cell này gom query embeddings, dense search, scored
         stages, predictions, submission và document vectors mới (nếu có).
@@ -603,6 +664,12 @@ def main():
         chạy finalists qua full pipeline và CPU F2 cutoff sweep. Chọn adapter theo
         dev F2. Chạy dev ablations khi bật tùy chọn, rồi chấm held-out với adapter/cutoff đã
         freeze; không chọn model bằng held-out score và không promote corpus.
+        Sau đó 05 replay parent windows 256/384/512/640/768 và merge 512→768 từ
+        scored query checkpoints trên CPU (không nạp model hay gọi GPU lại). Dev
+        chọn duy nhất một biến thể; nếu có held-out độc lập, chỉ biến thể đó được
+        chấm thêm một lần và lưu chênh lệch so với parent policy gốc. Kết quả không
+        tự thay cấu hình inference. Báo cáo audit ghi recall theo tầng, ngôn ngữ,
+        độ dài gold và loại lỗi source/candidate/parent/cutoff.
         04 tự nhận selected_adapter/calibrated_policy trong namespace mới.
 
         V7: corpus embeddings được tìm và kiểm hash giữa 04/05 và các experiment;
@@ -618,7 +685,7 @@ def main():
         md("## 1. Bootstrap — CPU"),
         code(BOOT.replace("retrieval_code_lock.json", "training_code_lock.json")
             .replace("retrieval_runtime.json", "training_runtime.json")
-            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v7-disk-full-system")),
+            .replace("full-master-plan-strong-v3-per-model-15b", "full-master-plan-supervised-v8-output-audit")),
         md("## 2. Chuẩn bị nhãn — GPU chỉ khi còn thiếu draft train"),
         code('''
         import json

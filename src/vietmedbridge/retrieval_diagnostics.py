@@ -33,6 +33,9 @@ def diagnose(records, queries, index, output_path, *, labels=None):
         "document_count_histogram": dict(Counter(docs_per_query)), "chunk_count_histogram": dict(Counter(chunks_per_query)),
         "reranker_logit_percentiles": np.percentile(scores, [0, 25, 50, 75, 100]).tolist() if scores else None,
         "scores_are_probabilities": False, "quality_state": "NOT_EVALUATED_NO_REFERENCE_LABELS"}
+    from .retrieval_audit import audit_rankings
+    report["stage_audit"] = audit_rankings(records, queries, index.catalog, index.tokenizer,
+        labels_document=labels)
     if labels is not None and labels.get("reviewed") is True:
         report["evaluation"] = evaluate_predictions([r["prediction"] for r in records], labels["queries"], index.tokenizer)
         report["candidate_recall"] = evaluate_candidate_recall(records, labels["queries"], index.catalog, index.tokenizer)

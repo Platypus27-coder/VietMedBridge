@@ -541,7 +541,11 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
             "supervised_stage":"SELECTED_ADAPTER_LOADED" if adapter else "WAITING_FOR_REVIEWED_LABELS_AND_TRAINING",
             "index":index.manifest,"resources":prepared["resources"]}
         if records:
-            diagnostic = diagnose(records,queries,index,run / "diagnostics.json")
+            reference_path = root / "labels/retrieval_reference.json"
+            reference_labels = read_json(reference_path) if reference_path.is_file() else None
+            if reference_labels is not None and reference_labels.get("reviewed") is not True:
+                reference_labels = None
+            diagnostic = diagnose(records,queries,index,run / "diagnostics.json",labels=reference_labels)
             diagnostic["eligibility_scope"] = "Source counts cover the frozen corpus; quality holds are checked lazily on retrieved candidates."
             atomic_json(run / "diagnostics.json",diagnostic)
             status["diagnostics_path"] = str(run / "diagnostics.json")

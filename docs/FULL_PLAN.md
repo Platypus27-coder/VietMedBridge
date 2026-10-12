@@ -1,6 +1,8 @@
 # Chạy kiến trúc master plan trên corpus hiện có
 
 Nguồn quyết định là [master plan Stage 3](../R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).
+[Ma trận trạng thái triển khai](MASTER_PLAN_IMPLEMENTATION_STATUS.md) tách code,
+artifact đã xác minh và những kết luận còn cần nhãn/điểm độc lập.
 [Notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
 dùng `configs/retrieval_full.json` cho cả pilot và corpus lớn. Workflow API
 `full-master-plan-strong-v7-disk-full-system` nối architecture đầy đủ vào disk
@@ -161,7 +163,7 @@ GPU QLoRA hay held-out score thật/official score ở local.
 
 `configs/training_data.json` là policy chuẩn bị draft; nó không thay đổi frozen
 candidate hoặc cấu hình inference 04. 05 nâng code lock sang
-`full-master-plan-supervised-v7-disk-full-system`; 04 dùng
+`full-master-plan-supervised-v8-output-audit`; 04 dùng
 `full-master-plan-strong-v7-disk-full-system`.
 API `run_training_workflow` gọi trực tiếp khi thiếu file vẫn trả
 `WAITING_FOR_INDEPENDENT_REVIEWED_TRAIN_DEV_LABELS`; notebook gọi preparation trước.
@@ -259,3 +261,25 @@ Runtime VRAM chọn batch khởi đầu 4/8/16; OOM backoff cũ giảm batch khi
 Không đổi model/semantic policy chỉ để nâng batch. Chưa có GPU speedup benchmark.
 `runtime_profile.json` ghi thời gian theo stage; mỗi embedding pass ghi số parts
 reuse/new, encoding seconds và tổng thời gian. Giữ RUN_NAME/Drive root hiện có.
+
+## Execution update — 12/10/2026
+
+Notebook 04 tự lưu mỗi ZIP hợp lệ vào `releases/<release_id>` với submission
+manifest và run contract; release được xác minh bằng SHA-256 và có thể chọn lại
+bằng local pointer. Việc này là backup/rollback, không phải tự promote chất lượng
+hay upload lên BTC. Notebook có ô tùy chọn để ghi bảy metric do Sếp nhập từ
+dashboard vào journal bền vững trên DATA_ROOT, hoặc xác minh/tải lại release cũ.
+Nhật ký dashboard kiểm tra điểm gắn với đúng ZIP trước khi ghi event, để lỗi
+mismatch không tạo event dở dang.
+
+Notebook 05 lưu audit retrieval theo tầng/language/error class. Parent windows
+256/384/512/640/768 và merge 512→768 replay lại scored candidates trên CPU; dev
+chọn một biến thể, held-out độc lập chỉ đánh giá biến thể đã chọn và ghi delta
+so với parent policy ban đầu. Held-out không được dùng chọn policy; kết quả không
+được tự áp vào 04. Các checkpoint retrieval cũ chỉ hỗ trợ attribution bên trong
+fused candidate pool đã lưu, không chứng minh được recall toàn bộ kênh trước RRF.
+
+Các bước mới được nối vào workflow nhưng chỉ chạy khi điều kiện nhãn tương ứng
+đã thỏa. Không có reviewed dev labels thì không có F2 cutoff/parent selection;
+không có held-out độc lập thì trạng thái vẫn pending. Xem ma trận triển khai để
+biết rõ những artifact nào nhóm cần xác nhận trên Drive/Kaggle.

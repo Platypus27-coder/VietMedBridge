@@ -78,4 +78,9 @@ def finish_pilot(records, queries, catalog, report, run_dir, *, contract, tokeni
             "prediction_signature": report["signature"], "submission_id": None,
             "submitted_at": None, "document_f2": None, "chunk_f2": None,
             "overall_score": None, "notes": None})
+    from .release_registry import freeze_release
+    release = freeze_release(root)
+    readiness["release_id"] = release["release_id"]
+    readiness["release_manifest"] = str(root / "releases" / release["release_id"] / "release.json")
+    atomic_json(root / "submission/ready_to_submit.json", readiness)
     return manifest, readiness
