@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v16-full-default"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v17-batched-cache-lookups"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -201,7 +201,7 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v16-full-default")
+    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v17-batched-cache-lookups")
     vector_boot = '''
 import os
 if VECTOR_BACKEND == "qdrant":

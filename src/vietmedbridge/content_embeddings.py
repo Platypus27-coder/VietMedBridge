@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 from pathlib import Path
 import sqlite3
@@ -72,6 +73,7 @@ class ContentBlocks:
         else:
             atomic_json(marker,value)
         self.register(value)
+        return value
 
     def seed(self, input_root, inputs, vector_root):
         """Register the already paid-for 04 baseline blocks without copying vectors."""
@@ -109,9 +111,21 @@ class ContentBlocks:
 
     def refs(self, texts, *, batch_size, encode_missing):
         keys = [key(t) for t in texts]
+        # Keep cache lookups in batches. The old implementation made two
+        # Python/SQLite round trips per text (over 7,000 calls per 4,096-row
+        # part), which is especially costly while resuming on mounted Drive.
+        known = {}
+        unique_keys = list(dict.fromkeys(keys))
+        for offset in range(0,len(unique_keys),900):
+            batch = unique_keys[offset:offset+900]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.con.execute(
+                f"SELECT key,path,sha,row FROM vectors WHERE key IN ({placeholders})",batch
+            )
+            known.update({k:(path,checksum,row) for k,path,checksum,row in rows})
         missing = {}
         for k,text in zip(keys,texts,strict=True):
-            if self.con.execute("SELECT 1 FROM vectors WHERE key=?",(k,)).fetchone() is None:
+            if k not in known:
                 missing[k] = text
         if missing and not encode_missing:
             return None,0
@@ -126,9 +140,9 @@ class ContentBlocks:
             # previously published vector file, even if batching changes bits.
             path = self.directory / ("block-"+sha256_file(local)+".npy")
             checksum = publish_file(local,path)
-            self.save_block(ordered,path,checksum)
-        refs = [self.con.execute("SELECT path,sha,row FROM vectors WHERE key=?",(k,)).fetchone() for k in keys]
-        return [{"path":p,"sha256":s,"row":r} for p,s,r in refs],len(missing)
+            block = self.save_block(ordered,path,checksum)
+            known.update({k:(block["path"],block["sha256"],row) for row,k in enumerate(ordered)})
+        return [{"path":known[k][0],"sha256":known[k][1],"row":known[k][2]} for k in keys],len(missing)
 
 
 def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir,batch_size=32,
@@ -160,20 +174,39 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
             blocks.seed(input_root,inputs,seed_root)
         for source_root,source_inputs,vector_root in seed_sources:
             blocks.seed(source_root,source_inputs,vector_root)
+        # Drive FUSE has high per-file latency. Verify existing part receipts
+        # concurrently before the ordered work loop, instead of serially
+        # opening and hashing up to 937 small checkpoint files.
+        def read_existing(source):
+            marker = root / f"map-{source['start']:012d}.done.json"
+            if not marker.exists():
+                return source["start"],None
+            saved = checked(read_json(marker))
+            expected = {"signature":signature,"start":source["start"],"rows":source["rows"],
+                "input_sha256":source["sha256"]}
+            if any(saved.get(k) != v for k,v in expected.items()):
+                raise ValueError("Content mapping checkpoint changed.")
+            verify_file(bound(root,saved["path"]),saved["sha256"])
+            return source["start"],saved
+
+        existing = {}
+        with ThreadPoolExecutor(max_workers=min(8,max(1,len(inputs["parts"])))) as pool:
+            futures = [pool.submit(read_existing,source) for source in inputs["parts"]]
+            for count,future in enumerate(as_completed(futures),1):
+                start,saved = future.result()
+                if saved is not None:
+                    existing[start] = saved
+                if count % 64 == 0 or count == len(futures):
+                    print(f"Checkpoint maps verified: {count:,}/{len(futures):,} | existing {len(existing):,}",flush=True)
         cursor, stopped = 0, False
         for index,source in enumerate(inputs["parts"]):
             if source["start"] != cursor or source["rows"] < 1:
                 raise ValueError("Content input ordering changed.")
             cursor += source["rows"]
-            marker = root / f"map-{source['start']:012d}.done.json"
-            expected = {"signature":signature,"start":source["start"],"rows":source["rows"],"input_sha256":source["sha256"]}
             assigned = (worker_id is None or index % workers == worker_id) and (
                 selected_starts is None or source["start"] in selected_starts)
-            if marker.exists():
-                saved = checked(read_json(marker))
-                if any(saved.get(k) != v for k,v in expected.items()):
-                    raise ValueError("Content mapping checkpoint changed.")
-                verify_file(bound(root,saved["path"]),saved["sha256"])
+            saved = existing.get(source["start"])
+            if saved is not None:
                 reused_texts += source["rows"]
             elif assigned and not stopped and (max_new_parts is None or new_parts < max_new_parts):
                 if should_stop is not None and should_stop(source):
@@ -190,8 +223,9 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
                 local = blocks.local / "mapping.parquet"
                 pq.write_table(pa.Table.from_pylist(refs),local,compression="zstd")
                 target = root / f"map-{source['start']:012d}.parquet"
+                expected = {"signature":signature,"start":source["start"],"rows":source["rows"],"input_sha256":source["sha256"]}
                 saved = seal(expected | {"path":target.name,"sha256":publish_file(local,target)})
-                atomic_json(marker,saved)
+                atomic_json(root / f"map-{source['start']:012d}.done.json",saved)
                 new_parts += 1
                 new_texts += count
                 reused_texts += source["rows"]-count
