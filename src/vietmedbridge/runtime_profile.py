@@ -6,15 +6,16 @@ from .artifacts import atomic_json, utc_now
 
 
 def inference_batches(total_memory_bytes=None):
-    """Start conservatively; model OOM backoff already halves unsafe batches."""
+    """Embedding throughput batches; model OOM backoff halves unsafe batches."""
     if total_memory_bytes is None:
         import torch
         if not torch.cuda.is_available():
             return {"embedding": 2, "reranker": 2, "device": "cpu-test"}
         total_memory_bytes = torch.cuda.get_device_properties(0).total_memory
     gib = total_memory_bytes / 2**30
-    batch = 16 if gib >= 38 else 8 if gib >= 20 else 4
-    return {"embedding": batch, "reranker": batch, "gpu_memory_gib": round(gib, 2),
+    reranker_batch = 16 if gib >= 38 else 8 if gib >= 20 else 4
+    embedding_batch = 64 if gib >= 38 else 32 if gib >= 20 else 16
+    return {"embedding": embedding_batch, "reranker": reranker_batch, "gpu_memory_gib": round(gib, 2),
             "oom_policy": "halve-and-retry", "scope": "execution-only; model/input policy unchanged"}
 
 

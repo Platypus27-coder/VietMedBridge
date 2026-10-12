@@ -68,6 +68,47 @@ def test_resume_after_disconnect_does_not_reencode_published_content(mounted, mo
     assert report["state"] == "RECOVERED"
 
 
+def test_qwen_interrupt_inside_part_reuses_saved_miniblocks(mounted,capsys):
+    root,work,remounts=mounted
+    input_dir,output=root/"inputs",root/"qwen"
+    input_dir.mkdir()
+    texts=[f"source-{index:04d}" for index in range(530)]
+    path=input_dir/"part.parquet"
+    pq.write_table(pa.Table.from_pylist([{"text":text} for text in texts]),path)
+    inputs=embeddings.seal({"state":"COMPLETE","input_count":len(texts),
+        "parts":[{"start":0,"rows":len(texts),"path":path.name,"sha256":sha256_file(path)}]})
+    encoded,attempts=[],[]
+    class Encoder:
+        identity={"model_id":"Qwen/Qwen3-Embedding-8B","input_role":"corpus","revision":"fixed"}
+        dimension=2
+        def encode(self,selected,**kwargs):
+            attempts.append(len(selected))
+            if len(attempts)==2:
+                raise disconnected(root)
+            encoded.extend(selected)
+            angles=np.array([int(text.rsplit("-",1)[1])/1000 for text in selected])
+            return np.column_stack((np.cos(angles),np.sin(angles))).astype(np.float32)
+    def run():
+        return embeddings.content_embeddings(root,input_dir,inputs,Encoder(),output,work_dir=work,batch_size=16)
+    result=storage.run_with_drive_recovery(run,root,work)
+    assert result["state"]=="COMPLETE" and len(remounts)==1
+    assert attempts==[512,18,18] and len(encoded)==530 and set(encoded)==set(texts)
+    assert not list(work.glob("vmb-*"))
+    profile=read_json(output/"profile.json")
+    assert profile["new_texts"]==18 and profile["reused_texts"]==512
+    assert profile["mini_block_rows"]==512 and profile["batch_size_requested"]==16
+    log=capsys.readouterr().out
+    assert "saved mini-block 512/530" in log and "save/check" in log and "encode rate" in log
+    # The complete 530-row input map is retained; sub-blocks do not change input partitioning.
+    assert result["parts"][0]["rows"]==530
+    store=embeddings.ContentVectorParts(root,output,result,work/"read")
+    angles=np.arange(530)/1000
+    expected=np.column_stack((np.cos(angles),np.sin(angles))).astype(np.float32)
+    np.testing.assert_allclose(store.gather(range(530)),expected)
+    assert run()["manifest_sha256"]==result["manifest_sha256"]
+    assert attempts==[512,18,18]  # Complete maps from the previous run remain authoritative.
+
+
 def test_preflight_repairs_mount_before_starting_model_stage(mounted, monkeypatch):
     root, work, remounts = mounted
     binding = storage._binding

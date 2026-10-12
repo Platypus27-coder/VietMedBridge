@@ -28,11 +28,25 @@ class Encoder:
         return np.tile(np.array([[1., 0.]], np.float32), (len(texts), 1))
 
 
-@pytest.mark.parametrize("memory_gib,batch", [(15, 4), (24, 8), (40, 16), (80, 16)])
-def test_gpu_inference_batch_policy(memory_gib, batch):
+@pytest.mark.parametrize("memory_gib,embedding,reranker", [(15,16,4),(24,32,8),(40,64,16),(80,64,16)])
+def test_gpu_inference_batch_policy(memory_gib, embedding, reranker):
     policy = inference_batches(memory_gib * 2**30)
-    assert policy["embedding"] == policy["reranker"] == batch
+    assert policy["embedding"] == embedding and policy["reranker"] == reranker
     assert policy["oom_policy"] == "halve-and-retry"
+
+
+def test_qwen_embedding_execution_disables_only_generation_cache_without_rebinding_vectors():
+    from copy import deepcopy
+    from vietmedbridge.qwen_execution import configure_embedding_execution
+    identity={"model_id":"Qwen/Qwen3-Embedding-8B","input_role":"corpus","pooling":"last-attended-token-l2",
+        "inference_code_sha256":"original","quantization":"nf4"}
+    owner=SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace(model_type="qwen3",use_cache=True)))
+    encoder=SimpleNamespace(encoder=owner,identity=deepcopy(identity))
+    assert configure_embedding_execution(encoder)=={"use_cache":False}
+    assert owner.model.config.use_cache is False and encoder.identity==identity
+    encoder.identity={"model_id":"Qwen/Qwen3-Reranker-8B","input_role":"corpus"}
+    owner.model.config.use_cache=True
+    assert configure_embedding_execution(encoder)=={} and owner.model.config.use_cache is True
 
 
 def test_shared_corpus_from_04_and_training_keeps_original_producer_and_partition(tmp_path):

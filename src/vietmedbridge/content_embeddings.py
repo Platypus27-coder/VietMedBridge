@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 from pathlib import Path
 import sqlite3
+import time
 
 import numpy as np
 import pyarrow as pa
@@ -46,8 +47,12 @@ class ContentBlocks:
         self.con = sqlite3.connect(self.local / "lookup.sqlite")
         self.con.execute("CREATE TABLE vectors(key TEXT PRIMARY KEY,path TEXT,sha TEXT,row INTEGER)")
         try:
-            for path in sorted(self.directory.glob("*.done.json")):
-                self.register(checked(read_json(path)))
+            # Mini-blocks make interrupted GPU work resumable. Read their small
+            # immutable receipts concurrently; only this thread writes SQLite.
+            markers = sorted(self.directory.glob("*.done.json"))
+            with ThreadPoolExecutor(max_workers=min(8,max(1,len(markers)))) as pool:
+                for block in pool.map(lambda path:checked(read_json(path)),markers):
+                    self.register(block)
         except BaseException:
             self.close()
             raise
@@ -113,7 +118,7 @@ class ContentBlocks:
             count += len(keys)
         return count
 
-    def refs(self, texts, *, batch_size, encode_missing):
+    def refs(self, texts, *, batch_size, encode_missing, encode_block_rows=None):
         keys = [key(t) for t in texts]
         # Keep cache lookups in batches. The old implementation made two
         # Python/SQLite round trips per text (over 7,000 calls per 4,096-row
@@ -135,17 +140,29 @@ class ContentBlocks:
             return None,0
         if missing:
             ordered = sorted(missing,key=lambda k:(len(missing[k]),k))
-            values = np.asarray(self.encoder.encode([missing[k] for k in ordered],batch_size=batch_size),np.float32)
-            validate_vectors(values,len(ordered),self.encoder.dimension)
-            local = self.local / "new-vectors.npy"
-            np.save(local,values,allow_pickle=False)
-            from .artifacts import sha256_file
-            # Two producers may encounter overlapping text. Never overwrite a
-            # previously published vector file, even if batching changes bits.
-            path = self.directory / ("block-"+sha256_file(local)+".npy")
-            checksum = publish_file(local,path)
-            block = self.save_block(ordered,path,checksum)
-            known.update({k:(block["path"],block["sha256"],row) for row,k in enumerate(ordered)})
+            block_rows = encode_block_rows or len(ordered)
+            for start in range(0,len(ordered),block_rows):
+                selected = ordered[start:start+block_rows]
+                started = time.perf_counter()
+                values = np.asarray(self.encoder.encode([missing[k] for k in selected],batch_size=batch_size),np.float32)
+                encoded_seconds = time.perf_counter()-started
+                validate_vectors(values,len(selected),self.encoder.dimension)
+                local = self.local / "new-vectors.npy"
+                np.save(local,values,allow_pickle=False)
+                from .artifacts import sha256_file
+                # Two producers may encounter overlapping text. Never overwrite a
+                # previously published vector file, even if batching changes bits.
+                path = self.directory / ("block-"+sha256_file(local)+".npy")
+                checksum = publish_file(local,path)
+                block = self.save_block(selected,path,checksum)
+                known.update({k:(block["path"],block["sha256"],row) for row,k in enumerate(selected)})
+                if encode_block_rows:
+                    elapsed = time.perf_counter()-started
+                    owner = getattr(self.encoder,"encoder",self.encoder)
+                    effective_batch = min(batch_size,getattr(owner,"safe_batch_size",batch_size))
+                    print(f"{self.encoder.identity.get('model_id')} | saved mini-block {start+len(selected):,}/{len(ordered):,} new texts in current part"
+                        f" | encode {encoded_seconds:.1f}s | save/check {elapsed-encoded_seconds:.1f}s"
+                        f" | batch {effective_batch} | encode rate {len(selected)/max(encoded_seconds,1e-9):.2f} texts/s",flush=True)
         return [{"path":known[k][0],"sha256":known[k][1],"row":known[k][2]} for k in keys],len(missing)
 
 
@@ -157,6 +174,11 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
         (type(worker_id) is not int or not 0 <= worker_id < workers)) or type(batch_size) is not int or batch_size < 1
         or (max_new_parts is not None and (type(max_new_parts) is not int or max_new_parts < 0))):
         raise ValueError("Invalid content embedding worker/limits.")
+    from .qwen_execution import configure_embedding_execution
+    execution = configure_embedding_execution(encoder)
+    qwen_corpus = (encoder.identity.get("model_id") == "Qwen/Qwen3-Embedding-8B"
+        and encoder.identity.get("input_role") == "corpus")
+    encode_block_rows = 512 if qwen_corpus else None
     if selected_starts is not None:
         selected_starts = set(selected_starts)
         if (any(type(start) is not int for start in selected_starts)
@@ -173,6 +195,8 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
         atomic_json(root / "config.json",identity)
     blocks = ContentBlocks(data_root,encoder,work_dir)
     parts,new_parts,new_texts,reused_texts = [],0,0,0
+    started = time.perf_counter()
+    measured_seconds, measured_texts, measured_parts = 0.,0,0
     try:
         if seed_root is not None:
             blocks.seed(input_root,inputs,seed_root)
@@ -216,12 +240,14 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
                 if should_stop is not None and should_stop(source):
                     stopped = True
                     continue
+                part_started = time.perf_counter()
                 path = bound(input_root,source["path"])
                 verify_file(path,source["sha256"])
                 texts = pq.read_table(path,columns=["text"]).column("text").to_pylist()
                 if len(texts) != source["rows"] or any(not isinstance(t,str) or not t.strip() for t in texts):
                     raise ValueError("Invalid content embedding input.")
-                refs,count = blocks.refs(texts,batch_size=batch_size,encode_missing=encode_missing)
+                refs,count = blocks.refs(texts,batch_size=batch_size,encode_missing=encode_missing,
+                    encode_block_rows=encode_block_rows)
                 if refs is None:
                     continue
                 local = blocks.local / "mapping.parquet"
@@ -233,6 +259,22 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
                 new_parts += 1
                 new_texts += count
                 reused_texts += source["rows"]-count
+                if count:
+                    measured_seconds += time.perf_counter()-part_started
+                    measured_texts += count
+                    measured_parts += 1
+                    if qwen_corpus:
+                        rate = measured_texts/max(measured_seconds,1e-9)
+                        # Existing receipts are known, but content reuse inside
+                        # unpublished parts is unknown. This is an upper input
+                        # estimate at the measured rate, not a completion promise.
+                        remaining = sum(p["rows"] for offset,p in enumerate(inputs["parts"])
+                            if offset > index and p["start"] not in existing
+                            and (worker_id is None or offset % workers == worker_id)
+                            and (selected_starts is None or p["start"] in selected_starts))
+                        print(f"Qwen measured: {rate:.2f} new texts/s including input/save"
+                            f" | {measured_parts} new parts measured | remaining uncached-map inputs {remaining:,}"
+                            f" | estimate if all remaining inputs are new {remaining/max(rate,1e-9)/3600:.2f}h (current stage only)",flush=True)
             else:
                 continue
             parts.append(saved)
@@ -247,7 +289,10 @@ def content_embeddings(data_root,input_root,inputs,encoder,output_dir,*,work_dir
         report_name = "embeddings.json" if worker_id is None else f"worker-{worker_id}.json"
         atomic_json(root / report_name,result)
         atomic_json(root / ("profile.json" if worker_id is None else f"worker-{worker_id}-profile.json"),
-            {"new_texts":new_texts,"reused_texts":reused_texts,"new_parts":new_parts,"worker_id":worker_id,"workers":workers})
+            {"new_texts":new_texts,"reused_texts":reused_texts,"new_parts":new_parts,"worker_id":worker_id,"workers":workers,
+                "seconds_this_call":round(time.perf_counter()-started,3),"new_parts_seconds":round(measured_seconds,3),
+                "new_texts_per_second":measured_texts/max(measured_seconds,1e-9) if measured_texts else None,
+                "batch_size_requested":batch_size,"mini_block_rows":encode_block_rows,"execution":execution})
         return result
     finally:
         blocks.close()

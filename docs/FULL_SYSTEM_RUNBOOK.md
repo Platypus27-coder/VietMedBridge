@@ -59,12 +59,21 @@ chạy xong, và source/schema pass chưa chứng minh relevance.
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
 Giữ đúng `DRIVE_DATA_ROOT`, chọn Colab T4 GPU và Run all. Đã đặt sẵn
 `PREPARE_ONLY=False`, `INFERENCE_MODE="full"`, `TEAM_SIZE=1`, `TEAM_WORKER_ID=None`.
-Workflow API `full-master-plan-strong-v19-ready-resume` nâng code lock một lần;
+Workflow API `full-master-plan-strong-v20-qwen-throughput` nâng code lock một lần;
 giữ nguyên model code và cache identities. Bootstrap kiểm tra nội dung active
 candidate trước khi đọc checkpoint, tự remount một lần nếu Drive báo Errno 107.
 Nếu có data mới chờ ghép, chọn CPU và đặt `PREPARE_ONLY=True` ở Bootstrap;
 chờ `CPU_PREPARATION_COMPLETE` rồi trở về False trên GPU. Không chạy lại 02–03
 cho candidate đã hoàn tất.
+
+Qwen corpus dùng batch khởi đầu 16/32/64 theo VRAM (T4: 16), giảm khi OOM;
+reranker giữ batch 4/8/16. Generation KV cache được tắt trong lượt embedding
+không có past tokens. Model code/weights/tokenization/pooling và vector identity
+không đổi. Vectors mới được publish theo mini-block 512 đoạn để ngắt giữa part
+vẫn dùng lại phần đã lưu; map đầu vào vẫn giữ partition cũ. Dòng `saved mini-block`
+báo thời gian encode, save/check, batch thực sau OOM và texts/s. ETA sau mỗi part
+chỉ ước tính phần Qwen còn thiếu nếu toàn bộ inputs chưa có map cần encode;
+không phải ETA cả pipeline. Tăng batch chưa được đo trên GPU thật trong local tests.
 
 Catalog hiện được dựng xong trên ổ local trước, rồi lưu lên Drive thành các phần
 gzip tối đa 64 MiB dữ liệu gốc mỗi phần. `catalog.json` chỉ công bố COMPLETE sau

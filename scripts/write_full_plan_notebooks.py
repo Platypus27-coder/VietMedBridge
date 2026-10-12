@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v19-ready-resume"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v20-qwen-throughput"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -240,7 +240,7 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = (BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v19-ready-resume")
+    legacy = (BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v20-qwen-throughput")
         .replace('drive.mount("/content/drive")', 'DATA_ROOT = _vmb_mount_data_root()')
         .replace('DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")\n', '')
         .replace('DATA_ROOT.mkdir(parents=True, exist_ok=True)\n', ''))
@@ -263,6 +263,8 @@ if not PREPARE_ONLY:
     subprocess.run([sys.executable, "-c",
         "import torch; print('PyTorch:', torch.__version__, '| CUDA:', torch.cuda.is_available(), '| GPUs:', torch.cuda.device_count()); "
         "assert torch.cuda.is_available(), 'Chọn Runtime > Change runtime type > T4 GPU rồi Run all. Chưa nạp model hoặc encode corpus.'"], check=True)
+    from vietmedbridge.runtime_profile import inference_batches
+    print("Qwen embedding batch khởi đầu:", inference_batches()["embedding"], "| thiếu VRAM sẽ giảm batch và thử lại.")
 print("Notebook 04:", "CPU preparation only" if PREPARE_ONLY else "GPU full pipeline",
     "| team:", TEAM_SIZE, "| worker:", TEAM_WORKER_ID)
 '''
@@ -382,9 +384,16 @@ def main():
         Đây là phân công embedding, chưa ghép một job QLoRA thành nhiều GPU.
         Dùng tài nguyên được cấp phù hợp với quy định nền tảng.
 
-        Full architecture có chi phí thực: Qwen embedding 8B trên 100k được ngoại
-        suy ~24 giờ T4 từ mẫu 64 đoạn, chưa gồm các stage khác và không bảo đảm
-        thời gian. Thử giới hạn MAX_NEW_* nếu cần; không giả trạng thái đã chạy.
+        **Qwen throughput:** batch embedding khởi đầu 16 trên T4, 32 trên GPU
+        20–37 GiB, 64 từ 38 GiB; thiếu VRAM sẽ giảm batch và thử lại. Reranker
+        giữ batch riêng. Qwen corpus tắt KV cache phục vụ sinh token, giữ nguyên
+        model/tokenization/pooling. Nội dung mới lưu mỗi 512 đoạn, còn mapping
+        đầu vào vẫn giữ 4.096 đoạn/part; resume dùng lại cả các mini-block đã lưu
+        trong một part chưa hoàn tất. Dòng `saved mini-block` báo encode/save riêng,
+        batch sau OOM và texts/s; cuối part mới có ETA theo tốc độ thực đã đo.
+        ETA giả định inputs chưa có map đều cần encode, chỉ áp dụng stage Qwen,
+        không phải thời gian toàn pipeline hay cam kết kịp hạn. Chưa có benchmark
+        GPU thì không khẳng định mức tăng tốc. Thử giới hạn MAX_NEW_* nếu cần.
         Full pretrained chạy được trước nhãn. Fine-tune/dev cutoff chỉ chạy khi
         có labels review; adapter từ 05 được kiểm và dùng cho cả corpus lớn.
         Corpus mới giữ adapter hợp lệ nhưng ngưỡng cũ cần dev recalibration.
@@ -414,7 +423,7 @@ def main():
         tạo namespace -ft- mới. Nguồn/candidate cũ và các kết quả baseline được giữ.
 
         Với pilot: reuse verified corpus/document vectors từ cả 04 và 05. Chỉ encode
-        inputs còn thiếu. Batch Qwen tự chọn theo VRAM và giảm nếu OOM.
+        inputs còn thiếu. Batch Qwen chọn theo VRAM và giảm nếu OOM.
         Theo dõi runtime_profile.json/execution_policy.json trong thư mục run;
         mỗi embedding pass cũng ghi thời gian encode, số parts mới/đã cache.
         Model revisions của full pilot giữ nguyên.
