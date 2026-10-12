@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v15-release-audit"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v16-full-default"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -187,7 +187,7 @@ print("Code commit:",CODE_COMMIT)
 
 
 def retrieval_bootstrap():
-    settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = True  # đọc cache Drive; hỗ trợ cả cached_strong và baseline
+    settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = False  # mặc định: full architecture trên frozen corpus
 CACHED_INFERENCE_MODE = "cached_strong"  # dịch + rerank + parents; "bge_bm25_cached": bản nhanh chỉ BGE/BM25
 DOCUMENT_DENSE_ENABLED = True  # thêm BGE title/opening embeddings; False: bỏ nhánh này và ghi rõ trong báo cáo
 QWEN_DENSE_MODE = "if_complete"  # đủ cache thì dùng; "require": chờ đủ; "off": tắt nhánh Qwen dense
@@ -201,7 +201,7 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v15-release-audit")
+    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v16-full-default")
     vector_boot = '''
 import os
 if VECTOR_BACKEND == "qdrant":
@@ -227,9 +227,13 @@ def main():
         # VietMedBridge — 04: Full retrieval system trên frozen corpus
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
-        **Chạy submission trên Drive hiện có:** mặc định
-        `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `USE_HF_STORAGE=False`.
-        Mặc định `CACHED_INFERENCE_MODE="cached_strong"`: dùng BGE child cache đã đủ,
+        **Mặc định chạy full architecture:** `RUN_CACHED_BASELINE_FROM_DRIVE=False`,
+        `USE_HF_STORAGE=False`, `INFERENCE_MODE="full"`. Notebook chuẩn bị data/index
+        trên CPU trước, sau đó chạy GPU; không dừng ở nhánh BGE/BM25.
+
+        **Chế độ cache để lấy baseline sớm (tùy chọn):** đặt
+        `RUN_CACHED_BASELINE_FROM_DRIVE=True`. `CACHED_INFERENCE_MODE="cached_strong"`
+        dùng BGE child cache đã đủ,
         BM25 VI/EN/ZH, Qwen 4B dịch/expansion, BGE document dense, Qwen 8B rerank
         document và child/MaxP, source parents 512/640 và LCS dedup.
         `QWEN_DENSE_MODE="if_complete"` không chờ phần Qwen corpus còn thiếu;
@@ -261,8 +265,8 @@ def main():
         Drive. Tải ZIP và bản checkpoint ở cuối notebook trước khi ngắt phiên.
         Backup cached strong có thêm document vectors mới nên có thể vài GB.
 
-        **Quy trình full bên dưới:** đặt `RUN_CACHED_BASELINE_FROM_DRIVE=False`.
-        Lần đầu hoặc khi ghép data mới: chọn **CPU**, giữ `PREPARE_ONLY=True`, Run all.
+        **Quy trình full mặc định:** lần đầu hoặc khi ghép data mới, chọn **CPU**,
+        giữ `PREPARE_ONLY=True`, Run all.
         Chờ `CPU_PREPARATION_COMPLETE` rồi chuyển sang **GPU, T4 trở lên**,
         đặt `PREPARE_ONLY=False` để chạy embeddings/inference. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.

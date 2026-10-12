@@ -5,13 +5,16 @@ Nguồn quyết định là [master plan Stage 3](../R2AI_STAGE3_FULL_COMPETITIO
 artifact đã xác minh và những kết luận còn cần nhãn/điểm độc lập.
 [Notebook 04](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb)
 dùng `configs/retrieval_full.json` cho cả pilot và corpus lớn. Workflow API
-`full-master-plan-strong-v7-disk-full-system` nối architecture đầy đủ vào disk
+`full-master-plan-strong-v16-full-default` nối architecture đầy đủ vào disk
 catalog, vector cache theo nội dung, ba worker embedding và checkpoint giữa lượt
 search. Không cần chạy lại 02–03 cho candidate 100k đã freeze.
+Notebook 04 mặc định chạy **full architecture** sau CPU preparation; cached
+inference là lựa chọn riêng để lấy baseline sớm. Full mode chỉ được xem là
+đủ khi mọi nhánh bắt buộc có manifest hoàn tất.
 
 Hướng dẫn hiện hành: [FULL_SYSTEM_RUNBOOK.md](FULL_SYSTEM_RUNBOOK.md).
 Baseline BGE + BM25 100k trước đây đã được Sếp submit đạt **0.0081**. Các artifacts
-baseline được giữ để đối chiếu và dùng lại vectors. 04 có hai lựa chọn cached:
+baseline được giữ để đối chiếu và dùng lại vectors. 04 vẫn có hai lựa chọn cached:
 BGE/BM25 baseline và `cached_strong` nối dịch/expansion, document dense, rerank
 hai tầng, source parents 512/640. Nhánh Qwen dense được dùng khi cache đầy đủ;
 chưa đủ thì có thể defer để chạy các nhánh còn lại trên toàn bộ BGE.
