@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v18-drive-reconnect"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v19-ready-resume"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -186,12 +186,50 @@ print("Code commit:",CODE_COMMIT)
 '''
 
 
+DRIVE_PREFLIGHT = '''
+def _vmb_mount_data_root(readonly=False):
+    # Probe real file contents: an existing mount directory can still be disconnected.
+    import errno
+    from google.colab import drive
+    mountpoint = "/content/drive"
+    for attempt in range(2):
+        try:
+            drive.mount(mountpoint, force_remount=bool(attempt), readonly=readonly)
+            root = Path(DRIVE_DATA_ROOT)
+            try:
+                active_bytes = (root / "active_data_candidate.json").read_bytes()
+            except FileNotFoundError:
+                shared = sorted(Path(mountpoint, ".shortcut-targets-by-id").glob(
+                    "*/VietMedBridge/data/active_data_candidate.json"))
+                if root != Path("/content/drive/MyDrive/VietMedBridge/data") or len(shared) != 1:
+                    raise RuntimeError(f"Không thấy active candidate tại {root}. Kiểm tra đúng tài khoản Drive và DRIVE_DATA_ROOT; không tạo thư mục data rỗng.") from None
+                root = shared[0].parent
+                active_bytes = (root / "active_data_candidate.json").read_bytes()
+            active = json.loads(active_bytes)
+            print("Drive đã đọc được:", root)
+            print("Active candidate:", active.get("candidate_manifest_sha256"),
+                "| build:", active.get("build_run"))
+            return root
+        except OSError as error:
+            disconnected = error.errno in (107, errno.ENOTCONN) or "transport endpoint is not connected" in str(error).lower()
+            if not disconnected:
+                raise
+            if attempt:
+                raise RuntimeError("Drive vẫn mất kết nối sau khi gắn lại. Giữ runtime và chạy lại cell Bootstrap khi Drive truy cập được; chưa nạp model hay xóa checkpoint.") from error
+            print("Drive mất kết nối (Errno 107); tự gắn lại một lần trước khi đọc checkpoint.", flush=True)
+'''
+
+
 def retrieval_bootstrap():
-    settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = False  # mặc định: full architecture trên frozen corpus
+    settings = '''PREPARE_ONLY = False  #@param {type:"boolean"}
+INFERENCE_MODE = "full"  # mặc định chạy đủ các nhánh, dùng lại checkpoint hợp lệ
+TEAM_SIZE = 1  # một acc chạy tiếp toàn bộ phần thiếu
+TEAM_WORKER_ID = None  # coordinator: tiếp tục embeddings rồi inference và xuất submission
+RUN_CACHED_BASELINE_FROM_DRIVE = False  # mặc định: full architecture trên frozen corpus
 RUN_QWEN_CORPUS_ONLY = False  # True: tiếp tục checkpoint Qwen corpus; False: chạy hệ thống full
 CACHED_INFERENCE_MODE = "cached_strong"  # dịch + rerank + parents; "bge_bm25_cached": bản nhanh chỉ BGE/BM25
 DOCUMENT_DENSE_ENABLED = True  # thêm BGE title/opening embeddings; False: bỏ nhánh này và ghi rõ trong báo cáo
-QWEN_DENSE_MODE = "if_complete"  # đủ cache thì dùng; "require": chờ đủ; "off": tắt nhánh Qwen dense
+QWEN_DENSE_MODE = "if_complete"  # chỉ áp dụng cached_strong; chế độ full luôn yêu cầu đủ Qwen
 VECTOR_BACKEND = "faiss_ivf_sq8"  # ANN lưu theo shard; "qdrant": server; "exact": quét đầy đủ theo yêu cầu
 ANN_NPROBE = 64  # tự tăng tối đa 512 nếu recall sample < 0.95
 QDRANT_URL = ""  # chỉ điền khi VECTOR_BACKEND="qdrant"; không dùng Qdrant Python local mode cho 700k
@@ -202,7 +240,12 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v18-drive-reconnect")
+    legacy = (BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v19-ready-resume")
+        .replace('drive.mount("/content/drive")', 'DATA_ROOT = _vmb_mount_data_root()')
+        .replace('DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")\n', '')
+        .replace('DATA_ROOT.mkdir(parents=True, exist_ok=True)\n', ''))
+    cached_boot = DRIVE_CACHED_BOOT.replace('drive.mount("/content/drive", readonly=True)\nDATA_ROOT = Path(DRIVE_DATA_ROOT)',
+        'DATA_ROOT = _vmb_mount_data_root(readonly=True)')
     vector_boot = '''
 import os
 if VECTOR_BACKEND == "qdrant":
@@ -215,11 +258,19 @@ if VECTOR_BACKEND == "qdrant":
     except Exception:
         pass  # server riêng có thể không yêu cầu API key; không in token
 '''
-    return (settings + vector_boot + '\nif RUN_CACHED_BASELINE_FROM_DRIVE and USE_HF_STORAGE:\n'
+    gpu_check = '''
+if not PREPARE_ONLY:
+    subprocess.run([sys.executable, "-c",
+        "import torch; print('PyTorch:', torch.__version__, '| CUDA:', torch.cuda.is_available(), '| GPUs:', torch.cuda.device_count()); "
+        "assert torch.cuda.is_available(), 'Chọn Runtime > Change runtime type > T4 GPU rồi Run all. Chưa nạp model hoặc encode corpus.'"], check=True)
+print("Notebook 04:", "CPU preparation only" if PREPARE_ONLY else "GPU full pipeline",
+    "| team:", TEAM_SIZE, "| worker:", TEAM_WORKER_ID)
+'''
+    return (settings + '\nimport json\nfrom pathlib import Path\n' + DRIVE_PREFLIGHT + vector_boot + '\nif RUN_CACHED_BASELINE_FROM_DRIVE and USE_HF_STORAGE:\n'
         '    raise ValueError("Chọn đúng một nguồn Drive hoặc HF.")\n'
-        'if RUN_CACHED_BASELINE_FROM_DRIVE:\n' + textwrap.indent(DRIVE_CACHED_BOOT.strip(),"    ")
+        'if RUN_CACHED_BASELINE_FROM_DRIVE:\n' + textwrap.indent(cached_boot.strip(),"    ")
         + "\nelif USE_HF_STORAGE:\n" + textwrap.indent(HF_BOOT.strip(),"    ")
-        + "\nelse:\n" + textwrap.indent(legacy.strip(),"    "))
+        + "\nelse:\n" + textwrap.indent(legacy.strip(),"    ") + '\n' + gpu_check)
 
 
 def main():
@@ -229,8 +280,10 @@ def main():
 
         Plan chính: `R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`.
         **Mặc định chạy full architecture:** `RUN_CACHED_BASELINE_FROM_DRIVE=False`,
-        `USE_HF_STORAGE=False`, `INFERENCE_MODE="full"`. Notebook chuẩn bị data/index
-        trên CPU trước, sau đó chạy GPU; không dừng ở nhánh BGE/BM25.
+        `USE_HF_STORAGE=False`, `INFERENCE_MODE="full"`, `PREPARE_ONLY=False`,
+        `TEAM_SIZE=1`, `TEAM_WORKER_ID=None`. **Chọn Colab T4 GPU → Run all**
+        để tiếp tục candidate đã chuẩn bị, chạy phần thiếu rồi inference/xuất ZIP.
+        Bootstrap tự clone/cài code; không cần chèn cell sửa lỗi hoặc chọn ACTION.
 
         **Chế độ cache để lấy baseline sớm (tùy chọn):** đặt
         `RUN_CACHED_BASELINE_FROM_DRIVE=True`. `CACHED_INFERENCE_MODE="cached_strong"`
@@ -266,11 +319,12 @@ def main():
         Drive. Tải ZIP và bản checkpoint ở cuối notebook trước khi ngắt phiên.
         Backup cached strong có thêm document vectors mới nên có thể vài GB.
 
-        **Quy trình full mặc định:** lần đầu hoặc khi ghép data mới, chọn **CPU**,
-        giữ `PREPARE_ONLY=True`, Run all.
-        Chờ `CPU_PREPARATION_COMPLETE` rồi chuyển sang **GPU, T4 trở lên**,
-        đặt `PREPARE_ONLY=False` để chạy embeddings/inference. Giữ DATA_ROOT cũ;
-        không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
+        **Tiếp tục lượt hiện tại:** giữ nguyên cấu hình mặc định, chọn **GPU,
+        T4 trở lên**, Run all. Catalog CPU và vector parts hợp lệ được dùng lại;
+        không chạy lại 00–03. Các dòng `reused` là kiểm tra/dùng lại checkpoint,
+        không phải encode lại. Chỉ phần thiếu hoặc không vượt qua kiểm tra mới tính lại.
+        **Chỉ khi có data mới chờ ghép:** đặt `PREPARE_ONLY=True` ở cell Bootstrap,
+        chạy trên CPU đến `CPU_PREPARATION_COMPLETE`, rồi trở về False trên GPU.
         Trước khi nạp model, stage kiểm tra Drive đọc được active candidate.
         Nếu Drive rớt với Errno 107, thử gắn lại một lần rồi kiểm tra candidate
         vẫn giữ nguyên trước khi tiếp tục từ checkpoint. Nếu vẫn lỗi, dừng rõ
@@ -314,8 +368,9 @@ def main():
         Mỗi block vector, scored stage và query có checkpoint. Dense search lưu
         top-k giữa lượt, ngắt phiên rồi resume thay vì quét lại toàn bộ.
 
-        **Chạy một người:** sau chuẩn bị CPU, PREPARE_ONLY=False, TEAM_SIZE=1,
-        TEAM_WORKER_ID=None, Run all trên GPU.
+        **Chạy một người (đã đặt sẵn):** PREPARE_ONLY=False, TEAM_SIZE=1,
+        TEAM_WORKER_ID=None, Run all trên GPU. Cấu hình nằm ở đầu cell Bootstrap;
+        cell xử lý không ghi đè lựa chọn đó.
         **Team 3 người:** PREPARE_ONLY=False, TEAM_SIZE=3 ở cả ba người,
         TEAM_WORKER_ID lần lượt 0/1/2.
         Mỗi người chỉ encode input parts được giao, ghi vector blocks và mapping
@@ -364,13 +419,15 @@ def main():
         mỗi embedding pass cũng ghi thời gian encode, số parts mới/đã cache.
         Model revisions của full pilot giữ nguyên.
         '''),
-        md("## 1. Bootstrap, mount Drive, clone và cài dependencies — CPU"),
+        md("## 1. Bootstrap, kiểm tra Drive/GPU, clone và cài dependencies"),
         code(retrieval_bootstrap()),
         md('''
         ## 2. Full system / phần embedding được giao — CPU/GPU lần lượt
 
-        Mặc định `PREPARE_ONLY=True`: chạy trên CPU để ghép/freeze/chuẩn bị inputs
-        và catalog BM25. Dừng ở CPU_PREPARATION_COMPLETE, không nạp model weights.
+        Mặc định `PREPARE_ONLY=False`: chạy full trên một acc GPU, dùng lại catalog,
+        embeddings và các stage đã checkpoint. Chạy tiếp phần thiếu, sau đó xuất ZIP.
+        Chọn `PREPARE_ONLY=True` ở Bootstrap khi chỉ cần ghép/freeze/chuẩn bị inputs
+        và catalog BM25 trên CPU; chế độ đó dừng ở CPU_PREPARATION_COMPLETE.
         Nếu Colab ngắt sau khi ghép đủ IDs, bản DATA_VALIDATED được xác minh và
         dùng lại, không chọn/xuất union lại. union_progress.json lưu bước cuối/lỗi;
         RUNNING có thể là phiên đang chạy hoặc bị ngắt cứng, không phải chứng nhận hoàn tất.
@@ -419,10 +476,11 @@ def main():
         MAX_NEW_EMBEDDING_PARTS = None
         MAX_NEW_TRANSLATIONS = None
         MAX_NEW_QUERIES = None
-        PREPARE_ONLY = True  # CPU: ghép/freeze/inputs/BM25; GPU workers/inference: False
-        INFERENCE_MODE = "full"  # "bge_bm25_cached": submit bằng BGE đã nhập, không chờ Qwen
-        TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
-        TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
+        # Use Bootstrap settings; keep the same defaults when this cell is run alone.
+        PREPARE_ONLY = globals().get("PREPARE_ONLY", False)
+        INFERENCE_MODE = globals().get("INFERENCE_MODE", "full")
+        TEAM_SIZE = globals().get("TEAM_SIZE", 1)
+        TEAM_WORKER_ID = globals().get("TEAM_WORKER_ID", None)
         QWEN_ONLY_MODE = globals().get("RUN_QWEN_CORPUS_ONLY",False)
 
         DRIVE_CACHED_MODE = globals().get("RUN_CACHED_BASELINE_FROM_DRIVE",False)
@@ -442,7 +500,8 @@ def main():
         if INFERENCE_MODE != "full" and (TEAM_SIZE != 1 or TEAM_WORKER_ID is not None):
             raise ValueError("Cached inference dùng một coordinator: TEAM_SIZE=1, TEAM_WORKER_ID=None.")
         print("Inference mode:",INFERENCE_MODE,"| document dense:",globals().get("DOCUMENT_DENSE_ENABLED",True),
-            "| Qwen dense:",globals().get("QWEN_DENSE_MODE","if_complete"))
+            "| Qwen dense:","require" if INFERENCE_MODE == "full" else globals().get("QWEN_DENSE_MODE","if_complete"),
+            "| team:",TEAM_SIZE,"| worker:",TEAM_WORKER_ID)
 
         # Notebook 03 appends each newly frozen candidate to this Drive manifest.
         # The coordinator composes the old corpus plus new batch automatically.

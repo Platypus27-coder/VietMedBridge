@@ -54,14 +54,17 @@ Qwen hiện có. `full_plan_status.json` ghi riêng trạng thái nhánh, fine-t
 calibration, source validation và official score. Có code không có nghĩa đã
 chạy xong, và source/schema pass chưa chứng minh relevance.
 
-## Chạy ngay với candidate 100k hiện có
+## Chạy tiếp với candidate đã chuẩn bị
 
 [Mở 04 trên Colab](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
-Giữ đúng `DATA_ROOT`, chạy Bootstrap ở runtime mới. Lượt chuẩn bị chọn CPU,
-giữ `PREPARE_ONLY=True`, `TEAM_WORKER_ID=None`. Workflow API
-`full-master-plan-strong-v11-catalog-recovery` nâng code lock một lần. Không cần
-chạy lại 02–03 cho candidate `ce6987985fb015ca` đã hoàn tất.
-Chờ `CPU_PREPARATION_COMPLETE` rồi dùng GPU với `PREPARE_ONLY=False`.
+Giữ đúng `DRIVE_DATA_ROOT`, chọn Colab T4 GPU và Run all. Đã đặt sẵn
+`PREPARE_ONLY=False`, `INFERENCE_MODE="full"`, `TEAM_SIZE=1`, `TEAM_WORKER_ID=None`.
+Workflow API `full-master-plan-strong-v19-ready-resume` nâng code lock một lần;
+giữ nguyên model code và cache identities. Bootstrap kiểm tra nội dung active
+candidate trước khi đọc checkpoint, tự remount một lần nếu Drive báo Errno 107.
+Nếu có data mới chờ ghép, chọn CPU và đặt `PREPARE_ONLY=True` ở Bootstrap;
+chờ `CPU_PREPARATION_COMPLETE` rồi trở về False trên GPU. Không chạy lại 02–03
+cho candidate đã hoàn tất.
 
 Catalog hiện được dựng xong trên ổ local trước, rồi lưu lên Drive thành các phần
 gzip tối đa 64 MiB dữ liệu gốc mỗi phần. `catalog.json` chỉ công bố COMPLETE sau

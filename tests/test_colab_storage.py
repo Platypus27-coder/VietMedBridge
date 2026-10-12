@@ -1,6 +1,10 @@
 """Drive disconnects must reconnect once and retain paid-for embedding parts."""
+import ast
 import errno
+import json
 from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
@@ -135,3 +139,70 @@ def test_decorated_stage_keeps_its_arguments_and_readonly_mode(mounted):
     assert stage(root, work_dir=work, execution_mode="cached_strong") == "done"
     assert calls == [(root, work, "cached_strong")] * 2
     assert remounts == [(root, {"readonly":True})]
+
+
+@pytest.fixture
+def notebook_mount(tmp_path,monkeypatch):
+    repo=Path(__file__).resolve().parents[1]
+    notebook=read_json(repo/"notebooks/04_colab_retrieval_baseline.ipynb")
+    bootstrap=next(c["source"] for c in notebook["cells"] if c["cell_type"]=="code")
+    function=next(node for node in ast.parse(bootstrap).body if isinstance(node,ast.FunctionDef)
+        and node.name=="_vmb_mount_data_root")
+    calls=[]
+    colab=ModuleType("google.colab")
+    colab.drive=SimpleNamespace(mount=lambda *a,**kw:calls.append((a,kw)))
+    monkeypatch.setitem(sys.modules,"google.colab",colab)
+    context={"Path":Path,"json":json,"DRIVE_DATA_ROOT":str(tmp_path/"data")}
+    exec(compile(ast.Module(body=[function],type_ignores=[]),"04-bootstrap-mount","exec"),context)
+    root=Path(context["DRIVE_DATA_ROOT"])
+    atomic_json(root/"active_data_candidate.json",{"build_run":"existing","candidate_manifest_sha256":"original"})
+    return context["_vmb_mount_data_root"],root,calls
+
+
+def test_uploaded_notebook_recovers_disconnected_drive_during_bootstrap(notebook_mount,monkeypatch):
+    mount,root,calls=notebook_mount
+    original=Path.read_bytes
+    probes=[]
+    def probe(path):
+        probes.append(path)
+        if len(probes)==1:
+            raise disconnected(root)
+        return original(path)
+    monkeypatch.setattr(Path,"read_bytes",probe)
+    assert mount()==root
+    assert len(probes)==2 and calls==[
+        (("/content/drive",),{"force_remount":False,"readonly":False}),
+        (("/content/drive",),{"force_remount":True,"readonly":False})]
+
+
+def test_uploaded_notebook_stops_if_drive_stays_disconnected(notebook_mount,monkeypatch):
+    mount,root,calls=notebook_mount
+    def probe(path):
+        raise disconnected(root)
+    monkeypatch.setattr(Path,"read_bytes",probe)
+    with pytest.raises(RuntimeError,match="Drive vẫn mất kết nối"):
+        mount()
+    assert len(calls)==2
+
+
+def test_uploaded_notebook_does_not_create_empty_data_on_wrong_account(notebook_mount):
+    mount,root,calls=notebook_mount
+    (root/"active_data_candidate.json").unlink()
+    root.rmdir()
+    with pytest.raises(RuntimeError,match="Không thấy active candidate"):
+        mount()
+    assert not root.exists() and len(calls)==1
+
+
+def test_uploaded_notebook_keeps_readonly_mode_when_remounting(notebook_mount,monkeypatch):
+    mount,root,calls=notebook_mount
+    original=Path.read_bytes
+    attempts=[]
+    def probe(path):
+        attempts.append(True)
+        if len(attempts)==1:
+            raise disconnected(root)
+        return original(path)
+    monkeypatch.setattr(Path,"read_bytes",probe)
+    assert mount(readonly=True)==root
+    assert all(call[1]["readonly"] for call in calls)

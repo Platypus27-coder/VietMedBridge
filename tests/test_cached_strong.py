@@ -269,7 +269,7 @@ def test_notebook_default_cached_strong_routes_without_union_or_cpu_rebuild(prep
         "ready":{"state":"QUERIES_IN_PROGRESS","query_count":3},"status":{},"samples":[]}))
     repo = Path(__file__).resolve().parents[1]
     cell = next(c["source"] for c in read_json(repo / "notebooks/04_colab_retrieval_baseline.ipynb")["cells"]
-        if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
+        if c["cell_type"] == "code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
     context = {"DATA_ROOT":p.root,"CHECKOUT":p.checkout,"WORK_DIR":p.work,"RESULTS_ROOT":p.outputs,
         "CODE_COMMIT":"CPU-test","RUN_CACHED_BASELINE_FROM_DRIVE":storage == "drive",
         "USE_HF_STORAGE":storage == "hf","HF_STORAGE_PROFILE":"bge_submit"}

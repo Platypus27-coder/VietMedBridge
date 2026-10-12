@@ -148,8 +148,9 @@ def test_notebook_cpu_preparation_builds_reusable_catalog_without_gpu_weights(tm
         monkeypatch.setattr(runtime,name,forbidden)
     monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
     notebook = read_json(checkout / "notebooks/04_colab_retrieval_baseline.ipynb")
-    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
-    context = {"DATA_ROOT":tmp_path,"CHECKOUT":target,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test"}
+    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
+    context = {"DATA_ROOT":tmp_path,"CHECKOUT":target,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test",
+        "PREPARE_ONLY":True}
     exec(compile(cell,"04-cpu-preparation","exec"),context)
     assert context["READY"]["state"] == "CPU_PREPARATION_COMPLETE"
     report = read_json(tmp_path / "retrieval/cpu_preparation" / (frozen[1]["candidate_manifest_sha256"][:16]+".json"))
@@ -164,7 +165,7 @@ def test_notebook_qwen_only_mode_resumes_only_the_missing_corpus_embedding(tmp_p
     from vietmedbridge import full_scale_runtime as runtime, full_plan_runtime, index_inputs
     checkout=Path(__file__).resolve().parents[1]
     notebook=read_json(checkout/"notebooks/04_colab_retrieval_baseline.ipynb")
-    cell=next(c["source"] for c in notebook["cells"] if c["cell_type"]=="code" and "PREPARE_ONLY =" in c["source"])
+    cell=next(c["source"] for c in notebook["cells"] if c["cell_type"]=="code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
     calls=[]
     monkeypatch.setattr(runtime,"resume_qwen_corpus_embeddings",lambda *args,**kwargs:
         (calls.append((args,kwargs)) or {"state":"QWEN_CORPUS_CHECKPOINTED_PARTIAL",
@@ -183,6 +184,35 @@ def test_notebook_qwen_only_mode_resumes_only_the_missing_corpus_embedding(tmp_p
     assert context["RESULT"]["status"]["completed_parts"]==151
     assert context["TEAM_SIZE"]==1 and context["TEAM_WORKER_ID"] is None
     assert context["PREPARE_ONLY"] is False
+
+
+def test_notebook_default_continues_full_large_candidate_on_one_account(tmp_path,monkeypatch):
+    from vietmedbridge import full_scale_runtime as runtime, full_plan_runtime, index_inputs, scale_benchmark
+    checkout=Path(__file__).resolve().parents[1]
+    notebook=read_json(checkout/"notebooks/04_colab_retrieval_baseline.ipynb")
+    cell=next(c["source"] for c in notebook["cells"] if c["cell_type"]=="code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
+    active={"build_run":"cumulative-existing","candidate_name":"candidate-existing.json",
+        "candidate_manifest_sha256":"existing"}
+    atomic_json(tmp_path/"active_data_candidate.json",active)
+    monkeypatch.setattr(index_inputs,"read_candidate_lineage",lambda root:[active])
+    monkeypatch.setattr(scale_benchmark,"load_handoff",lambda root:(root/"processed"/active["build_run"],
+        {"counts":{"documents":630811,"children":4074577}},{}))
+    def forbidden(*args,**kwargs):
+        pytest.fail("Default ready-to-run notebook must not stop at CPU preparation or pilot inference")
+    monkeypatch.setattr(runtime,"prepare_scale_cpu_resources",forbidden)
+    monkeypatch.setattr(runtime,"resume_qwen_corpus_embeddings",forbidden)
+    monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
+    calls=[]
+    monkeypatch.setattr(runtime,"run_scale_full_pipeline",lambda *args,**kwargs:(calls.append((args,kwargs)) or {
+        "status":{"state":"COMPLETE"},"ready":{"state":"READY_FOR_MANUAL_UPLOAD","query_count":1200}}))
+    context={"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path/"work","CODE_COMMIT":"test"}
+    exec(compile(cell,"04-full-single-account","exec"),context)
+    assert len(calls)==1 and calls[0][0]==(tmp_path,checkout)
+    assert calls[0][1]["worker_id"] is None and calls[0][1]["workers"]==1
+    assert calls[0][1]["max_new_embedding_parts"] is None and calls[0][1]["max_new_queries"] is None
+    assert "execution_mode" not in calls[0][1]  # full is the runtime's default
+    assert context["PREPARE_ONLY"] is False and context["INFERENCE_MODE"]=="full"
+    assert context["READY"]["query_count"]==1200
 
 
 def test_qwen_resume_recovers_missing_runtime_lock_from_verified_partial_manifest(tmp_path,monkeypatch):

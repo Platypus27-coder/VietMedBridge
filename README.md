@@ -33,7 +33,11 @@ cho corpus pilot. Không chạy các notebook
    freeze rồi chia input embedding đã dedup trên disk. Chưa encode vector hoặc
    hoàn tất retrieval index; candidate chỉ được promote sau các gate review.
 5. **04 — Full retrieval và submission:** [mở notebook](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_retrieval_baseline.ipynb).
-   Candidate 700k có BGE đầy đủ: mặc định `CACHED_INFERENCE_MODE="cached_strong"`,
+   Mặc định chạy full trên một acc GPU: `PREPARE_ONLY=False`, `INFERENCE_MODE="full"`,
+   `TEAM_SIZE=1`, `TEAM_WORKER_ID=None`. Candidate đã chuẩn bị CPU: chọn Colab T4 GPU
+   và Run all để tiếp tục checkpoint, chạy phần thiếu rồi xuất ZIP. Bootstrap kiểm tra
+   Drive trước khi tải model và thử gắn lại một lần khi gặp Errno 107.
+   Chế độ tùy chọn `RUN_CACHED_BASELINE_FROM_DRIVE=True`, `CACHED_INFERENCE_MODE="cached_strong"`
    dùng BGE cache + dịch EN/ZH/expansion + document dense + Qwen rerank hai tầng
    + source parents 512/640. Qwen dense chỉ dùng khi cache đủ, không chặn các
    nhánh còn lại và không encode lại child corpus. Drive đọc nguồn; outputs mới

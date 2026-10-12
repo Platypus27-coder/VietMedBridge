@@ -238,10 +238,10 @@ def test_drive_notebook_routes_to_read_only_cached_inference(tmp_path,prepared,m
     checkout,_,_,_ = prepared
     notebook = read_json(REPO / "notebooks/04_colab_retrieval_baseline.ipynb")
     bootstrap = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code")
-    assert "RUN_CACHED_BASELINE_FROM_DRIVE = True" in bootstrap
+    assert "RUN_CACHED_BASELINE_FROM_DRIVE = False" in bootstrap
     assert "MIN_EXPECTED_INPUT_RECORDS = 700244" in bootstrap
-    assert 'drive.mount("/content/drive", readonly=True)' in bootstrap
-    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
+    assert '_vmb_mount_data_root(readonly=True)' in bootstrap
+    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
     def forbidden(*args,**kwargs):
         pytest.fail("Drive baseline must not enter full inference, CPU preparation or lineage composition")
     monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
@@ -348,7 +348,7 @@ def test_notebooks_are_valid_and_hf_profile_selects_cached_coordinator(tmp_path,
             if cell.cell_type == "code":
                 compile(cell.source,str(path),"exec")
     notebook = read_json(REPO / "notebooks/04_colab_retrieval_baseline.ipynb")
-    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
+    cell = next(c["source"] for c in notebook["cells"] if c["cell_type"] == "code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
     calls = []
     def forbidden(*args,**kwargs):
         pytest.fail("HF submit must not enter full inference or CPU rebuild")

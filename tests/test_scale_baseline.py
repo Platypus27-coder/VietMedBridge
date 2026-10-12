@@ -304,10 +304,7 @@ def test_notebook_cached_baseline_routes_to_cache_only_coordinator(tmp_path,froz
     from vietmedbridge import full_plan_runtime, full_scale_runtime, scale_baseline
     checkout = Path(__file__).resolve().parents[1]
     cell = next(c["source"] for c in read_json(checkout / "notebooks/04_colab_retrieval_baseline.ipynb")["cells"]
-        if c["cell_type"] == "code" and "PREPARE_ONLY =" in c["source"])
-    cell = (cell.replace("PREPARE_ONLY = True", "PREPARE_ONLY = False")
-        .replace('INFERENCE_MODE = "full"', 'INFERENCE_MODE = "bge_bm25_cached"')
-        .replace("TEAM_SIZE = 3", "TEAM_SIZE = 1"))
+        if c["cell_type"] == "code" and "from vietmedbridge.full_plan_runtime import run_full_pipeline" in c["source"])
     def forbidden(*args,**kwargs):
         pytest.fail("Cached submission must not enter full inference/CPU preparation")
     monkeypatch.setattr(full_plan_runtime,"run_full_pipeline",forbidden)
@@ -318,7 +315,8 @@ def test_notebook_cached_baseline_routes_to_cache_only_coordinator(tmp_path,froz
         calls.append((root,repo,kwargs))
         return {"ready":{"state":"READY_FOR_MANUAL_UPLOAD","query_count":1200},"status":{},"samples":[]}
     monkeypatch.setattr(scale_baseline,"run_large_baseline",cached)
-    context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test"}
+    context = {"DATA_ROOT":tmp_path,"CHECKOUT":checkout,"WORK_DIR":tmp_path / "work","CODE_COMMIT":"CPU-test",
+        "INFERENCE_MODE":"bge_bm25_cached"}
     exec(compile(cell,"04-cached-baseline-routing","exec"),context)
     assert calls == [(tmp_path,checkout,{"code_commit":"CPU-test","work_dir":tmp_path / "work",
         "reuse_content_only":True,"max_new_queries":None,
