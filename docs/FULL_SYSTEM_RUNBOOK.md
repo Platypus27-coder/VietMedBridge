@@ -61,7 +61,8 @@ Giữ đúng `DRIVE_DATA_ROOT`, chọn Colab T4 GPU và Run all. Đã đặt s�
 `PREPARE_ONLY=False`, `INFERENCE_MODE="full"`, `TEAM_SIZE=1`, `TEAM_WORKER_ID=None`.
 Workflow API `full-master-plan-strong-v20-qwen-throughput` nâng code lock một lần;
 giữ nguyên model code và cache identities. Bootstrap kiểm tra nội dung active
-candidate trước khi đọc checkpoint, tự remount một lần nếu Drive báo Errno 107.
+candidate trước khi đọc checkpoint. Nếu Drive báo Errno 107, tự flush/unmount và
+remount tối đa ba lần; mỗi lần xác minh lại đúng candidate trước khi resume.
 Nếu có data mới chờ ghép, chọn CPU và đặt `PREPARE_ONLY=True` ở Bootstrap;
 chờ `CPU_PREPARATION_COMPLETE` rồi trở về False trên GPU. Không chạy lại 02–03
 cho candidate đã hoàn tất.

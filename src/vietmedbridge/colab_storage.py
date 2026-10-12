@@ -6,6 +6,7 @@ from functools import wraps
 import hashlib
 import inspect
 from pathlib import Path
+import time
 
 from .artifacts import atomic_json, utc_now
 
@@ -36,29 +37,40 @@ def _disconnected(error, mount):
 
 def _remount(mount, *, readonly):
     from google.colab import drive
+    # A failed FUSE endpoint can survive force_remount if the old mount is
+    # still registered. Flush/unmount it first; it is already known to be
+    # disconnected, so a failure here must not block the fresh mount.
+    try:
+        drive.flush_and_unmount()
+    except Exception:
+        pass
     drive.mount(str(mount), force_remount=True, readonly=readonly)
 
 
-def run_with_drive_recovery(operation, root, work_dir, *, readonly=False):
+def run_with_drive_recovery(operation, root, work_dir, *, readonly=False, max_recoveries=1):
     """Preflight before weights; recover only ENOTCONN, never corruption or quota.
 
     The operation must publish resumable checkpoints and release resources on
-    failure. Reconnection is attempted once on the calling thread, after the
-    operation's finally blocks (including embedding verification workers) exit.
-    A changed active candidate is refused before restarting the operation.
+    failure. Recovery runs on the calling thread, after the operation's finally
+    blocks (including embedding verification workers) exit. Each attempt
+    unmounts the failed FUSE mount, remounts it, and verifies the same active
+    candidate before restarting. A changed candidate is refused.
     """
     root, work = Path(root), Path(work_dir)
+    if type(max_recoveries) is not int or max_recoveries < 0:
+        raise ValueError("max_recoveries must be a non-negative integer.")
     mount = _drive_mountpoint(root)
     if mount is None:
         return operation()
     if work.is_relative_to(mount):
         raise ValueError("Drive recovery work_dir must be on Colab local disk.")
     report_path = work / "drive_recovery" / (hashlib.sha256(str(root).encode()).hexdigest()[:16] + ".json")
-    expected, recovered = None, False
+    expected, recoveries = None, 0
 
     def report(state, error=None):
         value = {"state":state, "data_root":str(root), "readonly":readonly,
-                 "active_candidate_file_sha256":expected, "updated_at":utc_now()}
+                 "active_candidate_file_sha256":expected, "recoveries":recoveries,
+                 "updated_at":utc_now()}
         if error is not None:
             value["error"] = {"type":type(error).__name__, "message":str(error)}
         try:
@@ -69,9 +81,9 @@ def run_with_drive_recovery(operation, root, work_dir, *, readonly=False):
     def unavailable(error):
         report("DRIVE_UNAVAILABLE", error)
         return DriveUnavailableError(
-            "Drive mất kết nối (Errno 107); đã dừng stage. "
-            "Giữ runtime để giữ model cache. Chạy drive.mount('/content/drive', force_remount=True), "
-            "rồi chạy lại cell xử lý cùng DATA_ROOT/candidate. Checkpoint hợp lệ sẽ được dùng lại; "
+            f"Drive vẫn mất kết nối sau {recoveries} lần khôi phục; đã dừng stage. "
+            "Giữ runtime để giữ model cache. Xác minh Drive đọc được active_data_candidate.json rồi "
+            "chạy lại cell xử lý cùng DATA_ROOT/candidate. Checkpoint hợp lệ sẽ được dùng lại; "
             f"không tự xóa hay tạo lại dữ liệu. Diagnostic local: {report_path}")
 
     while True:
@@ -81,22 +93,25 @@ def run_with_drive_recovery(operation, root, work_dir, *, readonly=False):
                 report("CANDIDATE_CHANGED_AFTER_REMOUNT")
                 raise ValueError("Active candidate changed after Drive remount; refusing to resume on another corpus.")
             expected = current
-            if recovered:
+            if recoveries:
                 report("RESUMING_VERIFIED_CANDIDATE")
                 print("Drive reconnected; same candidate verified. Resuming from valid checkpoints.", flush=True)
             result = operation()
-            if recovered:
+            if recoveries:
                 report("RECOVERED")
             return result
         except OSError as error:
             if not _disconnected(error, mount):
                 raise
             report("DRIVE_DISCONNECTED", error)
-            if recovered:
+            if recoveries >= max_recoveries:
                 raise unavailable(error) from error
-            recovered = True
-            print("Drive disconnected (Errno 107). Reconnecting once; completed checkpoints are retained.", flush=True)
+            recoveries += 1
+            delay = min(2 ** (recoveries - 1), 8)
+            print(f"Drive disconnected (Errno 107). Recovery {recoveries}/{max_recoveries}: "
+                  f"unmount, remount, verify candidate, then resume checkpoints (wait {delay}s).", flush=True)
             try:
+                time.sleep(delay)
                 _remount(mount, readonly=readonly)
             except Exception as remount_error:
                 raise unavailable(remount_error) from remount_error
@@ -112,6 +127,7 @@ def drive_recoverable(*, root_arg, work_arg):
             arguments.apply_defaults()
             return run_with_drive_recovery(lambda:function(*args, **kwargs),
                 arguments.arguments[root_arg], arguments.arguments[work_arg],
-                readonly=arguments.arguments.get("execution_mode") == "cached_strong")
+                readonly=arguments.arguments.get("execution_mode") == "cached_strong",
+                max_recoveries=3)
         return guarded
     return decorate
