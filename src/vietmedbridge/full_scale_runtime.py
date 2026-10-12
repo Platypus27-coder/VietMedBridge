@@ -13,6 +13,7 @@ from .competition_pilot import MASTER_PLAN, bind_pilot_run, finish_pilot
 from .content_embeddings import ContentVectorParts, checked, content_embeddings, seal
 from .dataset import parquet_path
 from .catalog_storage import prepare_disk_catalog
+from .colab_storage import drive_recoverable
 from .disk_full import AdaptiveDiskCatalog, DiskStrongIndex
 from .embeddings import embed_units, embedding_matrix, unit_signature
 from .full_plan_runtime import calibration_context
@@ -71,6 +72,7 @@ def load_scale_catalog(root,checkout,work,tokenizer,*,read_only=False):
     return AdaptiveDiskCatalog(base,tokenizer,(policy.parent_short_tokens,policy.parent_long_tokens)),analyzer
 
 
+@drive_recoverable(root_arg="root",work_arg="work")
 def prepare_scale_cpu_resources(root,checkout,work):
     """Publish the disk catalog before allocating a GPU or any model weights."""
     from transformers import AutoTokenizer
@@ -145,6 +147,7 @@ def qwen_checkpoint_runtime(root,checkout):
     return runtime,previous,build,candidate,inputs,config,qwen_root,source
 
 
+@drive_recoverable(root_arg="root",work_arg="work")
 def resume_qwen_corpus_embeddings(root,checkout,work,*,max_new_parts=None):
     """Resume only the frozen corpus's Qwen dense cache on a Colab GPU.
 
@@ -333,118 +336,122 @@ def prepare_scale_resources(root,checkout,work,queries,*,catalog=None,worker_id=
         catalog,analyzer = load_scale_catalog(root,checkout,work,tokenizer)
     else:
         analyzer = catalog.base.analyzer
-    config["analyzer"] = analyzer.identity
-    resources = root / "retrieval/full_resources" / candidate["candidate_manifest_sha256"][:16] / digest_json({
-        "dense":config["dense"],"second_dense":config["second_dense"],"document_builder":"document-title-bounded-opening-v1"})[:12]
-    query_root = root / "retrieval/full_query_cache" / digest_json({"queries":queries,
-        "models":{k:config[k] for k in ("dense","second_dense","translation")},"expansion":config["expansion_enabled"],
-        "query_code":[sha256_file(Path(__file__).with_name(n)) for n in ("query_translation.py","query_expansion.py","translation_model.py")]})[:20]
-    profile = RuntimeProfile(resources / ("coordinator-profile.json" if worker_id is None else f"worker-{worker_id}-profile.json"))
-    old_baseline = root / "retrieval" / (build.name+"-bge-bm25-v1-"+candidate["candidate_manifest_sha256"][:8])
-    coordinator = worker_id is None
-    encode_missing = not coordinator or workers == 1
-    def pending(stage,report,input_parts=inputs["parts"]):
-        profile.finish(stage)
-        catalog.close()
-        return {"state":stage,"completed_parts":len(report["parts"]),"requested_parts":len(input_parts),
-            "worker_id":worker_id,"workers":workers,"resources":str(resources)}
-    print(f"Full system: worker={worker_id}, team={workers}, resources={resources}",flush=True)
-    dense = TorchDenseEncoder(config["dense"])
     try:
-        cm = content_embeddings(root,build / "index_inputs",inputs,dense,resources / "bge",work_dir=work,
-            batch_size=scale["bge_batch_size"],max_new_parts=max_new_embedding_parts,worker_id=worker_id,workers=workers,
-            encode_missing=encode_missing,seed_root=old_baseline / "corpus_embeddings",seed_sources=baseline_seed_sources(root,candidate))
-        if coordinator and cm["state"] != "COMPLETE":
-            return pending("WAITING_FOR_BGE_CORPUS_PARTS",cm)
+        config["analyzer"] = analyzer.identity
+        resources = root / "retrieval/full_resources" / candidate["candidate_manifest_sha256"][:16] / digest_json({
+            "dense":config["dense"],"second_dense":config["second_dense"],"document_builder":"document-title-bounded-opening-v1"})[:12]
+        query_root = root / "retrieval/full_query_cache" / digest_json({"queries":queries,
+            "models":{k:config[k] for k in ("dense","second_dense","translation")},"expansion":config["expansion_enabled"],
+            "query_code":[sha256_file(Path(__file__).with_name(n)) for n in ("query_translation.py","query_expansion.py","translation_model.py")]})[:20]
+        profile = RuntimeProfile(resources / ("coordinator-profile.json" if worker_id is None else f"worker-{worker_id}-profile.json"))
+        old_baseline = root / "retrieval" / (build.name+"-bge-bm25-v1-"+candidate["candidate_manifest_sha256"][:8])
+        coordinator = worker_id is None
+        encode_missing = not coordinator or workers == 1
+        def pending(stage,report,input_parts=inputs["parts"]):
+            profile.finish(stage)
+            catalog.close()
+            return {"state":stage,"completed_parts":len(report["parts"]),"requested_parts":len(input_parts),
+                "worker_id":worker_id,"workers":workers,"resources":str(resources)}
+        print(f"Full system: worker={worker_id}, team={workers}, resources={resources}",flush=True)
+        dense = TorchDenseEncoder(config["dense"])
+        try:
+            cm = content_embeddings(root,build / "index_inputs",inputs,dense,resources / "bge",work_dir=work,
+                batch_size=scale["bge_batch_size"],max_new_parts=max_new_embedding_parts,worker_id=worker_id,workers=workers,
+                encode_missing=encode_missing,seed_root=old_baseline / "corpus_embeddings",seed_sources=baseline_seed_sources(root,candidate))
+            if coordinator and cm["state"] != "COMPLETE":
+                return pending("WAITING_FOR_BGE_CORPUS_PARTS",cm)
+            if coordinator:
+                query_units = [{"id":q["id"],"text":q["query"]} for q in queries]
+                previous_query_manifest = old_baseline / "query_embeddings/embeddings.json"
+                available = None
+                if previous_query_manifest.exists() and read_json(previous_query_manifest).get("units_sha256") == unit_signature(query_units):
+                    available = reuse_bge_cache(old_baseline / "query_embeddings",query_units,config["dense"],part_size=256)
+                if available is not None:
+                    qv,qm = available
+                    if qm["encoder"] != cm["encoder"]:
+                        raise ValueError("BGE corpus/query encoder identity mismatch.")
+                else:
+                    qm = embed_units(query_units,dense,query_root / "bge",work_dir=work,**config["embedding"])
+                    qv = embedding_matrix(query_root / "bge",qm)
+                di = _document_inputs(catalog,tokenizer,resources / "document_inputs",config["dense"]["max_length"])
+                dm = content_embeddings(root,resources / "document_inputs",di,dense,resources / "document_dense",work_dir=work,
+                    batch_size=scale["bge_batch_size"],max_new_parts=max_new_embedding_parts)
+                if dm["state"] != "COMPLETE":
+                    return pending("DOCUMENT_EMBEDDINGS_IN_PROGRESS",dm,di["parts"])
+        finally:
+            dense.close()
         if coordinator:
-            query_units = [{"id":q["id"],"text":q["query"]} for q in queries]
-            previous_query_manifest = old_baseline / "query_embeddings/embeddings.json"
-            available = None
-            if previous_query_manifest.exists() and read_json(previous_query_manifest).get("units_sha256") == unit_signature(query_units):
-                available = reuse_bge_cache(old_baseline / "query_embeddings",query_units,config["dense"],part_size=256)
-            if available is not None:
-                qv,qm = available
-                if qm["encoder"] != cm["encoder"]:
-                    raise ValueError("BGE corpus/query encoder identity mismatch.")
-            else:
-                qm = embed_units(query_units,dense,query_root / "bge",work_dir=work,**config["embedding"])
-                qv = embedding_matrix(query_root / "bge",qm)
-            di = _document_inputs(catalog,tokenizer,resources / "document_inputs",config["dense"]["max_length"])
-            dm = content_embeddings(root,resources / "document_inputs",di,dense,resources / "document_dense",work_dir=work,
-                batch_size=scale["bge_batch_size"],max_new_parts=max_new_embedding_parts)
-            if dm["state"] != "COMPLETE":
-                return pending("DOCUMENT_EMBEDDINGS_IN_PROGRESS",dm,di["parts"])
-    finally:
-        dense.close()
-    if coordinator:
-        with profile.stage("query_translation_expansion"):
-            translations_cached = cached_translations(queries,config["translation"],query_root / "translations")
-            translations = translations_cached[0] if translations_cached else None
-            expansions = cached_expansions(queries,translations,config["translation"],query_root / "expansions",
-                enabled=config["expansion_enabled"]) if translations is not None else None
-            if expansions is None:
-                translator = TorchQueryTranslator(config["translation"])
-                try:
-                    if translations is None:
-                        translations,report = translate_queries(queries,translator,query_root / "translations",max_new_queries=max_new_translations)
-                        if report["state"] != "COMPLETE":
-                            profile.finish("TRANSLATIONS_IN_PROGRESS")
-                            catalog.close()
-                            return {"state":"TRANSLATIONS_IN_PROGRESS","report":report}
-                    expansions = expand_queries(queries,translator,query_root / "expansions",translations=translations,enabled=config["expansion_enabled"])
-                finally:
-                    translator.close()
-        aux = auxiliary_units(queries,expansions)
-    # Keep corpus and query encoding in the same model load. All other large
-    # models have been released before Qwen is allocated on the GPU.
-    encoder = TorchQwenEncoder(config["second_dense"])
-    try:
-        with profile.stage("qwen_corpus_embeddings"):
-            sm = content_embeddings(root,build / "index_inputs",inputs,encoder.for_role("corpus"),resources / "qwen",work_dir=work,
-                batch_size=inference_batches()["embedding"],max_new_parts=max_new_embedding_parts,worker_id=worker_id,workers=workers,
-                encode_missing=encode_missing)
-        if not coordinator:
-            return pending("CORPUS_WORKER_CHECKPOINTED",sm)
-        if sm["state"] != "COMPLETE":
-            return pending("WAITING_FOR_QWEN_CORPUS_PARTS",sm)
-        with profile.stage("qwen_query_embeddings"):
-            am = embed_units(aux,encoder.for_role("query"),query_root / "qwen",work_dir=work,
-                **(config["qwen_embedding"] | {"batch_size":inference_batches()["embedding"]}))
-            av = embedding_matrix(query_root / "qwen",am)
-            if {k:v for k,v in am["encoder"].items() if k != "input_role"} != {k:v for k,v in sm["encoder"].items() if k != "input_role"}:
-                raise ValueError("Qwen corpus/query encoder identity mismatch.")
-    finally:
-        encoder.close()
-    primary,secondary,documents = (_store(root,resources / name,m,work,scale["local_vector_cache_bytes_per_branch"])
-        for name,m in (("bge",cm),("qwen",sm),("document_dense",dm)))
-    searches = []
-    try:
-        for name,store,vectors in (("bge",primary,qv),("qwen",secondary,av),("documents",documents,qv)):
-            with profile.stage("dense_search_"+name):
-                searches.append(search_vectors(store,vectors,root / "retrieval/vector_search" / digest_json({"candidate":candidate["candidate_manifest_sha256"],"queries":queries,"aux":aux})[:16] / name,
-                    k=scale["dense_top_k"] if name != "documents" else config["retrieval"]["doc_candidate_k"],work_dir=work,device=search_device,
-                    options=vector_options,index_root=root / "retrieval/vector_indexes" / vector_options["backend"],reference_search=search_parts))
-    except VectorIndexPending as pending:
+            with profile.stage("query_translation_expansion"):
+                translations_cached = cached_translations(queries,config["translation"],query_root / "translations")
+                translations = translations_cached[0] if translations_cached else None
+                expansions = cached_expansions(queries,translations,config["translation"],query_root / "expansions",
+                    enabled=config["expansion_enabled"]) if translations is not None else None
+                if expansions is None:
+                    translator = TorchQueryTranslator(config["translation"])
+                    try:
+                        if translations is None:
+                            translations,report = translate_queries(queries,translator,query_root / "translations",max_new_queries=max_new_translations)
+                            if report["state"] != "COMPLETE":
+                                profile.finish("TRANSLATIONS_IN_PROGRESS")
+                                catalog.close()
+                                return {"state":"TRANSLATIONS_IN_PROGRESS","report":report}
+                        expansions = expand_queries(queries,translator,query_root / "expansions",translations=translations,enabled=config["expansion_enabled"])
+                    finally:
+                        translator.close()
+            aux = auxiliary_units(queries,expansions)
+        # Keep corpus and query encoding in the same model load. All other large
+        # models have been released before Qwen is allocated on the GPU.
+        encoder = TorchQwenEncoder(config["second_dense"])
+        try:
+            with profile.stage("qwen_corpus_embeddings"):
+                sm = content_embeddings(root,build / "index_inputs",inputs,encoder.for_role("corpus"),resources / "qwen",work_dir=work,
+                    batch_size=inference_batches()["embedding"],max_new_parts=max_new_embedding_parts,worker_id=worker_id,workers=workers,
+                    encode_missing=encode_missing)
+            if not coordinator:
+                return pending("CORPUS_WORKER_CHECKPOINTED",sm)
+            if sm["state"] != "COMPLETE":
+                return pending("WAITING_FOR_QWEN_CORPUS_PARTS",sm)
+            with profile.stage("qwen_query_embeddings"):
+                am = embed_units(aux,encoder.for_role("query"),query_root / "qwen",work_dir=work,
+                    **(config["qwen_embedding"] | {"batch_size":inference_batches()["embedding"]}))
+                av = embedding_matrix(query_root / "qwen",am)
+                if {k:v for k,v in am["encoder"].items() if k != "input_role"} != {k:v for k,v in sm["encoder"].items() if k != "input_role"}:
+                    raise ValueError("Qwen corpus/query encoder identity mismatch.")
+        finally:
+            encoder.close()
+        primary,secondary,documents = (_store(root,resources / name,m,work,scale["local_vector_cache_bytes_per_branch"])
+            for name,m in (("bge",cm),("qwen",sm),("document_dense",dm)))
+        searches = []
+        try:
+            for name,store,vectors in (("bge",primary,qv),("qwen",secondary,av),("documents",documents,qv)):
+                with profile.stage("dense_search_"+name):
+                    searches.append(search_vectors(store,vectors,root / "retrieval/vector_search" / digest_json({"candidate":candidate["candidate_manifest_sha256"],"queries":queries,"aux":aux})[:16] / name,
+                        k=scale["dense_top_k"] if name != "documents" else config["retrieval"]["doc_candidate_k"],work_dir=work,device=search_device,
+                        options=vector_options,index_root=root / "retrieval/vector_indexes" / vector_options["backend"],reference_search=search_parts))
+        except VectorIndexPending as pending:
+            catalog.close()
+            profile.finish(pending.report["state"])
+            return pending.report | {"resources":str(resources)}
+        ps,ss,ds = searches
+        primary_search = {q["query"]:(ps[0][i],ps[1][i]) for i,q in enumerate(queries)}
+        secondary_search = {u["id"]:(ss[0][i],ss[1][i]) for i,u in enumerate(aux)}
+        document_search = {q["query"]:(ds[0][i],ds[1][i]) for i,q in enumerate(queries)}
+        document_ids = [int(u) for p in di["parts"] for u in pq.read_table(resources / "document_inputs" / p["path"],columns=["id"]).column("id").to_pylist()]
+        identity = {"catalog":catalog.identity,"primary":cm["manifest_sha256"],"secondary":sm["manifest_sha256"],
+            "document_dense":dm["manifest_sha256"],"auxiliary":am["manifest_sha256"],"expansions":digest_json(expansions),
+            "searches":[s[2]["manifest_sha256"] for s in searches],"scale":scale,"analyzer":analyzer.identity,
+            "code_sha256":sha256_file(Path(__file__).with_name("disk_full.py"))}
+        manifest = seal(identity | {"signature":digest_json(identity)})
+        index = DiskStrongIndex(catalog,primary,secondary,qv,{u["id"]:v for u,v in zip(aux,av,strict=True)},queries,expansions,
+            primary_search,secondary_search,document_search,document_ids,tokenizer,manifest)
+        profile.finish("FULL_RESOURCES_READY")
+        return {"state":"FULL_RESOURCES_READY","index":index,"vectors":qv,"query_manifest":qm,"translations":translations,
+            "config":config,"budget":model_budget_report(config,registry),"registry":registry,"resources":str(resources),
+            "vector_search_reports":[{"backend":s[2]["backend"],"index_manifest_sha256":s[2].get("index"),
+                "quality":s[2].get("quality"),"exact_candidate_rescoring":s[2].get("exact_candidate_rescoring",False)} for s in searches]}
+    except BaseException:
         catalog.close()
-        profile.finish(pending.report["state"])
-        return pending.report | {"resources":str(resources)}
-    ps,ss,ds = searches
-    primary_search = {q["query"]:(ps[0][i],ps[1][i]) for i,q in enumerate(queries)}
-    secondary_search = {u["id"]:(ss[0][i],ss[1][i]) for i,u in enumerate(aux)}
-    document_search = {q["query"]:(ds[0][i],ds[1][i]) for i,q in enumerate(queries)}
-    document_ids = [int(u) for p in di["parts"] for u in pq.read_table(resources / "document_inputs" / p["path"],columns=["id"]).column("id").to_pylist()]
-    identity = {"catalog":catalog.identity,"primary":cm["manifest_sha256"],"secondary":sm["manifest_sha256"],
-        "document_dense":dm["manifest_sha256"],"auxiliary":am["manifest_sha256"],"expansions":digest_json(expansions),
-        "searches":[s[2]["manifest_sha256"] for s in searches],"scale":scale,"analyzer":analyzer.identity,
-        "code_sha256":sha256_file(Path(__file__).with_name("disk_full.py"))}
-    manifest = seal(identity | {"signature":digest_json(identity)})
-    index = DiskStrongIndex(catalog,primary,secondary,qv,{u["id"]:v for u,v in zip(aux,av,strict=True)},queries,expansions,
-        primary_search,secondary_search,document_search,document_ids,tokenizer,manifest)
-    profile.finish("FULL_RESOURCES_READY")
-    return {"state":"FULL_RESOURCES_READY","index":index,"vectors":qv,"query_manifest":qm,"translations":translations,
-        "config":config,"budget":model_budget_report(config,registry),"registry":registry,"resources":str(resources),
-        "vector_search_reports":[{"backend":s[2]["backend"],"index_manifest_sha256":s[2].get("index"),
-            "quality":s[2].get("quality"),"exact_candidate_rescoring":s[2].get("exact_candidate_rescoring",False)} for s in searches]}
+        raise
 
 
 def scale_adapter(root,catalog,queries,config):
@@ -474,6 +481,7 @@ def scale_adapter(root,catalog,queries,config):
     return document | {"applies_to_current_corpus":exact},path / "selected_adapter"
 
 
+@drive_recoverable(root_arg="data_root",work_arg="work_dir")
 def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=None,workers=1,
                             max_new_embedding_parts=None,max_new_translations=None,max_new_queries=None,
                             execution_mode="full",output_root=None,second_dense_mode="if_complete",
@@ -540,7 +548,9 @@ def run_scale_full_pipeline(data_root,checkout,*,code_commit,work_dir,worker_id=
             "candidate_search":"bounded full BGE child search, translated lexical and enabled dense branches",
             "supervised_stage":"SELECTED_ADAPTER_LOADED" if adapter else "WAITING_FOR_REVIEWED_LABELS_AND_TRAINING",
             "index":index.manifest,"resources":prepared["resources"]}
-        if records:
+        # The relevance/source audit requires exact coverage. A checkpointed
+        # partial query batch is resumable, not a complete submission to audit.
+        if records and report["state"] == "COMPLETE":
             reference_path = root / "labels/retrieval_reference.json"
             reference_labels = read_json(reference_path) if reference_path.is_file() else None
             if reference_labels is not None and reference_labels.get("reviewed") is not True:

@@ -45,8 +45,12 @@ class ContentBlocks:
         self.local = Path(self.temporary.__enter__())
         self.con = sqlite3.connect(self.local / "lookup.sqlite")
         self.con.execute("CREATE TABLE vectors(key TEXT PRIMARY KEY,path TEXT,sha TEXT,row INTEGER)")
-        for path in sorted(self.directory.glob("*.done.json")):
-            self.register(checked(read_json(path)))
+        try:
+            for path in sorted(self.directory.glob("*.done.json")):
+                self.register(checked(read_json(path)))
+        except BaseException:
+            self.close()
+            raise
 
     def close(self):
         self.con.close()

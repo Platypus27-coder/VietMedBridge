@@ -88,7 +88,7 @@ if embedding_runtime_lock.exists():
     importlib.invalidate_caches()
 PIPELINE_CONFIG = json.loads((CHECKOUT / "configs/data_pipeline.json").read_text())
 atomic_json(DATA_ROOT / "retrieval_code_lock.json",{"repo_url":REPO_URL,"git_commit":CODE_COMMIT,
-    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v17-batched-cache-lookups"})
+    "pipeline_api":PIPELINE_API_VERSION,"workflow_api":"full-master-plan-strong-v18-drive-reconnect"})
 atomic_json(DATA_ROOT / "retrieval_runtime.json",runtime_versions())
 _VMB_IMPORTED_COMMIT = CODE_COMMIT
 print("HF snapshot:",HF_STAGED["snapshot"],"| revision:",HF_STAGED["revision"])
@@ -188,6 +188,7 @@ print("Code commit:",CODE_COMMIT)
 
 def retrieval_bootstrap():
     settings = '''RUN_CACHED_BASELINE_FROM_DRIVE = False  # mặc định: full architecture trên frozen corpus
+RUN_QWEN_CORPUS_ONLY = False  # True: tiếp tục checkpoint Qwen corpus; False: chạy hệ thống full
 CACHED_INFERENCE_MODE = "cached_strong"  # dịch + rerank + parents; "bge_bm25_cached": bản nhanh chỉ BGE/BM25
 DOCUMENT_DENSE_ENABLED = True  # thêm BGE title/opening embeddings; False: bỏ nhánh này và ghi rõ trong báo cáo
 QWEN_DENSE_MODE = "if_complete"  # đủ cache thì dùng; "require": chờ đủ; "off": tắt nhánh Qwen dense
@@ -201,7 +202,7 @@ HF_STORAGE_REPO = "platypus123/biobridgeir-checkpoints"
 HF_STORAGE_PROFILE = "bge_submit"  # chỉ tải metadata/catalog/BGE để lấy điểm trước; "all": toàn snapshot
 HF_STORAGE_REVISION = None  # có thể khóa full commit SHA đã nhận từ notebook chuyển storage
 '''
-    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v17-batched-cache-lookups")
+    legacy = BOOT.replace("full-master-plan-strong-v3-per-model-15b","full-master-plan-strong-v18-drive-reconnect")
     vector_boot = '''
 import os
 if VECTOR_BACKEND == "qdrant":
@@ -270,6 +271,12 @@ def main():
         Chờ `CPU_PREPARATION_COMPLETE` rồi chuyển sang **GPU, T4 trở lên**,
         đặt `PREPARE_ONLY=False` để chạy embeddings/inference. Giữ DATA_ROOT cũ;
         không chạy lại 00–03 và không chọn ACTION. Bootstrap tự clone/cài package.
+        Trước khi nạp model, stage kiểm tra Drive đọc được active candidate.
+        Nếu Drive rớt với Errno 107, thử gắn lại một lần rồi kiểm tra candidate
+        vẫn giữ nguyên trước khi tiếp tục từ checkpoint. Nếu vẫn lỗi, dừng rõ
+        DRIVE_UNAVAILABLE; giữ runtime, gắn lại Drive và chạy lại cell xử lý.
+        Model cache trong /content vẫn giữ khi chỉ remount Drive. Checkpoint
+        có hash hợp lệ được dùng lại; phần chưa công bố có thể phải tính lại.
 
         **Nộp baseline ngay sau khi nhập BGE từ Kaggle:** chọn GPU, đặt
         Trong chế độ Drive cached chỉ đổi `CACHED_INFERENCE_MODE="bge_bm25_cached"`.
@@ -397,7 +404,7 @@ def main():
         import json
         from vietmedbridge.full_plan_runtime import run_full_pipeline
         from vietmedbridge.scale_benchmark import load_handoff
-        from vietmedbridge.full_scale_runtime import run_scale_full_pipeline, prepare_scale_cpu_resources
+        from vietmedbridge.full_scale_runtime import run_scale_full_pipeline, prepare_scale_cpu_resources, resume_qwen_corpus_embeddings
         from vietmedbridge.scale_baseline import run_large_baseline
         from vietmedbridge.artifacts import read_json, digest_json
         from vietmedbridge.index_inputs import read_candidate_lineage
@@ -416,12 +423,18 @@ def main():
         INFERENCE_MODE = "full"  # "bge_bm25_cached": submit bằng BGE đã nhập, không chờ Qwen
         TEAM_SIZE = 3  # team hiện có 3 người; đặt 1 nếu chạy một mình
         TEAM_WORKER_ID = None  # None: tổng hợp/full inference; thành viên: 0, 1 hoặc 2
+        QWEN_ONLY_MODE = globals().get("RUN_QWEN_CORPUS_ONLY",False)
 
         DRIVE_CACHED_MODE = globals().get("RUN_CACHED_BASELINE_FROM_DRIVE",False)
         CACHED_STORAGE_MODE = DRIVE_CACHED_MODE or (globals().get("USE_HF_STORAGE") and HF_STORAGE_PROFILE == "bge_submit")
         if CACHED_STORAGE_MODE:
             PREPARE_ONLY = False
             INFERENCE_MODE = globals().get("CACHED_INFERENCE_MODE","cached_strong")
+            TEAM_SIZE, TEAM_WORKER_ID = 1, None
+        if QWEN_ONLY_MODE:
+            if CACHED_STORAGE_MODE:
+                raise ValueError("Qwen-only resume dùng nguồn Drive full, không dùng cached/HF bge_submit mode.")
+            PREPARE_ONLY = False
             TEAM_SIZE, TEAM_WORKER_ID = 1, None
 
         if INFERENCE_MODE not in ("full", "bge_bm25_cached", "cached_strong"):
@@ -433,7 +446,7 @@ def main():
 
         # Notebook 03 appends each newly frozen candidate to this Drive manifest.
         # The coordinator composes the old corpus plus new batch automatically.
-        LINEAGE_SOURCES = [] if INFERENCE_MODE != "full" else read_candidate_lineage(DATA_ROOT)
+        LINEAGE_SOURCES = [] if QWEN_ONLY_MODE or INFERENCE_MODE != "full" else read_candidate_lineage(DATA_ROOT)
         if PREPARE_ONLY and TEAM_WORKER_ID is not None:
             raise ValueError("Chuẩn bị CPU dùng TEAM_WORKER_ID=None; GPU workers đặt PREPARE_ONLY=False.")
         if len(LINEAGE_SOURCES) > 1:
@@ -467,7 +480,12 @@ def main():
             LARGE_CANDIDATE = (candidate["counts"]["documents"] > limits["max_documents"]
                 or candidate["counts"]["children"] > limits["max_children"])
             RUN_NAME = BUILD_RUN + "-full-plan-v1"
-        if PREPARE_ONLY:
+        if QWEN_ONLY_MODE:
+            status = resume_qwen_corpus_embeddings(DATA_ROOT,CHECKOUT,WORK_DIR)
+            RESULT = {"status":status,"ready":{"state":status["state"],"query_count":0},
+                "samples":[],"diagnostics_path":status.get("checkpoint","")}
+            READY = RESULT["ready"]
+        elif PREPARE_ONLY:
             status = prepare_scale_cpu_resources(DATA_ROOT, CHECKOUT, WORK_DIR) if LARGE_CANDIDATE else {
                 "state":"CPU_PREPARATION_COMPLETE", "build_run":BUILD_RUN,
                 "scope":"Frozen pilot inputs ready; set PREPARE_ONLY=False on GPU for inference"}
@@ -546,6 +564,9 @@ def main():
         if READY["state"] == "CPU_PREPARATION_COMPLETE":
             print("Chuẩn bị CPU hoàn tất. Chuyển runtime GPU, đặt PREPARE_ONLY=False.")
             print("Team 3 người: TEAM_SIZE=3, TEAM_WORKER_ID=0/1/2; coordinator sau đó dùng None.")
+        elif READY["state"] in ("QWEN_CORPUS_COMPLETE","QWEN_CORPUS_CHECKPOINTED_PARTIAL"):
+            print("Qwen corpus checkpoint:",READY["state"])
+            print("Đủ Qwen: đặt RUN_QWEN_CORPUS_ONLY=False, PREPARE_ONLY=False để chạy full inference.")
         elif READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200:
             print("Đã lưu checkpoint:", READY)
             print("Run all lại cùng cấu hình để hoàn tất trước download.")
