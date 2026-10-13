@@ -41,7 +41,9 @@ def main():
         Dataset continuation mới khóa một tài khoản và hai GPU. Không Add Input
         dataset cũ đã khóa hai tài khoản; Colab CPU xuất dataset mới từ checkpoint Drive.
         `RUNTIME_PLATFORM="auto"` nhận diện runtime đang chạy, không dựa vào thư mục
-        `/kaggle/input`. Có thể chọn rõ `"colab"` hoặc `"kaggle"` tại đầu cell 1.
+        `/kaggle/input`. Marker host Colab thật được kiểm tra trước; nếu không có,
+        biến môi trường phiên Kaggle ưu tiên hơn package/shell Colab có sẵn trong image.
+        Có thể chọn rõ `"colab"` hoặc `"kaggle"` tại đầu cell 1.
         Runtime GPU được khóa riêng, không lấy bản PyTorch CPU của máy xuất gói.
         Gói cũ khóa `+cpu` và chưa có seed vectors được chuyển sang CUDA ngay tại
         ổ tạm Kaggle, giữ nguyên input/checksum/commit/team. Không upload lại dataset.
@@ -93,12 +95,15 @@ def main():
                 raise ValueError('RUNTIME_PLATFORM phải là "auto", "colab" hoặc "kaggle".')
             if requested != "auto":
                 return requested
-            # A downloaded dataset may create /kaggle/input outside Kaggle.
-            shell_module = type(get_ipython()).__module__
-            if shell_module.startswith("google.colab") or os.environ.get("COLAB_RELEASE_TAG"):
+            # Colab packages/shells may also be present in a Kaggle image.
+            # A real Colab mount requires this host marker (google.colab.drive).
+            if Path("/var/colab/hostname").is_file():
                 return "colab"
             if os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
                 return "kaggle"
+            shell_module = type(get_ipython()).__module__
+            if shell_module.startswith("google.colab") or os.environ.get("COLAB_RELEASE_TAG"):
+                return "colab"
             raise RuntimeError('Không nhận diện được runtime. Đặt RUNTIME_PLATFORM="colab" hoặc "kaggle" ở đầu cell 1.')
 
         IS_KAGGLE = resolve_runtime_platform(RUNTIME_PLATFORM) == "kaggle"

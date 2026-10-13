@@ -11,7 +11,7 @@ import pytest
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks/04_kaggle_embedding_worker.ipynb"
 
 
-def bootstrap_platform(environ, shell_module, requested="auto"):
+def bootstrap_platform(environ, shell_module, requested="auto", *, colab_host=False):
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     source = next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code")
     tree = ast.parse(source)
@@ -28,6 +28,9 @@ def bootstrap_platform(environ, shell_module, requested="auto"):
         prefix.append(node)
 
     class RuntimePath(PurePosixPath):
+        def is_file(self):
+            return colab_host and str(self) == "/var/colab/hostname"
+
         def is_dir(self):
             # Reproduce an existing /kaggle/input on a Colab runtime.
             return str(self) == "/kaggle/input"
@@ -53,13 +56,22 @@ def bootstrap_platform(environ, shell_module, requested="auto"):
 @pytest.mark.parametrize("environ,shell_module,expected", [
     ({}, "google.colab._shell", False),
     ({"COLAB_RELEASE_TAG": "release-colab"}, "ipykernel.zmqshell", False),
-    ({"KAGGLE_KERNEL_RUN_TYPE": "Interactive"}, "google.colab._shell", False),
-    ({"COLAB_RELEASE_TAG": "release-colab", "KAGGLE_KERNEL_RUN_TYPE": "Batch"}, "ipykernel.zmqshell", False),
+    ({"KAGGLE_KERNEL_RUN_TYPE": "Interactive"}, "google.colab._shell", True),
+    ({"COLAB_RELEASE_TAG": "release-colab", "KAGGLE_KERNEL_RUN_TYPE": "Batch"}, "ipykernel.zmqshell", True),
     ({"KAGGLE_KERNEL_RUN_TYPE": "Interactive"}, "ipykernel.zmqshell", True),
     ({"KAGGLE_KERNEL_RUN_TYPE": "Batch"}, "ipykernel.zmqshell", True),
 ])
 def test_detects_active_runtime_even_with_kaggle_input_directory(environ, shell_module, expected):
     assert bootstrap_platform(environ, shell_module) is expected
+
+
+@pytest.mark.parametrize("environ", [
+    {},
+    {"KAGGLE_KERNEL_RUN_TYPE": "Batch"},
+    {"COLAB_RELEASE_TAG": "release-colab", "KAGGLE_KERNEL_RUN_TYPE": "Interactive"},
+])
+def test_real_colab_host_takes_priority_over_leftover_kaggle_environment(environ):
+    assert bootstrap_platform(environ, "ipykernel.zmqshell", colab_host=True) is False
 
 
 @pytest.mark.parametrize("requested,expected", [("colab", False), ("kaggle", True)])
