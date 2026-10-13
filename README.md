@@ -58,12 +58,15 @@ cho corpus pilot. Không chạy các notebook
    Checkpoint vector, giữa lượt dense search, scored stage và từng query.
    Đủ 1.200 queries và source/schema hợp lệ thì xuất submission ZIP.
    Xem [hướng dẫn chạy hệ thống và phân công ba người](docs/FULL_SYSTEM_RUNBOOK.md).
-   Muốn chạy một phiên **Kaggle T4 x2** rồi tiếp tục Colab: dùng
+   Muốn chạy **hai tài khoản Kaggle, mỗi tài khoản T4 x2** rồi tiếp tục Colab: dùng
    [notebook chuyển embedding](notebooks/04_kaggle_embedding_worker.ipynb) và
    [hướng dẫn Colab → Kaggle → Colab](docs/KAGGLE_HANDOFF.md). Username lấy từ
    Secrets của người chạy; checkpoint nhập về dùng trực tiếp trong 04 chính.
-   Với checkpoint 700k hiện tại, đặt `KAGGLE_ACCOUNTS=1`,
-   `KAGGLE_ACCOUNT_ID=0`, `GPUS_PER_ACCOUNT=2`. Notebook chuyển tiếp từ
+   Notebook xuất gói mặc định `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`.
+   Hai bản đã cấu hình sẵn: [tài khoản 0](notebooks/kaggle/04_embedding_account_0.ipynb)
+   và [tài khoản 1](notebooks/kaggle/04_embedding_account_1.ipynb).
+   Cả hai Add Input cùng continuation dataset mới khóa hai tài khoản.
+   Notebook chuyển tiếp từ
    checkpoint Drive, bỏ qua BGE đã hoàn tất và chạy phần Qwen còn thiếu theo lượt.
    Khi Drive đầy, dùng [utility chuyển storage](notebooks/tools/drive_hf_storage.ipynb)
    trên Colab CPU, rồi bật `USE_HF_STORAGE=True` trong 04 để chạy baseline từ

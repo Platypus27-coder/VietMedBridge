@@ -1,7 +1,9 @@
 # Notebook 04: Colab CPU → Kaggle T4 x2 → Colab
 
 Notebook hỗ trợ: [`04_kaggle_embedding_worker.ipynb`](../notebooks/04_kaggle_embedding_worker.ipynb).
-Cùng một file nhận biết môi trường, không gắn username. Luồng 00–05 chính giữ nguyên.
+File này xuất/nhập checkpoint trên Colab CPU, không gắn username. Luồng 00–05 chính giữ nguyên.
+Hai bản Kaggle đã cấu hình sẵn: [tài khoản 0](../notebooks/kaggle/04_embedding_account_0.ipynb)
+và [tài khoản 1](../notebooks/kaggle/04_embedding_account_1.ipynb).
 
 ## 1. Hoàn tất CPU trước
 
@@ -19,14 +21,15 @@ Mở notebook hỗ trợ trên Colab CPU. Trong cell 1:
 DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")
 RUNTIME_PLATFORM = "auto"
 KAGGLE_NOTEBOOK_OUTPUT = ""
-KAGGLE_ACCOUNTS = 1
+KAGGLE_ACCOUNTS = 2
 KAGGLE_ACCOUNT_ID = 0
 GPUS_PER_ACCOUNT = 2
 SESSION_HOURS = 10.0
 ```
 
-Notebook nhận diện runtime Colab/Kaggle bằng shell và biến môi trường, không
-dựa vào sự tồn tại của `/kaggle/input`. Nếu dùng runtime đặc biệt hoặc bản cũ
+Notebook kiểm marker host Colab thật trước, sau đó ưu tiên biến phiên Kaggle
+hơn shell/package Colab có sẵn trong image; không dựa vào sự tồn tại của
+`/kaggle/input`. Nếu dùng runtime đặc biệt hoặc bản cũ
 báo `Add Input` ngay trên Colab, đặt `RUNTIME_PLATFORM="colab"` trong bản mới;
 trên Kaggle giữ `"auto"` hoặc chọn `"kaggle"`. Dòng `Platform:` được in trước
 khi notebook tìm dataset hoặc mount Drive.
@@ -70,26 +73,32 @@ khi thay notebook. Muốn đóng tab mà vẫn chạy thì dùng **Save Version 
 Run All**. Bootstrap phải in torch CUDA, `CUDA available: True` và `GPUs: 2`;
 mỗi GPU còn thực hiện phép tính nhỏ để kiểm CUDA kernel trước khi nạp weights.
 
-Một người xuất dataset continuation mới và chạy trên một tài khoản Kaggle
-với hai GPU. Username của người xuất lấy tự động từ Secret; không đưa API key
-vào notebook. Dataset cũ khóa hai tài khoản không thể dùng trực tiếp với cấu
-hình một tài khoản; Colab tạo job mới chỉ đổi phân công worker và tái sử dụng
+Một người xuất dataset continuation mới rồi cấp quyền đọc dataset cho thành viên
+chạy tài khoản thứ hai. Username của người xuất lấy tự động từ Secret; không đưa
+API key vào notebook. Dataset cũ khóa một tài khoản không thể dùng trực tiếp với
+cấu hình hai tài khoản; Colab tạo job mới chỉ đổi phân công worker và tái sử dụng
 checkpoint vector trên Drive.
 
-Gói mới khóa `KAGGLE_ACCOUNTS=1`, `GPUS_PER_ACCOUNT=2`. Giữ account ID 0 trên
-Kaggle. Bước này dùng lại input đã chuẩn bị, không chạy lại crawl/chunk/freeze.
+Gói mới khóa `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`. Tài khoản thứ nhất dùng
+ID 0, tài khoản thứ hai ID 1. Bước này dùng lại input đã chuẩn bị, không chạy lại
+crawl/chunk/freeze. Dừng các phiên dùng phân công cũ trước khi chuyển team; nếu
+đã có Outputs lưu thành công, nhập Outputs đó vào Drive trước khi xuất gói mới.
+Vector chỉ còn trong runtime đã bị dừng và chưa lưu Outputs không được tính là checkpoint có thể dùng lại.
 
-## 3. Chạy một tài khoản Kaggle với hai GPU
+## 3. Chạy hai tài khoản Kaggle với bốn GPU
 
-1. Tạo Kaggle notebook, giữ Private và import file notebook hỗ trợ.
-2. **Add Input** private dataset vừa xuất. Chỉ thêm một input job VietMedBridge.
-3. Bật **Internet**, chọn accelerator **GPU T4 x2**. Giữ
-   `KAGGLE_ACCOUNTS=1`, `KAGGLE_ACCOUNT_ID=0`, `GPUS_PER_ACCOUNT=2` ở cell 1.
+1. Tài khoản thứ nhất import `notebooks/kaggle/04_embedding_account_0.ipynb`;
+   tài khoản thứ hai import `notebooks/kaggle/04_embedding_account_1.ipynb`. Giữ Private.
+2. Cả hai **Add Input** cùng private continuation dataset vừa xuất, đã khóa team hai tài khoản.
+   Chủ dataset cần cấp quyền đọc cho tài khoản thứ hai; gỡ job/plan cũ khỏi Input.
+3. Mỗi tài khoản bật **Internet**, chọn accelerator **GPU T4 x2**. Hai bản đã đặt
+   `RUNTIME_PLATFORM="kaggle"`, `KAGGLE_ACCOUNTS=2`, `GPUS_PER_ACCOUNT=2`;
+   account ID lần lượt là 0 và 1. Chỉ cần giữ nguyên cấu hình sẵn.
 4. Chọn **Save Version → Save & Run All** để chạy phiên nền từ đầu.
 5. Khi version hoàn tất, kiểm tra có Outputs `vmb_checkpoints/result-manifest.json`.
 
-Một tài khoản chạy worker 0–1 trên hai GPU. Part thứ `i` thuộc worker `i % 2`,
-nên toàn bộ phần còn thiếu được chia đủ một lần và không giao trùng. Số GPU
+Tài khoản 0 chạy worker 0–1; tài khoản 1 chạy worker 2–3. Part thứ `i` thuộc
+worker `i % 4`. Các part trong plan được chia đủ một lần và không giao trùng. Số GPU
 được kiểm trước khi copy input
 và nạp model; chọn sai accelerator sẽ dừng, không tự giảm thành một GPU.
 
@@ -145,19 +154,19 @@ Giới hạn 18 GB tính cả các checkpoint mang theo, riêng cho từng phiê
 
 Sau khi nhập checkpoint, bản notebook mới tự xuất một **continuation dataset**
 nếu `corpus_embeddings_complete=false`. Dataset giữ nguyên model/runtime,
-candidate và input checksums, đổi team của job sang một tài khoản/hai GPU;
+candidate và input checksums, đổi team của job sang hai tài khoản, mỗi tài khoản hai GPU;
 thêm `continuation-plan.json` khóa commit của worker
 đã hỗ trợ chạy tiếp. Commit mới chỉ thay đổi phần điều phối; cả hai file encoder
 phải có đúng hash của job cũ trước khi được dùng.
 
 Plan được lập từ map checkpoints đã kiểm trên Drive, gồm phần đã hoàn tất và
-phần được giao trong lượt tới. Một tài khoản được giao tối đa khoảng 16 GB vector
-và metadata ước tính, để chừa khoảng trống trong ngân sách Outputs 18 GB.
+phần được giao trong lượt tới. Mỗi tài khoản được giao tối đa khoảng 16 GB vector
+và metadata ước tính (32 GB cho hai tài khoản), để chừa khoảng trống trong ngân sách Outputs 18 GB mỗi tài khoản.
 `minimum_rounds_by_capacity` chỉ tính dung lượng; tốc độ GPU và thời hạn phiên có
 thể làm số lượt thực tế lớn hơn. Không hứa đủ toàn bộ corpus trong một phiên.
 
 Trên Kaggle, dùng **notebook hỗ trợ bản mới**, bỏ input dataset cũ,
-Add Input **chỉ continuation dataset mới nhất**, giữ account ID 0 và T4 x2.
+Add Input **chỉ continuation dataset mới nhất**, dùng hai bản cố định account ID 0/1 và T4 x2.
 Không gắn Outputs cũ trong chế độ này: vector cũ đã nằm trên Drive. Worker bỏ qua
 những part đã hoàn tất, không nạp BGE khi nhánh đó đã đủ; Outputs chỉ chứa part
 mới. Nhập chúng về cùng Drive rồi lập plan tiếp theo nếu còn thiếu.
@@ -172,7 +181,8 @@ của cả BGE và Qwen mới chốt đủ embedding corpus.
 Ví dụ đã xác nhận trong log ngày 11/10: BGE 937/937, Qwen 151/937. Còn
 3.218.991 văn bản Qwen, khoảng 52,7 GB vector float32, chưa tính metadata.
 Một Outputs có ngân sách 18 GB mỗi phiên không thể chứa hết phần này cùng lúc;
-cần ít nhất bốn lượt theo dung lượng, có checkpoint giữa các lượt. Không
+cần ít nhất bốn lượt theo dung lượng với một tài khoản, hoặc ít nhất hai lượt
+với hai tài khoản (16 GB mỗi tài khoản mỗi lượt), có checkpoint giữa các lượt. Không
 crawl/chunk hoặc tính lại BGE đã hoàn tất. Một tài khoản giảm thao tác phối
 hợp, nhưng có ít GPU chạy đồng thời hơn cách dùng hai tài khoản.
 
@@ -181,14 +191,14 @@ hợp, nhưng có ít GPU chạy đồng thời hơn cách dùng hai tài khoả
 Sau khi Kaggle đã dừng, mở notebook hỗ trợ trên Colab CPU và điền:
 
 ```python
-KAGGLE_NOTEBOOK_OUTPUT = "owner/notebook"
+KAGGLE_NOTEBOOK_OUTPUT = "owner0/notebook0,owner1/notebook1"
 ```
 
 Có thể dùng `username/notebook-slug/version` để lấy đúng version; một handle
 đơn lấy phiên mới nhất. `version` là số Version hiển thị trên Kaggle (ví dụ
 `/2`), không phải `scriptVersionId` trong URL. Chọn một version chứa checkpoint
 cho mỗi account ID; nếu vừa Save một bản mới không có Outputs, phải chọn lại
-đúng bản đã chạy. Với lượt cũ của hai tài khoản, nhập hai handles cách nhau
+đúng bản đã chạy. Với hai tài khoản, nhập hai handles cách nhau
 dấu phẩy; người tải phải có quyền đọc cả hai Outputs. Nếu không dùng chung
 quyền đọc, mỗi thành viên nhập Outputs của mình bằng Secret riêng, **lần lượt**
 vào cùng DATA_ROOT. Run all: notebook dùng

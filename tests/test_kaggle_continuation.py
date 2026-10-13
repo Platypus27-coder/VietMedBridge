@@ -112,6 +112,48 @@ def test_two_account_checkpoint_continues_on_one_account_without_reencoding(tmp_
     assert FakeEncoder.calls == inputs["input_count"] - before["qwen"]["input_rows"]
 
 
+def test_one_account_checkpoint_switches_back_to_four_gpus_without_duplicate_work(tmp_path, partial):
+    original, _, inputs = partial
+    one_dir, _ = export_continuation(tmp_path, REPO, tmp_path / "one", original,
+                                    worker_code_commit="c" * 40, accounts=1, gpu_count=2)
+    one_job = read_json(one_dir / "job.json")
+    before = embedding_coverage(tmp_path, one_job)
+    directory, plan = export_continuation(tmp_path, REPO, tmp_path / "two", one_job,
+                                         worker_code_commit="c" * 40, accounts=2, gpu_count=2)
+    job = read_json(directory / "job.json")
+    assert job["team"] == {"accounts": 2, "gpu_count": 2}
+    for field in ("candidate", "inputs", "runtime", "model_code", "config", "resources"):
+        assert job[field] == one_job[field]
+    assert not plan["scheduled"]["bge"]
+    scheduled = set(plan["scheduled"]["qwen"])
+    seen = set()
+    FakeEncoder.calls = 0
+    def qwen_only(spec):
+        assert spec["model_id"] != "BAAI/bge-m3"
+        return FakeEncoder(spec)
+    for account_id in range(2):
+        scratch, output = tmp_path / f"s{account_id}", tmp_path / f"o{account_id}"
+        hydrate_job(directory, scratch, REPO)
+        assignment = kaggle_assignment(accounts=2, account_id=account_id, gpu_count=2)
+        assert assignment["worker_ids"] == [2 * account_id, 2 * account_id + 1]
+        atomic_json(output / "assignment.json", assignment)
+        shutil.copyfile(directory / "continuation-plan.json", output / "continuation-plan.json")
+        for worker_id in assignment["worker_ids"]:
+            run_worker(directory, scratch, output, REPO, worker_id=worker_id, workers=4,
+                       deadline=time.time() + 60, encoder_factory=qwen_only)
+        result = finalize_result(output, job, processes=[0, 0], inputs=inputs)
+        for entry in result["receipts"]:
+            receipt = read_json(output / entry["path"])
+            assert receipt["family"] == "qwen"
+            start = receipt["map"]["start"]
+            assert start in scheduled and start not in seen
+            seen.add(start)
+        report = install_result(output, tmp_path, REPO, update_lock=False)
+    assert seen == scheduled
+    assert report["corpus_embeddings_complete"]
+    assert FakeEncoder.calls == inputs["input_count"] - before["qwen"]["input_rows"]
+
+
 def test_continuation_rejects_wrong_job_invalid_selection_and_broken_drive_map(tmp_path, partial):
     job, _, inputs = partial
     directory, plan = export_continuation(tmp_path, REPO, tmp_path / "continuation", job, worker_code_commit="c" * 40)

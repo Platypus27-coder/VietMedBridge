@@ -7,7 +7,7 @@ from write_notebooks import code, md, save
 
 def main():
     cuda_runtime = json.loads((Path(__file__).resolve().parents[1] / "configs/kaggle_runtime.json").read_text())
-    save("04_kaggle_embedding_worker.ipynb", [
+    cells = [
         md('''
         # 04 — Chuyển embedding sang Kaggle, rồi nhập lại Drive
 
@@ -21,25 +21,34 @@ def main():
            thêm Colab Secret `KAGGLE_JSON`: nội dung file `kaggle.json` lấy từ
            Kaggle Settings → API → Legacy API Credentials. Bật quyền notebook đọc
            Secret. Username tự lấy từ Secret của người chạy; không gửi token vào chat.
-        2. **Kaggle:** import notebook này, giữ Private, Add Input dataset vừa xuất, bật Internet
-           và GPU **T4 x2**, rồi **Save Version → Save & Run All**. Mặc định một tài
-           khoản chạy cả hai GPU: `KAGGLE_ACCOUNTS=1`, `KAGGLE_ACCOUNT_ID=0`,
-           `GPUS_PER_ACCOUNT=2`. Notebook tự gán hai worker 0–1.
+        2. **Kaggle:** hai thành viên dùng chung dataset vừa xuất, mỗi người bật Internet
+           và GPU **T4 x2**, rồi **Save Version → Save & Run All**. Đã có hai bản
+           cấu hình sẵn trong folder `notebooks/kaggle`:
+           `04_embedding_account_0.ipynb` dùng worker 0–1;
+           `04_embedding_account_1.ipynb` dùng worker 2–3.
+           Chủ dataset cấp quyền đọc cho tài khoản thứ hai. Không chia sẻ API key.
+           Nếu dùng chính notebook này trên Kaggle, đặt `KAGGLE_ACCOUNT_ID=0`
+           ở tài khoản thứ nhất, `1` ở tài khoản thứ hai; giữ `KAGGLE_ACCOUNTS=2`.
         3. **Colab CPU:** sau khi Kaggle version hoàn tất và có Outputs, điền
-           `KAGGLE_NOTEBOOK_OUTPUT="owner/notebook"`, Run all. Nếu nhập lượt cũ
-           của hai tài khoản, ghi cả hai notebook, cách nhau dấu phẩy. Notebook
+           `KAGGLE_NOTEBOOK_OUTPUT="owner0/notebook0,owner1/notebook1"`, Run all.
+           Ghi cả hai notebook, cách nhau dấu phẩy. Notebook
            kiểm trạng thái/manifest của Outputs trước khi tải vector, rồi kiểm
            checksum, model, source text và từng vector row trước khi nhập Drive.
            Nếu còn thiếu, tự xuất một dataset tiếp tục chỉ giao phần thiếu từ checkpoint
-           Drive và chuyển sang một tài khoản; dùng dataset đó cho lượt Kaggle kế tiếp.
+           Drive với cùng cấu hình hai tài khoản; dùng dataset đó cho lượt Kaggle kế tiếp.
            Khi cả BGE và Qwen đủ,
            mới tiếp tục notebook 04 chính trên Colab GPU.
 
         Người nào cũng chạy được bằng Secret tài khoản của mình và quyền đọc Drive.
         Nếu dùng private dataset/output của người khác, chủ sở hữu cần cấp quyền
         truy cập trên Kaggle. Không chia sẻ API key cho nhau.
-        Dataset continuation mới khóa một tài khoản và hai GPU. Không Add Input
-        dataset cũ đã khóa hai tài khoản; Colab CPU xuất dataset mới từ checkpoint Drive.
+        Dataset continuation mới khóa hai tài khoản, mỗi tài khoản hai GPU.
+        Khi chuyển từ gói một tài khoản, chạy notebook này trên Colab CPU để xuất
+        dataset mới từ checkpoint Drive trước khi mở hai bản Kaggle. Chỉ đổi
+        ACCOUNT_ID không đổi được team đã khóa trong dataset cũ.
+        Nếu phiên cũ vừa bị dừng, chỉ những part đã có trên Drive hoặc trong
+        Outputs đã lưu thành công mới dùng tiếp được. Nhập Outputs đó trước khi
+        xuất gói mới; gói mới không biết những vector chỉ còn trong runtime cũ.
         `RUNTIME_PLATFORM="auto"` nhận diện runtime đang chạy, không dựa vào thư mục
         `/kaggle/input`. Marker host Colab thật được kiểm tra trước; nếu không có,
         biến môi trường phiên Kaggle ưu tiên hơn package/shell Colab có sẵn trong image.
@@ -55,7 +64,11 @@ def main():
         chưa phải toàn bộ 700k đã embedding và chưa xuất submission. Giữ các model
         BGE-M3 + Qwen3-Embedding-8B đúng config của hệ thống, không đổi model cho nhanh.
         Chỉ các đoạn thiếu được encode; query LLM/reranker chạy ở coordinator sau.
-        Một tài khoản giảm thao tác phối hợp nhưng không tăng tổng tốc độ GPU.
+        Hai tài khoản có bốn worker độc lập, mỗi GPU giữ một model và encode
+        phần riêng; không ghép model qua mạng. Batch tự chọn theo VRAM và giảm
+        khi OOM. Chia việc không đổi model, chiều vector hoặc chunk đang dùng.
+        Ngân sách xuất gói là 16 GB mỗi tài khoản mỗi lượt (32 GB cho hai tài khoản);
+        thời gian GPU thực tế có thể khiến lượt đó chỉ hoàn thành một phần.
         Giới hạn output buộc lưu Outputs và nhập Drive sau mỗi lượt, rồi xuất
         dataset continuation mới cho lượt sau.
 
@@ -82,9 +95,9 @@ def main():
 
         SESSION_STARTED = globals().get("SESSION_STARTED", time.time())
         DATA_ROOT = Path("/content/drive/MyDrive/VietMedBridge/data")
-        KAGGLE_NOTEBOOK_OUTPUT = ""  # Nhập về Drive: owner/notebook (lượt cũ hai acc: hai handles)
-        KAGGLE_ACCOUNTS = 1  # Một tài khoản dùng cả hai GPU
-        KAGGLE_ACCOUNT_ID = 0
+        KAGGLE_NOTEBOOK_OUTPUT = ""  # Nhập về Drive: owner0/notebook0,owner1/notebook1
+        KAGGLE_ACCOUNTS = 2  # Hai tài khoản, mỗi tài khoản T4 x2
+        KAGGLE_ACCOUNT_ID = 0  # Kaggle: tài khoản thứ nhất 0, tài khoản thứ hai 1
         GPUS_PER_ACCOUNT = 2  # Chọn T4 x2
         SESSION_HOURS = 10.0
         RUNTIME_PLATFORM = "auto"  # "auto", "colab" hoặc "kaggle"
@@ -138,7 +151,7 @@ def main():
             if JOB_HEADER.get("repo_url") != REPO_URL or not re.fullmatch(r"[0-9a-f]{40}", JOB_HEADER.get("code_commit", "")):
                 raise ValueError("Job chưa khóa đúng repo/commit.")
             if JOB_HEADER.get("team") != {"accounts": KAGGLE_ACCOUNTS, "gpu_count": GPUS_PER_ACCOUNT}:
-                raise ValueError("Số tài khoản/GPU không khớp input chung. Xuất gói bằng notebook mới trên Colab CPU với cùng cấu hình team.")
+                raise ValueError(f"Dataset khóa team={JOB_HEADER.get('team')}; notebook yêu cầu accounts={KAGGLE_ACCOUNTS}, gpu_count={GPUS_PER_ACCOUNT}. Chạy notebook 04_kaggle_embedding_worker trên Colab CPU để xuất continuation mới với đúng team; hai tài khoản Add Input cùng dataset mới.")
             reference = JOB_HEADER["code_commit"]
             continuation_header = JOB_DIR / "continuation-plan.json"
             if continuation_header.is_file():
@@ -393,10 +406,45 @@ def main():
                     raise ValueError("Uploaded Kaggle job differs; do not run it.")
                 atomic_json(pointer, {"dataset_handle": handle, "job": job["manifest_sha256"], "code_commit": CODE_COMMIT})
                 print("Private dataset đã kiểm:", "https://www.kaggle.com/datasets/" + handle)
-                print("Cấu hình Kaggle:", job["team"], "| KAGGLE_ACCOUNT_ID=0.")
+                print("Cấu hình Kaggle:", job["team"], "| tài khoản thứ nhất KAGGLE_ACCOUNT_ID=0; tài khoản thứ hai =1.")
                 print("Kaggle: import notebook này → Add Input dataset trên → Internet ON → T4 x2 → Save Version / Save & Run All.")
         '''),
-    ])
+    ]
+    save("04_kaggle_embedding_worker.ipynb", cells)
+    # The two GPU presets share every worker cell with the transfer notebook.
+    # Only configuration, headings and cell IDs differ; keep execution in one source.
+    for account_id in range(2):
+        preset = json.loads(json.dumps(cells))
+        preset[0] = md(f'''
+        # 04 — Kaggle embedding: tài khoản {account_id} / 2
+
+        Bản này cấu hình sẵn **Kaggle**, **hai tài khoản**, mỗi tài khoản **T4 x2**.
+        Tài khoản này dùng worker {account_id * 2} và {account_id * 2 + 1}.
+
+        1. Chạy `04_kaggle_embedding_worker.ipynb` mới trên Colab CPU để xuất
+           dataset continuation khóa `accounts=2, gpu_count=2` từ checkpoint Drive.
+        2. Hai tài khoản Add Input **cùng dataset continuation mới nhất**.
+           Gỡ dataset job/plan cũ khỏi Input. Chủ dataset cấp quyền đọc cho người thứ hai.
+        3. Bật **Internet**, chọn **T4 x2**, giữ nguyên cấu hình sẵn bên dưới.
+        4. Chọn **Save Version → Save & Run All**. Có thể tắt máy khi phiên đang Running.
+        5. Sau khi hai version lưu Outputs thành công, nhập cả hai link notebook
+           bằng notebook Colab CPU để hợp nhất checkpoint và xuất lượt tiếp theo nếu còn thiếu.
+
+        Chỉ encode part còn thiếu theo plan; BGE hoàn tất sẽ được bỏ qua.
+        Mỗi lượt giới hạn khoảng 16 GB kết quả mới mỗi tài khoản; kết thúc lượt
+        chưa đồng nghĩa toàn bộ corpus đã đủ vector. Xem coverage khi nhập Drive.
+        ''')
+        for cell in preset:
+            if cell["cell_type"] == "code":
+                cell["source"] = cell["source"].replace(
+                    'KAGGLE_ACCOUNT_ID = 0  # Kaggle: tài khoản thứ nhất 0, tài khoản thứ hai 1',
+                    f'KAGGLE_ACCOUNT_ID = {account_id}  # Đã gán cho tài khoản này')
+                cell["source"] = cell["source"].replace(
+                    'RUNTIME_PLATFORM = "auto"  # "auto", "colab" hoặc "kaggle"',
+                    'RUNTIME_PLATFORM = "kaggle"  # Bản chạy GPU trên Kaggle')
+        preset[1] = md("## 1. Khởi tạo Kaggle — đã cố định tài khoản và hai GPU")
+        preset[3] = md("## 2. Chạy phần embedding được giao và lưu checkpoint")
+        save(f"kaggle/04_embedding_account_{account_id}.ipynb", preset)
 
 
 if __name__ == "__main__":

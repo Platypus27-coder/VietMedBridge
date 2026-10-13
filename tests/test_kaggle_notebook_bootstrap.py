@@ -11,8 +11,8 @@ import pytest
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks/04_kaggle_embedding_worker.ipynb"
 
 
-def bootstrap_platform(environ, shell_module, requested="auto", *, colab_host=False):
-    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+def bootstrap_platform(environ, shell_module, requested="auto", *, colab_host=False, notebook_path=NOTEBOOK):
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
     source = next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code")
     tree = ast.parse(source)
     prefix = []
@@ -21,7 +21,7 @@ def bootstrap_platform(environ, shell_module, requested="auto", *, colab_host=Fa
             isinstance(target, ast.Name) and target.id == "CHECKOUT" for target in node.targets
         ):
             break
-        if isinstance(node, ast.Assign) and any(
+        if requested is not None and isinstance(node, ast.Assign) and any(
             isinstance(target, ast.Name) and target.id == "RUNTIME_PLATFORM" for target in node.targets
         ):
             node.value = ast.Constant(requested)
@@ -87,3 +87,21 @@ def test_directory_alone_does_not_classify_unknown_runtime_as_kaggle():
 def test_invalid_platform_stops_before_network_or_mount():
     with pytest.raises(ValueError, match="RUNTIME_PLATFORM"):
         bootstrap_platform({}, "custom.shell", "typo")
+
+
+@pytest.mark.parametrize("account_id", [0, 1])
+def test_prefilled_two_account_notebooks_choose_kaggle_and_distinct_workers(account_id):
+    from vietmedbridge.portable_embeddings import kaggle_assignment
+    preset = NOTEBOOK.parent / f"kaggle/04_embedding_account_{account_id}.ipynb"
+    # No Kaggle environment hints: the shipped preset must still avoid Drive mounting.
+    assert bootstrap_platform({}, "google.colab._shell", None, notebook_path=preset) is True
+    cells = json.loads(preset.read_text(encoding="utf-8"))["cells"]
+    tree = ast.parse(next(cell["source"] for cell in cells if cell["cell_type"] == "code"))
+    values = {node.targets[0].id: ast.literal_eval(node.value) for node in tree.body
+              if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+              and node.targets[0].id in {"KAGGLE_ACCOUNTS", "KAGGLE_ACCOUNT_ID", "GPUS_PER_ACCOUNT"}}
+    assignment = kaggle_assignment(accounts=values["KAGGLE_ACCOUNTS"],
+                                  account_id=values["KAGGLE_ACCOUNT_ID"],
+                                  gpu_count=values["GPUS_PER_ACCOUNT"])
+    assert assignment["workers"] == 4
+    assert assignment["worker_ids"] == [account_id * 2, account_id * 2 + 1]
