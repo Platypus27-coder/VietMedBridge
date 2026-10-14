@@ -29,6 +29,20 @@ def disconnected(root):
     return OSError(107, "Transport endpoint is not connected", str(root / "checkpoint.json"))
 
 
+def test_cached_submission_checkpoints_on_drive_require_writable_remount(tmp_path,monkeypatch):
+    calls = []
+    monkeypatch.setattr(storage,"run_with_drive_recovery",
+        lambda operation,root,work,**kwargs:(calls.append(kwargs),operation())[1])
+    @storage.drive_recoverable(root_arg="data_root",work_arg="work_dir")
+    def run(data_root,work_dir,execution_mode="cached_strong",output_root=None):
+        return "ok"
+    assert run(Path('/content/drive/MyDrive/project/data'),tmp_path,
+               output_root=Path('/content/drive/MyDrive/project/submission_runs')) == 'ok'
+    assert calls[-1]['readonly'] is False
+    run(Path('/content/drive/MyDrive/project/data'),tmp_path,output_root=tmp_path / 'local-results')
+    assert calls[-1]['readonly'] is True
+
+
 def test_resume_after_disconnect_does_not_reencode_published_content(mounted, monkeypatch):
     root, work, remounts = mounted
     input_dir, output = root / "inputs", root / "vectors"

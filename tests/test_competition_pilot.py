@@ -106,6 +106,11 @@ def test_notebook_defaults_run_all_and_download_only_verified_zip():
         assert f"{variable} = None" in source
     assert "from vietmedbridge.full_plan_runtime import run_full_pipeline" in source
     assert "run_full_pipeline(" in source
-    assert 'verify_file(READY["zip_path"], READY["zip_sha256"])' in cells[-1]
+    # Optional checkpoint backup cells may follow the submission download cell.
+    downloads = [cell for cell in cells if 'files.download(READY["zip_path"])' in cell]
+    assert len(downloads) == 1
+    download = downloads[0]
+    assert 'READY["state"] != "READY_FOR_MANUAL_UPLOAD" or READY["query_count"] != 1200' in download
+    assert download.index('verify_file(READY["zip_path"], READY["zip_sha256"])') < download.index('files.download(READY["zip_path"])')
     assert "QUERIES[:25]" not in source
     assert "max_new_queries=25" not in source

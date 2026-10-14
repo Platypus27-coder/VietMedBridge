@@ -4,6 +4,14 @@ Chuẩn bị dữ liệu cho truy hồi y sinh đa ngôn ngữ ViBioMIR. Phần 
 thập dữ liệu chạy trên Google Colab; snapshot, checkpoint và Parquet đầu ra lưu
 trong Google Drive hoặc snapshot Hugging Face Private.
 
+**Lượt nộp hiện tại, giữ toàn bộ URL cũ:** mở
+[04_colab_submit_available_data.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_submit_available_data.ipynb).
+Chạy CPU để ghép các build đã xử lý và chuẩn bị catalog, sau đó đổi sang GPU và Run all cùng notebook.
+Notebook dùng lại cache, lưu ZIP BGE/BM25 trước rồi tiếp tục bản có dịch + document dense + Qwen rerank;
+mọi checkpoint và ZIP mới lưu bền trên Drive. Qwen child dense chưa đủ được báo thiếu rõ ràng.
+Theo yêu cầu của Sếp, không lọc URL bị BTC loại trong bản dataset mới; lượt này kiểm ID theo snapshot nguồn cũ.
+Xem [hướng dẫn nộp từ dữ liệu hiện có](docs/SUBMIT_AVAILABLE_DATA.md).
+
 ## Quy trình Colab đã chốt
 
 Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).

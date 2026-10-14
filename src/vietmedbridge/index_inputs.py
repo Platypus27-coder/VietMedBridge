@@ -23,7 +23,8 @@ def _part_path(root, relative):
     return path
 
 
-def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None, part_size=4096):
+def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None, part_size=4096,
+                         checkpoint_root=None):
     if type(part_size) is not int or part_size < 1:
         raise ValueError("Invalid input part size.")
     root = Path(build_dir).resolve()
@@ -36,7 +37,9 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
         raise ValueError("Complete and freeze every imported input shard first.")
     if candidate["golden"]["tokenizer"] != read_json(root / "config.json")["tokenizer"]:
         raise ValueError("Index input tokenizer contract mismatch.")
-    target = root / "index_inputs"
+    # Source spans may be staged locally while each model-input part is
+    # durably checkpointed on Drive. The candidate contract stays unchanged.
+    target = Path(checkpoint_root) if checkpoint_root is not None else root / "index_inputs"
     target.mkdir(parents=True,exist_ok=True)
     policy = {"candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
         "tokenizer":candidate["golden"]["tokenizer"],"builder":BUILDER_VERSION,

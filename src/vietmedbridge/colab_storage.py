@@ -125,9 +125,12 @@ def drive_recoverable(*, root_arg, work_arg):
         def guarded(*args, **kwargs):
             arguments = signature.bind(*args, **kwargs)
             arguments.apply_defaults()
+            output_root = arguments.arguments.get("output_root")
+            readonly_mount = (arguments.arguments.get("execution_mode") == "cached_strong"
+                              and (output_root is None or _drive_mountpoint(output_root) is None))
             return run_with_drive_recovery(lambda:function(*args, **kwargs),
                 arguments.arguments[root_arg], arguments.arguments[work_arg],
-                readonly=arguments.arguments.get("execution_mode") == "cached_strong",
+                readonly=readonly_mount,
                 max_recoveries=3)
         return guarded
     return decorate
