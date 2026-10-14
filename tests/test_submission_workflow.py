@@ -18,7 +18,7 @@ from vietmedbridge import submission_workflow as workflow
 from vietmedbridge.artifacts import atomic_json, code_fingerprint, digest_json, read_json, sha256_file
 
 
-def setup_workflow(p, monkeypatch):
+def configure_workflow(p, monkeypatch):
     from vietmedbridge import chunks, golden, full_scale_runtime, qwen_models
     snapshot = read_json(p.root / "raw/snapshot.json")
     snapshot["revision"] = "original-old-snapshot"
@@ -33,12 +33,58 @@ def setup_workflow(p, monkeypatch):
     monkeypatch.setattr(workflow,"sha256_file",lambda p:None if Path(p).name in {
         "retrieval_models.py","qwen_models.py"} else real_sha(p))
     monkeypatch.setattr(qwen_models,"review_model_registry",lambda *a:None)
+
+
+def setup_workflow(p, monkeypatch):
+    configure_workflow(p,monkeypatch)
     report = workflow.prepare_current_submission(p.root,p.checkout,p.work)
     assert report["legacy_urls_retained"] and not report["current_btc_membership_validated"]
     assert report["documents"] == 2 and report["cache"]["bge"]["missing_inputs"] == 0
     # Completed CPU preparation must preserve the corpus/input identity.
     assert workflow.prepare_current_submission(p.root,p.checkout,p.work) == report
     return report
+
+
+def test_gpu_resumes_preparation_without_report(prepared,monkeypatch):
+    p = prepared
+    configure_workflow(p,monkeypatch)
+    assert not (p.root / "retrieval/current_submission.json").exists()
+    result = workflow.ensure_submission_preparation(p.root,p.checkout,p.work,gpu_session=True)
+    assert result["state"] == "CPU_PREPARATION_COMPLETE" and result["documents"] == 2
+    assert all(count == 0 for count in p.counters.values())  # No neural weights/encoding in preparation.
+    monkeypatch.setattr(workflow,"prepare_current_submission",lambda *a,**k:pytest.fail("Completed preparation rebuilt"))
+    fresh_work = p.work / "fresh-runtime"
+    assert not fresh_work.exists()
+    assert workflow.ensure_submission_preparation(p.root,p.checkout,fresh_work,gpu_session=True) == result
+
+
+@pytest.mark.parametrize("delete_build_report",[False,True])
+def test_gpu_recovers_missing_pointer_from_drive_reports(prepared,monkeypatch,delete_build_report):
+    p = prepared
+    result = setup_workflow(p,monkeypatch)
+    (p.root / "retrieval/current_submission.json").unlink()
+    if delete_build_report:
+        (p.root / "processed" / result["build_run"] / "submission_preparation.json").unlink()
+    monkeypatch.setattr(workflow,"prepare_current_submission",lambda *a,**k:pytest.fail("Durable report ignored"))
+    restored = workflow.ensure_submission_preparation(p.root,p.checkout,p.work / "fresh",gpu_session=True)
+    assert restored == result and read_json(p.root / "retrieval/current_submission.json") == result
+
+
+def test_notebook_cell_two_survives_fresh_kernel(prepared,monkeypatch):
+    p = prepared
+    configure_workflow(p,monkeypatch)
+    root = Path(__file__).resolve().parents[1]
+    notebook = nbformat.read(root / "notebooks/04_colab_submit_available_data.ipynb",as_version=4)
+    source = [c.source for c in notebook.cells if c.cell_type == "code"][1]
+    cpu = {"DATA_ROOT":p.root,"CHECKOUT":p.checkout,"WORK_DIR":p.work,"GPU_SESSION":False,"json":json}
+    exec(compile(source,"notebook-cell-2","exec"),cpu)
+    # A new kernel starts with NO PREPARATION variable and an empty work directory.
+    gpu = {"DATA_ROOT":p.root,"CHECKOUT":p.checkout,"WORK_DIR":p.work / "empty-kernel",
+           "GPU_SESSION":True,"json":json}
+    assert "PREPARATION" not in gpu
+    monkeypatch.setattr(workflow,"prepare_current_submission",lambda *a,**k:pytest.fail("CPU work repeated after kernel change"))
+    exec(compile(source,"notebook-cell-2","exec"),gpu)
+    assert gpu["PREPARATION"] == cpu["PREPARATION"] and all(count == 0 for count in p.counters.values())
 
 
 def test_legacy_strong_zip_and_resume(prepared,monkeypatch):
@@ -101,7 +147,8 @@ def test_submission_notebook_has_two_phases_and_persistent_results():
         ast.parse(source)
     joined = "\n".join(codes)
     assert joined.index("runtime_lock =") < joined.index("import torch")
-    assert 'read_json(REPORT_PATH)' in codes[1] and 'if GPU_SESSION:' in codes[1]
+    assert 'ensure_submission_preparation(DATA_ROOT,CHECKOUT,WORK_DIR,gpu_session=GPU_SESSION)' in codes[1]
+    assert 'raise RuntimeError' not in codes[1] and 'all-available-legacy-20261014-v2' in codes[0]
     assert "run_current_baseline(" in codes[2] and "run_current_submission(" in codes[3]
     assert "latest_submission.json" in codes[4] and "verify_file(" in codes[4]
     assert "KAGGLE_JSON" not in joined and "BTC_REVISION" not in joined

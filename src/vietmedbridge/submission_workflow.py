@@ -9,6 +9,58 @@ from .artifacts import atomic_json, digest_json, read_json, sha256_file, utc_now
 from .official_scope import activate_scope, derive_official_scope, discover_sources, rebind_cached_family
 
 
+def ensure_submission_preparation(data_root, checkout, work_dir, *, gpu_session=False):
+    """Restore the durable handoff, or resume CPU work even on a GPU runtime.
+
+    Colab runtime variables and local files are disposable. Only matching Drive
+    reports can authorize inference; absence is a resumable preparation stage,
+    not a requirement to manually switch runtimes or fabricate a success marker.
+    """
+    from .scale_benchmark import load_handoff
+    from .colab_storage import run_with_drive_recovery
+    root, checkout, work = Path(data_root), Path(checkout), Path(work_dir)
+
+    def restore():
+        build, candidate, inputs = load_handoff(root)
+        config_sha = digest_json(read_json(checkout / "configs/retrieval_full.json"))
+        source_names = discover_sources(root)
+        reports = [root / "retrieval/current_submission.json", build / "submission_preparation.json",
+            root / "retrieval/cpu_preparation" / (candidate["candidate_manifest_sha256"][:16]+".json")]
+        for path in reports:
+            if not path.exists():
+                continue
+            saved = read_json(path)
+            if (saved.get("state") != "CPU_PREPARATION_COMPLETE"
+                or saved.get("build_run") != build.name
+                or saved.get("candidate_manifest_sha256") != candidate["candidate_manifest_sha256"]
+                or saved.get("retrieval_config_sha256") != config_sha
+                or saved.get("official_sha256") != candidate["origin_corpus_sha256"]
+                or candidate.get("input_kind") != "AVAILABLE_CORPUS"
+                or saved.get("legacy_urls_retained") is not True
+                or saved.get("source_builds") != source_names
+                or any(saved.get("catalog",{}).get(k) != v for k,v in {
+                    "snapshot_sha256":candidate["snapshot_sha256"],
+                    "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
+                    "index_inputs_manifest_sha256":inputs["manifest_sha256"]}.items())
+                or read_json(root / "raw/snapshot.json")["files"]["links_corpus.parquet"]["sha256"] != candidate["origin_corpus_sha256"]):
+                continue
+            # Recreate only small pointers. Catalog/vector payloads are validated
+            # by their native readers before inference; nothing is re-encoded.
+            saved = saved | {"results_root":str(root.parent / "submission_runs" / build.name)}
+            atomic_json(root / "retrieval/current_submission.json",saved)
+            print(f"Restored preparation from Drive: {path} | {saved['documents']:,} documents",flush=True)
+            return saved
+        return None
+
+    saved = run_with_drive_recovery(restore,root,work,max_recoveries=3)
+    if saved is not None:
+        return saved
+    print("Preparation chưa hoàn tất trên Drive. Tiếp tục checkpoint CPU hiện có; chưa nạp model weights.",flush=True)
+    if gpu_session:
+        print("Đang dùng runtime GPU: bước chuẩn bị này vẫn chạy bằng CPU; sau khi đủ checkpoint sẽ tự sang inference.",flush=True)
+    return prepare_current_submission(root,checkout,work)
+
+
 def prepare_current_submission(data_root, checkout, work_dir):
     """CPU only: keep legacy URLs, combine available sources, reuse vectors/BM25."""
     from .catalog_storage import prepare_disk_catalog

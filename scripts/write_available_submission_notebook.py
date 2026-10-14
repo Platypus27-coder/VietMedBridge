@@ -12,9 +12,11 @@ def notebook():
     cells = [nb.v4.new_markdown_cell(dedent('''
     # Submit từ toàn bộ dữ liệu đã xử lý — giữ URL cũ
 
-    **Chạy trên Colab.** Lượt đầu chọn **CPU → Run all** để ghép các build hoàn tất,
-    kiểm tra source/ID, dùng lại cache và chuẩn bị BM25. Khi báo
-    `CPU_PREPARATION_COMPLETE`, đổi runtime sang **T4 GPU → Run all cùng notebook**.
+    **Chạy trên Colab, chọn T4 GPU → Run all.** Notebook tự khôi phục checkpoint Drive,
+    tiếp tục phần chuẩn bị CPU còn thiếu, rồi mới nạp model để inference.
+    Có thể chuẩn bị trên CPU trước để tiết kiệm quota GPU: khi báo
+    `CPU_PREPARATION_COMPLETE`, đổi sang T4 GPU và Run all cùng notebook.
+    Đổi runtime mất biến/ổ tạm; các checkpoint đã publish trên Drive vẫn được giữ và tự nhận lại.
     Chỉ cần chỉnh `DATA_ROOT_PATH` nếu Drive của tài khoản đang chạy dùng đường dẫn khác.
 
     Giữ URL thuộc snapshot gốc, kể cả URL bị BTC loại trong bản dataset mới, theo yêu cầu
@@ -34,6 +36,7 @@ def notebook():
     ''').strip()), code('''
     #@title 1. Drive, code và môi trường (tự nhận CPU/GPU)
     import hashlib
+    import importlib
     import importlib.metadata
     import json
     import os
@@ -48,7 +51,7 @@ def notebook():
     WORK_DIR = Path("/content/vmb_submit_work")
     CHECKOUT = Path("/content/VietMedBridge-submit")
     REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
-    WORKFLOW_VERSION = "all-available-legacy-20261014-v1"
+    WORKFLOW_VERSION = "all-available-legacy-20261014-v2"
     os.environ["HF_HOME"] = "/content/hf_cache"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     WORK_DIR.mkdir(parents=True,exist_ok=True)
@@ -129,6 +132,8 @@ def notebook():
     import vietmedbridge
     if Path(vietmedbridge.__file__).resolve() != (CHECKOUT / "src/vietmedbridge/__init__.py").resolve():
         raise RuntimeError("Kernel đang giữ package của checkout khác. Restart session rồi Run all.")
+    if "vietmedbridge.submission_workflow" in sys.modules:
+        importlib.reload(sys.modules["vietmedbridge.submission_workflow"])
     from vietmedbridge.artifacts import atomic_json, read_json, sha256_file, verify_file
     if not locked:
         atomic_json(code_lock,{"repo":REPO_URL,"commit":COMMIT,"workflow":WORKFLOW_VERSION})
@@ -147,24 +152,8 @@ def notebook():
     print("Phase:","GPU inference" if GPU_SESSION else "CPU corpus/catalog preparation",flush=True)
     '''), code('''
     #@title 2. Ghép toàn bộ build đã xử lý, giữ URL cũ (CPU)
-    from vietmedbridge.submission_workflow import prepare_current_submission
-    from vietmedbridge.scale_benchmark import load_handoff
-    from vietmedbridge.artifacts import digest_json
-    REPORT_PATH = DATA_ROOT / "retrieval/current_submission.json"
-    PREPARATION = None
-    if GPU_SESSION:
-        if not REPORT_PATH.is_file():
-            raise RuntimeError("Chạy notebook này trên CPU trước. Khi CPU_PREPARATION_COMPLETE, đổi sang GPU rồi Run all.")
-        PREPARATION = read_json(REPORT_PATH)
-        _,candidate,_ = load_handoff(DATA_ROOT)
-        if (PREPARATION.get("state") != "CPU_PREPARATION_COMPLETE"
-            or PREPARATION["candidate_manifest_sha256"] != candidate["candidate_manifest_sha256"]
-            or PREPARATION["retrieval_config_sha256"] != digest_json(read_json(CHECKOUT / "configs/retrieval_full.json"))
-            or not PREPARATION.get("legacy_urls_retained")):
-            raise RuntimeError("Phạm vi/config khác CPU preparation. Chạy lại pha CPU trước khi nạp model.")
-        print("Reused CPU preparation; no corpus union/catalog rebuild on GPU.",flush=True)
-    else:
-        PREPARATION = prepare_current_submission(DATA_ROOT,CHECKOUT,WORK_DIR)
+    from vietmedbridge.submission_workflow import ensure_submission_preparation
+    PREPARATION = ensure_submission_preparation(DATA_ROOT,CHECKOUT,WORK_DIR,gpu_session=GPU_SESSION)
     print(json.dumps(PREPARATION,ensure_ascii=False,indent=2),flush=True)
     if not GPU_SESSION:
         print("CPU xong: đổi runtime sang T4 GPU rồi Run all cùng notebook. Không cần đổi worker_id hoặc ACTION.",flush=True)

@@ -6,7 +6,8 @@ trong Google Drive hoặc snapshot Hugging Face Private.
 
 **Lượt nộp hiện tại, giữ toàn bộ URL cũ:** mở
 [04_colab_submit_available_data.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_submit_available_data.ipynb).
-Chạy CPU để ghép các build đã xử lý và chuẩn bị catalog, sau đó đổi sang GPU và Run all cùng notebook.
+Chọn GPU và Run all: notebook tự chuẩn bị/khôi phục checkpoint trước khi nạp model.
+Có thể chuẩn bị trên CPU trước để tiết kiệm quota, rồi đổi GPU; report đã lưu trên Drive được tự nhận lại.
 Notebook dùng lại cache, lưu ZIP BGE/BM25 trước rồi tiếp tục bản có dịch + document dense + Qwen rerank;
 mọi checkpoint và ZIP mới lưu bền trên Drive. Qwen child dense chưa đủ được báo thiếu rõ ràng.
 Theo yêu cầu của Sếp, không lọc URL bị BTC loại trong bản dataset mới; lượt này kiểm ID theo snapshot nguồn cũ.
