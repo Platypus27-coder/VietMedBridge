@@ -8,9 +8,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .artifacts import atomic_json, digest_json, local_workspace, publish_file, read_json, utc_now, verify_file
-from .dataset import _connection
+from .input_spool import InputSpool
 from .representation import BUILDER_VERSION, build_dense_text, representation_hash
-from .validation import open_views
 
 UNIT_SCHEMA = pa.schema([("id",pa.string()),("text",pa.large_string())])
 LINEAGE_SCHEMA_VERSION = 1
@@ -61,27 +60,31 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
     started = time.perf_counter()
     parts, cursor = [],0
     with local_workspace(work_dir) as temporary:
-        with _connection(temporary) as con:
-            open_views(con,root,candidate)
-            # Keep all official aliases in the candidate/health mapping. Only the
-            # model's identical text is encoded once, sorted by its content hash.
-            con.execute("""CREATE TABLE representatives AS SELECT row_number() OVER(ORDER BY retrieval_representation_hash)-1 AS position,*
-                FROM (SELECT retrieval_representation_hash,min(chunk_id) AS chunk_id FROM children GROUP BY 1)""")
-            total = con.execute("SELECT count(*) FROM representatives").fetchone()[0]
+        # Keep the local spool across a cell retry. It is derived scratch only;
+        # completed model-input parts are independently published to target.
+        spool_dir = (Path(work_dir) / "index_spools" / signature[:24]) if work_dir is not None else Path(temporary) / "spool"
+        spool = InputSpool(root,candidate,spool_dir,signature)
+        try:
+            total = spool.stage()
+            last = ""
             while cursor < total:
                 stem = f"units-{cursor:012d}"
                 marker = target / (stem+".done.json")
                 expected = min(part_size,total-cursor)
+                keys = spool.keys_after(last,expected)
+                if len(keys) != expected:
+                    raise ValueError("Index input spool ordering/coverage changed.")
                 if marker.exists():
                     part = read_json(marker)
                     if part["signature"] != signature or part["start"] != cursor or part["rows"] != expected:
                         raise ValueError("Index input checkpoint changed.")
                     verify_file(_part_path(target,part["path"]),part["sha256"])
+                    if pq.read_table(_part_path(target,part["path"]),columns=["id"]).column("id").to_pylist() != keys:
+                        raise ValueError("Index input checkpoint sorted IDs changed.")
                 else:
-                    rows = con.execute("""SELECT r.retrieval_representation_hash,c.text,c.heading,d.title
-                        FROM (SELECT * FROM representatives WHERE position>=? AND position<?) r
-                        JOIN children c USING(chunk_id) JOIN documents d USING(doc_id) ORDER BY r.position""",
-                        [cursor,cursor+expected]).fetchall()
+                    rows = spool.rows_after(last,expected)
+                    if [row[0] for row in rows] != keys:
+                        raise ValueError("Index input source/title join lost rows.")
                     units = []
                     for key,text,heading,title in rows:
                         dense = build_dense_text({"text":text},title=title,heading=heading,tokenizer=tokenizer,
@@ -95,12 +98,19 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
                         "sha256":publish_file(local,target/local.name)}
                     atomic_json(marker,part)
                 parts.append(part);cursor += part["rows"]
+                last = keys[-1]
                 print(f"Index inputs: {cursor:,}/{total:,} unique texts",flush=True)
+        finally:
+            spool.close()
     report = policy | {"signature":signature,"input_count":cursor,"parts":parts,"state":"COMPLETE",
         "scope":"Disk-partitioned model inputs, not encoded vectors or a completed retrieval index",
         "seconds_this_call":round(time.perf_counter()-started,3),"created_at":utc_now()}
     report["manifest_sha256"] = digest_json(report)
     atomic_json(manifest_path,report)
+    try:
+        spool.discard_completed()
+    except OSError as error:
+        print(f"Inputs published; retained local spool because cleanup failed: {error}",flush=True)
     return report
 
 

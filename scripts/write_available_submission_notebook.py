@@ -51,7 +51,7 @@ def notebook():
     WORK_DIR = Path("/content/vmb_submit_work")
     CHECKOUT = Path("/content/VietMedBridge-submit")
     REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
-    WORKFLOW_VERSION = "all-available-legacy-20261014-v2"
+    WORKFLOW_VERSION = "all-available-legacy-20261014-v3"
     os.environ["HF_HOME"] = "/content/hf_cache"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     WORK_DIR.mkdir(parents=True,exist_ok=True)
@@ -132,8 +132,10 @@ def notebook():
     import vietmedbridge
     if Path(vietmedbridge.__file__).resolve() != (CHECKOUT / "src/vietmedbridge/__init__.py").resolve():
         raise RuntimeError("Kernel đang giữ package của checkout khác. Restart session rồi Run all.")
-    if "vietmedbridge.submission_workflow" in sys.modules:
-        importlib.reload(sys.modules["vietmedbridge.submission_workflow"])
+    importlib.invalidate_caches()
+    for module_name in ("vietmedbridge.index_inputs","vietmedbridge.official_scope","vietmedbridge.submission_workflow"):
+        if module_name in sys.modules:
+            importlib.reload(sys.modules[module_name])
     from vietmedbridge.artifacts import atomic_json, read_json, sha256_file, verify_file
     if not locked:
         atomic_json(code_lock,{"repo":REPO_URL,"commit":COMMIT,"workflow":WORKFLOW_VERSION})

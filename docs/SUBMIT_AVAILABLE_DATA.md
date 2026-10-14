@@ -37,6 +37,11 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
 - Nguồn vẫn ở `data/processed/<source-build>`. Không extract/chunk lại nguồn.
 - Candidate ghép ở `data/processed/available-<snapshot>-<signature>`: có receipt cho từng source part,
   freeze receipt ổn định và checkpoint từng part model input trên Drive.
+- Model input dedup dùng SQLite trên ổ local với page cache 32 MiB và batch 1.024 child;
+  không gom toàn bộ hash trong RAM hoặc quét lại toàn corpus cho mỗi part đầu ra.
+  Giữ cách chọn `min(chunk_id)` và thứ tự hash như bản trước để tiếp tục checkpoint cũ.
+  Spool local commit từng source part, giữ khi gián đoạn và giải phóng sau khi manifest input đã publish;
+  checkpoint input trên Drive vẫn còn khi runtime bị thu hồi.
 - Embedding dùng `data/model_cache` theo nội dung và đúng model/runtime; không gán lại vector của producer khác.
 - CPU catalog được tạo trên ổ local Colab và lưu các phần nén trên Drive theo cơ chế catalog hiện có.
 - Report chính: `data/retrieval/current_submission.json`.
@@ -67,3 +72,9 @@ ID duy nhất, document thuộc corpus khai báo và chunk trích đúng source 
 
 Các test integration chạy bằng model CPU giả lập để kiểm tra đường đi thực, resume và export;
 không dùng kết quả test làm bằng chứng về tốc độ GPU, chất lượng model hoặc điểm thi.
+
+Regression bộ nhớ: cùng một triệu text giả lập, phép aggregate cũ lỗi ở giới hạn DuckDB 64 MB;
+builder dùng ổ local mới hoàn tất đủ một triệu input, kiểm lại thứ tự và SHA256 của từng text.
+Page cache SQLite 32 MiB là cấu hình cache DB, không phải tuyên bố tổng RSS của Python/Arrow chỉ 32 MiB.
+Tham khảo [giới hạn spill của DuckDB](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads)
+và [page cache SQLite](https://www.sqlite.org/pragma.html#pragma_cache_size).
