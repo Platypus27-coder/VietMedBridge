@@ -44,6 +44,7 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   checkpoint input trên Drive vẫn còn khi runtime bị thu hồi.
 - Nếu đã có `scope_freeze.json`, resume khôi phục metadata đã xác minh và đi thẳng tới Index inputs,
   không duyệt/chép lại toàn bộ source receipts. Chỉ part document/child chưa nằm trong spool local mới được tải.
+  Hai báo cáo alias vẫn giữ trên Drive cùng hash trong candidate; không tải chúng để resume Index inputs.
   Runtime mới vẫn cần dựng lại spool local; đó là đọc dữ liệu nguồn cho dedup, không phải tính embedding.
   Log `Index inputs` ghi rõ số part `reused` và `new`.
 - Parent chỉ được tải cùng document/child khi cần xây catalog mới. Catalog hoàn tất được khôi phục

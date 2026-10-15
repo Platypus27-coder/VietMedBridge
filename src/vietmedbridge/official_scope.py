@@ -130,14 +130,19 @@ def _restore_scope_freeze(target, local, signature):
         or digest_json({k:v for k,v in candidate.items() if k != "candidate_manifest_sha256"}) != candidate["candidate_manifest_sha256"]
         or digest_json({"signature":signature,"parts":candidate["parts"]}) != candidate["snapshot_sha256"]):
         raise ValueError("Submission freeze checkpoint changed.")
+    filename = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
+    required = {"build.json",filename}
     names = set()
     for entry in frozen["files"]:
         if Path(entry["path"]).parts[0] in {"parts","index_inputs"}:
             raise ValueError("Scope freeze must contain metadata, not corpus payloads.")
         names.add(entry["path"])
-        _copy_checked(_bound(target,entry["path"]),_bound(local,entry["path"]),entry["sha256"])
-    filename = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
-    if not {"build.json",filename} <= names:
+        source,destination = _bound(target,entry["path"]),_bound(local,entry["path"])
+        # Alias reports can be larger than a GB. Their sealed hashes stay in
+        # the candidate on Drive; Index inputs does not consume these reports.
+        if entry["path"] in required:
+            _copy_checked(source,destination,entry["sha256"])
+    if not required <= names:
         raise ValueError("Scope freeze metadata is incomplete.")
     build, config = read_json(local / "build.json"), read_json(local / "config.json")
     if (read_json(local / filename) != candidate or build.get("run_name") != target.name

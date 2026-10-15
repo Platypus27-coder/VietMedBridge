@@ -157,6 +157,8 @@ def test_index_checkpoint_survives_fresh_local_runtime(tmp_path,frozen,monkeypat
     def metadata_only(source,target,checksum):
         if Path(source).parent.name == "parts":
             pytest.fail("Complete inputs must not restore corpus payloads")
+        if "reports" in Path(source).parts:
+            pytest.fail("Index input resume must not download large alias reports")
         return original_copy(source,target,checksum)
     monkeypatch.setattr(scope,"_copy_checked",metadata_only)
     build,candidate,inputs = derive(tmp_path,frozen,snap)
