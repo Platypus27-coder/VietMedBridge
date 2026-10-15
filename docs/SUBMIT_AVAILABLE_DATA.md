@@ -42,6 +42,13 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Giữ cách chọn `min(chunk_id)` và thứ tự hash như bản trước để tiếp tục checkpoint cũ.
   Spool local commit từng source part, giữ khi gián đoạn và giải phóng sau khi manifest input đã publish;
   checkpoint input trên Drive vẫn còn khi runtime bị thu hồi.
+- Nếu đã có `scope_freeze.json`, resume khôi phục metadata đã xác minh và đi thẳng tới Index inputs,
+  không duyệt/chép lại toàn bộ source receipts. Chỉ part document/child chưa nằm trong spool local mới được tải.
+  Runtime mới vẫn cần dựng lại spool local; đó là đọc dữ liệu nguồn cho dedup, không phải tính embedding.
+  Log `Index inputs` ghi rõ số part `reused` và `new`.
+- Parent chỉ được tải cùng document/child khi cần xây catalog mới. Catalog hoàn tất được khôi phục
+  từ phần nén, không tải lại source payload. Section, ledger và failure không được tải cho hai bước này.
+  Mọi payload thực sự dùng vẫn được kiểm SHA256; identity và checkpoint cũ được giữ.
 - Embedding dùng `data/model_cache` theo nội dung và đúng model/runtime; không gán lại vector của producer khác.
 - CPU catalog được tạo trên ổ local Colab và lưu các phần nén trên Drive theo cơ chế catalog hiện có.
 - Report chính: `data/retrieval/current_submission.json`.

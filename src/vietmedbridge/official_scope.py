@@ -119,6 +119,74 @@ def _subset(table, ids):
     return table.filter(pc.is_in(table["doc_id"], value_set=pa.array(ids, type=pa.int64())))
 
 
+def _restore_scope_freeze(target, local, signature):
+    """Restore sealed metadata without replaying every source receipt/payload."""
+    frozen = checked(read_json(target / "scope_freeze.json"))
+    candidate = frozen["candidate"]
+    if (frozen["scope_signature"] != signature or candidate.get("signature") != signature
+        or candidate.get("state") != "FROZEN_CANDIDATE" or not candidate.get("selected_range_complete")
+        or not candidate.get("integrity",{}).get("passed")
+        or candidate["integrity"].get("official_membership") != "VERIFIED"
+        or digest_json({k:v for k,v in candidate.items() if k != "candidate_manifest_sha256"}) != candidate["candidate_manifest_sha256"]
+        or digest_json({"signature":signature,"parts":candidate["parts"]}) != candidate["snapshot_sha256"]):
+        raise ValueError("Submission freeze checkpoint changed.")
+    names = set()
+    for entry in frozen["files"]:
+        if Path(entry["path"]).parts[0] in {"parts","index_inputs"}:
+            raise ValueError("Scope freeze must contain metadata, not corpus payloads.")
+        names.add(entry["path"])
+        _copy_checked(_bound(target,entry["path"]),_bound(local,entry["path"]),entry["sha256"])
+    filename = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
+    if not {"build.json",filename} <= names:
+        raise ValueError("Scope freeze metadata is incomplete.")
+    build, config = read_json(local / "build.json"), read_json(local / "config.json")
+    if (read_json(local / filename) != candidate or build.get("run_name") != target.name
+        or build.get("state") != "DATA_VALIDATED" or not build.get("selected_range_complete")
+        or build.get("signature") != signature or build.get("snapshot_sha256") != candidate["snapshot_sha256"]
+        or build.get("parts") != candidate["parts"] or build.get("counts") != candidate["counts"]
+        or candidate.get("chunking") != config["chunks"]
+        or candidate["golden"]["tokenizer"] != config["tokenizer"]
+        or candidate.get("origin_corpus_sha256") != config["official_links_sha256"]
+        or build.get("source_builds") != config["source_builds"]):
+        raise ValueError("Scope freeze build/config binding changed.")
+    return frozen, candidate
+
+
+def _complete_scope(target, local, signature, candidate, snapshot, tokenizer, work, *, duplicates=0):
+    filename = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
+    def restore_input_source(entry):
+        _copy_checked(_bound(target,entry["path"]),_bound(local,entry["path"]),entry["sha256"])
+    inputs = prepare_index_inputs(local,filename,tokenizer,work_dir=work,
+        checkpoint_root=target / "index_inputs",source_loader=restore_input_source)
+    handoff = {"scope_signature":signature,"candidate_name":filename,
+        "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
+        "index_inputs_manifest_sha256":inputs["manifest_sha256"],"official_snapshot":snapshot,
+        "documents":candidate["counts"]["documents"],"duplicate_successes_kept_from_first_source":duplicates}
+    atomic_json(target / "scope_handoff.json",handoff)
+    atomic_json(target / "scope_progress.json", {"state":"SCOPE_READY",
+        "documents":candidate["counts"]["documents"],"updated_at":utc_now()})
+    return target,candidate,inputs
+
+
+def stage_scope_catalog(build, candidate, inputs, *, work_dir):
+    """Copy only catalog inputs, and only when a catalog actually needs building."""
+    target = Path(build)
+    local = Path(work_dir) / "official_scope" / target.name
+    _copy_checked(target / "config.json",local / "config.json",sha256_file(target / "config.json"))
+    for ordinal, part in enumerate(candidate["parts"],1):
+        for kind in ("documents","children","parents"):
+            entry = part["files"][kind]
+            _copy_checked(_bound(target,entry["path"]),_bound(local,entry["path"]),entry["sha256"])
+        if ordinal % 16 == 0 or ordinal == len(candidate["parts"]):
+            print(f"Catalog input staging: {ordinal:,}/{len(candidate['parts']):,} parts"
+                  " | documents/children/parents only",flush=True)
+    for part in inputs["parts"]:
+        _copy_checked(_bound(target / "index_inputs",part["path"]),
+                      _bound(local / "index_inputs",part["path"]),part["sha256"])
+    atomic_json(local / "index_inputs/units.json",inputs)
+    return local
+
+
 def derive_official_scope(data_root, sources, snapshot, tokenizer, golden_report, *, work_dir,
                           expected_urls=None, keep_all_legacy=False):
     root, work = Path(data_root).resolve(), Path(work_dir)
@@ -191,6 +259,14 @@ def derive_official_scope(data_root, sources, snapshot, tokenizer, golden_report
             or digest_json({k:v for k,v in inputs.items() if k != "manifest_sha256"}) != inputs["manifest_sha256"]):
             raise ValueError("Completed scope manifest changed.")
         return target, candidate, inputs
+    if (target / "scope_freeze.json").exists():
+        frozen,candidate = _restore_scope_freeze(target,local,signature)
+        print(f"Restored frozen scope: {candidate['counts']['documents']:,} documents"
+              " | source selection already complete; resuming Index inputs",flush=True)
+        atomic_json(target / "scope_progress.json", {"state":"RESUMING_INDEX_INPUTS",
+            "scope_signature":signature,"documents":candidate["counts"]["documents"],"updated_at":utc_now()})
+        return _complete_scope(target,local,signature,candidate,snapshot,tokenizer,work,
+                               duplicates=frozen.get("duplicate_successes_kept_from_first_source",0))
     parts, seen, total, cursor, duplicates = [], set(), Counter(), 0, 0
     for origin, (source, b) in enumerate(loaded):
         for ordinal, source_part in enumerate(b["parts"]):
@@ -198,6 +274,7 @@ def derive_official_scope(data_root, sources, snapshot, tokenizer, golden_report
                        "source_snapshot":b["snapshot_sha256"],"source_part":source_part}
             receipt_path = target / "scope_checkpoints" / f"source-{origin:03d}-{ordinal:06d}.json"
             if receipt_path.exists():
+                action = "restored"
                 receipt = checked(read_json(receipt_path))
                 if receipt["witness"] != witness or any(i in seen or (official is not None and official.get(i) is None) for i in receipt["selected_ids"]):
                     raise ValueError("Scope part checkpoint identity/coverage changed.")
@@ -208,6 +285,7 @@ def derive_official_scope(data_root, sources, snapshot, tokenizer, golden_report
                     for entry in part["files"].values():
                         _copy_checked(_bound(target, entry["path"]), _bound(local, entry["path"]), entry["sha256"])
             else:
+                action = "new"
                 scratch = work / "official_scope_source"
                 doc_spec = source_part["files"]["documents"]
                 doc_file = _copy_checked(_bound(source,doc_spec["path"]),scratch / "documents.parquet",doc_spec["sha256"])
@@ -253,7 +331,7 @@ def derive_official_scope(data_root, sources, snapshot, tokenizer, golden_report
             atomic_json(target / "scope_progress.json", {"state":"FILTERING", "scope_signature":signature,
                 "source":source.name,"source_part":ordinal+1,"source_parts":len(b["parts"]),
                 "selected_documents":cursor,"updated_at":utc_now()})
-            print(f"Official scope {origin+1}/{len(loaded)} source parts {ordinal+1}/{len(b['parts'])}: {cursor:,} documents",flush=True)
+            print(f"Official scope {origin+1}/{len(loaded)} source parts {ordinal+1}/{len(b['parts'])}: {cursor:,} documents | {action}",flush=True)
     if not seen or (expected is not None and not set(expected) <= seen):
         raise ValueError(f"Scope coverage mismatch; expected={len(expected) if expected is not None else None}, selected={len(seen)}")
     build = {"run_name":run,"signature":signature,"parts":parts,"counts":dict(total),
@@ -286,26 +364,11 @@ def derive_official_scope(data_root, sources, snapshot, tokenizer, golden_report
         names += [p.relative_to(local).as_posix() for p in sorted((local / "reports").rglob("*")) if p.is_file()]
         for name in names:
             files.append({"path":name,"sha256":publish_file(local / name,target / name)})
-        frozen = {"scope_signature":signature,"candidate":candidate,"files":files}
+        frozen = {"scope_signature":signature,"candidate":candidate,"files":files,
+                  "duplicate_successes_kept_from_first_source":duplicates}
         frozen["manifest_sha256"] = digest_json(frozen)
         atomic_json(freeze_path,frozen)
-    filename = f"candidate-{candidate['candidate_manifest_sha256'][:16]}.json"
-    inputs = prepare_index_inputs(local,filename,tokenizer,work_dir=work,
-                                  checkpoint_root=target / "index_inputs")
-    # Keep the catalog source on local disk, including the durable input parts.
-    for path in sorted((target / "index_inputs").iterdir()):
-        if path.is_file():
-            _copy_checked(path,local / "index_inputs" / path.name,sha256_file(path))
-    for path in sorted(local.rglob("*")):
-        if path.is_file() and path.relative_to(local).parts[0] not in {"parts","index_inputs"}:
-            publish_file(path,target / path.relative_to(local))
-    handoff = {"scope_signature":signature,"candidate_name":filename,
-        "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
-        "index_inputs_manifest_sha256":inputs["manifest_sha256"],"official_snapshot":snapshot,
-        "documents":cursor,"duplicate_successes_kept_from_first_source":duplicates}
-    atomic_json(target / "scope_handoff.json",handoff)
-    atomic_json(target / "scope_progress.json", {"state":"SCOPE_READY","documents":cursor,"updated_at":utc_now()})
-    return target,candidate,inputs
+    return _complete_scope(target,local,signature,candidate,snapshot,tokenizer,work,duplicates=duplicates)
 
 
 def activate_scope(data_root, build, candidate, inputs, snapshot):

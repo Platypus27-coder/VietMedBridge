@@ -148,7 +148,7 @@ def test_submission_notebook_has_two_phases_and_persistent_results():
     joined = "\n".join(codes)
     assert joined.index("runtime_lock =") < joined.index("import torch")
     assert 'ensure_submission_preparation(DATA_ROOT,CHECKOUT,WORK_DIR,gpu_session=GPU_SESSION)' in codes[1]
-    assert 'raise RuntimeError' not in codes[1] and 'all-available-legacy-20261014-v3' in codes[0]
+    assert 'raise RuntimeError' not in codes[1] and 'all-available-legacy-20261015-v4' in codes[0]
     assert "run_current_baseline(" in codes[2] and "run_current_submission(" in codes[3]
     assert "latest_submission.json" in codes[4] and "verify_file(" in codes[4]
     assert "KAGGLE_JSON" not in joined and "BTC_REVISION" not in joined

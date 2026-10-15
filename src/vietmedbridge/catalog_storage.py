@@ -156,7 +156,8 @@ def _preserve_bad_local(local_dir):
             path.rename(local_dir / f"{name}.invalid-{tag}")
 
 
-def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work_dir, read_only=False):
+def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work_dir, read_only=False,
+                         stage_build=None):
     """Reuse healthy catalogs, repair from local bytes, otherwise rebuild only this derived index."""
     policy = _contract(build, candidate, inputs, analyzer)
     signature = digest_json(policy)
@@ -212,6 +213,8 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
             _preserve_bad_local(local_dir)
     # The unchanged writer targets local disk. Its completed DB/marker survive
     # publication failure in this runtime instead of being deleted with a tempdir.
+    if stage_build is not None and not local_marker.exists():
+        build = stage_build()
     base = writer.prepare_disk_catalog(build, candidate, inputs, Path(work_dir), analyzer, work_dir=work_dir)
     try:
         saved = _publish(local, target, base.manifest)

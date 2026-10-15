@@ -17,6 +17,9 @@ def notebook():
     Có thể chuẩn bị trên CPU trước để tiết kiệm quota GPU: khi báo
     `CPU_PREPARATION_COMPLETE`, đổi sang T4 GPU và Run all cùng notebook.
     Đổi runtime mất biến/ổ tạm; các checkpoint đã publish trên Drive vẫn được giữ và tự nhận lại.
+    Khi đã có freeze receipt, resume bỏ qua vòng chọn/chép toàn bộ source part.
+    Spool local còn thì dùng lại; runtime mới chỉ khôi phục document/child cần để dựng spool,
+    chưa tải parent/section/ledger ở bước Index inputs. Log ghi riêng part reused/new.
     Chỉ cần chỉnh `DATA_ROOT_PATH` nếu Drive của tài khoản đang chạy dùng đường dẫn khác.
 
     Giữ URL thuộc snapshot gốc, kể cả URL bị BTC loại trong bản dataset mới, theo yêu cầu
@@ -51,7 +54,7 @@ def notebook():
     WORK_DIR = Path("/content/vmb_submit_work")
     CHECKOUT = Path("/content/VietMedBridge-submit")
     REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
-    WORKFLOW_VERSION = "all-available-legacy-20261014-v3"
+    WORKFLOW_VERSION = "all-available-legacy-20261015-v4"
     os.environ["HF_HOME"] = "/content/hf_cache"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     WORK_DIR.mkdir(parents=True,exist_ok=True)
@@ -133,7 +136,8 @@ def notebook():
     if Path(vietmedbridge.__file__).resolve() != (CHECKOUT / "src/vietmedbridge/__init__.py").resolve():
         raise RuntimeError("Kernel đang giữ package của checkout khác. Restart session rồi Run all.")
     importlib.invalidate_caches()
-    for module_name in ("vietmedbridge.index_inputs","vietmedbridge.official_scope","vietmedbridge.submission_workflow"):
+    for module_name in ("vietmedbridge.input_spool","vietmedbridge.index_inputs",
+                        "vietmedbridge.catalog_storage","vietmedbridge.official_scope","vietmedbridge.submission_workflow"):
         if module_name in sys.modules:
             importlib.reload(sys.modules[module_name])
     from vietmedbridge.artifacts import atomic_json, read_json, sha256_file, verify_file

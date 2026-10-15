@@ -139,6 +139,27 @@ def test_publish_failure_retains_local_db_and_resumes_uploaded_parts(tmp_path, f
     assert (sha256_file(first), first.stat().st_mtime_ns) == before
 
 
+def test_source_staging_is_deferred_until_new_catalog_build(tmp_path,frozen):
+    build,candidate,inputs = frozen
+    analyzer = MedicalAnalyzer(segmentation=False)
+    calls = []
+    def stage():
+        calls.append(build)
+        return build
+    catalog = storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+        work_dir=tmp_path / "work",stage_build=stage)
+    identity = catalog.identity
+    catalog.close()
+    assert calls == [build]
+    def forbidden():
+        pytest.fail("A complete catalog must restore without staging source data")
+    for work in ("work","fresh-runtime"):
+        catalog = storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+            work_dir=tmp_path / work,stage_build=forbidden)
+        assert catalog.identity == identity
+        catalog.close()
+
+
 def test_missing_part_heals_from_local_and_corrupt_local_restores_from_parts(tmp_path, frozen, setup_catalog):
     prepare, _ = setup_catalog
     catalog = prepare()

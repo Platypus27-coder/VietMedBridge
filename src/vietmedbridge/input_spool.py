@@ -19,8 +19,9 @@ FORMAT = "sqlite-min-child-representatives-v1"
 
 
 class InputSpool:
-    def __init__(self, root, candidate, directory, signature):
+    def __init__(self, root, candidate, directory, signature, *, source_loader=None):
         self.root, self.candidate = Path(root).resolve(), candidate
+        self.source_loader = source_loader
         self.directory = Path(directory)
         self.directory.mkdir(parents=True,exist_ok=True)
         self.path = self.directory / "representatives.sqlite"
@@ -87,6 +88,10 @@ class InputSpool:
                     processed += old[1]
                     action = "reused"
                 else:
+                    # Restore only a source part absent from this local spool.
+                    # A completed spool needs no source payload reads on retry.
+                    if self.source_loader is not None:
+                        self.source_loader(entry)
                     path = self._path(entry["path"])
                     verify_file(path,entry["sha256"])
                     source = pq.ParquetFile(path)

@@ -23,7 +23,7 @@ def _part_path(root, relative):
 
 
 def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None, part_size=4096,
-                         checkpoint_root=None):
+                         checkpoint_root=None, source_loader=None):
     if type(part_size) is not int or part_size < 1:
         raise ValueError("Invalid input part size.")
     root = Path(build_dir).resolve()
@@ -58,12 +58,12 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
             verify_file(_part_path(target,part["path"]),part["sha256"])
         return saved
     started = time.perf_counter()
-    parts, cursor = [],0
+    parts, cursor, reused_parts, new_parts = [],0,0,0
     with local_workspace(work_dir) as temporary:
         # Keep the local spool across a cell retry. It is derived scratch only;
         # completed model-input parts are independently published to target.
         spool_dir = (Path(work_dir) / "index_spools" / signature[:24]) if work_dir is not None else Path(temporary) / "spool"
-        spool = InputSpool(root,candidate,spool_dir,signature)
+        spool = InputSpool(root,candidate,spool_dir,signature,source_loader=source_loader)
         try:
             total = spool.stage()
             last = ""
@@ -81,6 +81,7 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
                     verify_file(_part_path(target,part["path"]),part["sha256"])
                     if pq.read_table(_part_path(target,part["path"]),columns=["id"]).column("id").to_pylist() != keys:
                         raise ValueError("Index input checkpoint sorted IDs changed.")
+                    reused_parts += 1
                 else:
                     rows = spool.rows_after(last,expected)
                     if [row[0] for row in rows] != keys:
@@ -97,9 +98,11 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
                     part = {"signature":signature,"start":cursor,"rows":len(units),"path":local.name,
                         "sha256":publish_file(local,target/local.name)}
                     atomic_json(marker,part)
+                    new_parts += 1
                 parts.append(part);cursor += part["rows"]
                 last = keys[-1]
-                print(f"Index inputs: {cursor:,}/{total:,} unique texts",flush=True)
+                print(f"Index inputs: {cursor:,}/{total:,} unique texts"
+                      f" | reused {reused_parts:,} parts, new {new_parts:,}",flush=True)
         finally:
             spool.close()
     report = policy | {"signature":signature,"input_count":cursor,"parts":parts,"state":"COMPLETE",

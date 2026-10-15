@@ -147,8 +147,89 @@ def test_index_checkpoint_survives_fresh_local_runtime(tmp_path,frozen,monkeypat
     assert local.resolve().is_relative_to(tmp_path.resolve())
     shutil.rmtree(local)
     monkeypatch.setattr(scope,"prepare_index_inputs",original)
+    original_read = scope.read_json
+    def no_receipt_replay(path):
+        if Path(path).parent.name == "scope_checkpoints":
+            pytest.fail("Sealed freeze must skip source receipt replay")
+        return original_read(path)
+    monkeypatch.setattr(scope,"read_json",no_receipt_replay)
+    original_copy = scope._copy_checked
+    def metadata_only(source,target,checksum):
+        if Path(source).parent.name == "parts":
+            pytest.fail("Complete inputs must not restore corpus payloads")
+        return original_copy(source,target,checksum)
+    monkeypatch.setattr(scope,"_copy_checked",metadata_only)
     build,candidate,inputs = derive(tmp_path,frozen,snap)
     assert inputs == saved and inputs["candidate_manifest_sha256"] == candidate["candidate_manifest_sha256"]
+
+
+@pytest.mark.parametrize("fresh_runtime",[False,True])
+def test_partial_index_resume_skips_scope_and_keeps_published_part(tmp_path,frozen,monkeypatch,capsys,fresh_runtime):
+    from vietmedbridge import index_inputs
+    snap = current(tmp_path,[{"id":921,"url":"https://example.org/article#evidence"}])
+    original_prepare, original_atomic = scope.prepare_index_inputs,index_inputs.atomic_json
+    monkeypatch.setattr(scope,"prepare_index_inputs",lambda *a,**k:original_prepare(*a,**(k | {"part_size":1})))
+    def interrupt(path,value):
+        if Path(path).name == "units-000000000001.done.json":
+            raise OSError("partial model inputs")
+        return original_atomic(path,value)
+    monkeypatch.setattr(index_inputs,"atomic_json",interrupt)
+    with pytest.raises(OSError,match="partial model inputs"):
+        derive(tmp_path,frozen,snap)
+    target = next((tmp_path / "processed").glob("official-*"))
+    sealed = read_json(target / "scope_freeze.json")
+    part = read_json(target / "index_inputs/units-000000000000.done.json")
+    first = target / "index_inputs" / part["path"]
+    before = sha256_file(first),first.stat().st_mtime_ns
+    if fresh_runtime:
+        shutil.rmtree(tmp_path / "work")
+    monkeypatch.setattr(index_inputs,"atomic_json",original_atomic)
+    original_copy, original_read = scope._copy_checked,scope.read_json
+    copied = []
+    def copy(source,destination,checksum):
+        if Path(source).parent.name == "parts":
+            assert fresh_runtime, "A complete local spool must not restore source payloads"
+            assert target in Path(source).parents
+            assert Path(source).name.endswith((".documents.parquet",".children.parquet"))
+            copied.append(Path(source).name)
+        return original_copy(source,destination,checksum)
+    def read(path):
+        if Path(path).parent.name == "scope_checkpoints":
+            pytest.fail("Frozen source receipts replayed before partial inputs")
+        return original_read(path)
+    monkeypatch.setattr(scope,"_copy_checked",copy)
+    monkeypatch.setattr(scope,"read_json",read)
+    build,candidate,inputs = derive(tmp_path,frozen,snap)
+    assert bool(copied) == fresh_runtime and candidate == sealed["candidate"]
+    assert (sha256_file(first),first.stat().st_mtime_ns) == before
+    assert inputs["parts"][0] == part and inputs["state"] == "COMPLETE"
+    assert "Restored frozen scope:" in capsys.readouterr().out
+
+
+def test_lazy_restore_still_rejects_corrupt_frozen_payload(tmp_path,frozen,monkeypatch):
+    snap = current(tmp_path,[{"id":921,"url":"https://example.org/article#evidence"}])
+    original = scope.prepare_index_inputs
+    monkeypatch.setattr(scope,"prepare_index_inputs",lambda *a,**k:(_ for _ in ()).throw(OSError("before inputs")))
+    with pytest.raises(OSError,match="before inputs"):
+        derive(tmp_path,frozen,snap)
+    target = next((tmp_path / "processed").glob("official-*"))
+    candidate = read_json(target / "scope_freeze.json")["candidate"]
+    (target / candidate["parts"][0]["files"]["children"]["path"]).write_bytes(b"corrupt")
+    shutil.rmtree(tmp_path / "work")
+    monkeypatch.setattr(scope,"prepare_index_inputs",original)
+    with pytest.raises(ValueError,match="Changed source artifact"):
+        derive(tmp_path,frozen,snap)
+    assert not (target / "scope_handoff.json").exists()
+
+
+def test_catalog_staging_uses_only_catalog_kinds_and_known_input_checksums(tmp_path,frozen):
+    snap = current(tmp_path,[{"id":921,"url":"https://example.org/article#evidence"}])
+    build,candidate,inputs = derive(tmp_path,frozen,snap)
+    local = scope.stage_scope_catalog(build,candidate,inputs,work_dir=tmp_path / "fresh")
+    assert {p.name.split(".")[-2] for p in (local / "parts").glob("*.parquet")} == {"documents","children","parents"}
+    assert read_json(local / "index_inputs/units.json") == inputs
+    for part in inputs["parts"]:
+        assert sha256_file(local / "index_inputs" / part["path"]) == part["sha256"]
 
 
 def test_activation_records_previous_snapshot_and_candidate(tmp_path,frozen):

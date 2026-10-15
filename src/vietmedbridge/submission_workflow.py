@@ -6,7 +6,7 @@ from zipfile import ZipFile
 import json
 
 from .artifacts import atomic_json, digest_json, read_json, sha256_file, utc_now, verify_file
-from .official_scope import activate_scope, derive_official_scope, discover_sources, rebind_cached_family
+from .official_scope import activate_scope, derive_official_scope, discover_sources, rebind_cached_family, stage_scope_catalog
 
 
 def ensure_submission_preparation(data_root, checkout, work_dir, *, gpu_session=False):
@@ -123,11 +123,10 @@ def prepare_current_submission(data_root, checkout, work_dir):
     glossary = root / "labels/medical_aliases.json"
     analyzer = MedicalAnalyzer(segmentation=config["lexical_segmentation"],
                               glossary_path=glossary if glossary.is_file() else None)
-    local_build = work / "official_scope" / build.name
-    source_build = local_build if (local_build / "build.json").is_file() else build
     print("CPU catalog: all available validated documents, including legacy URLs; source spans unchanged.",flush=True)
-    base = run_with_drive_recovery(lambda:prepare_disk_catalog(source_build,candidate,inputs,
-        root / "retrieval/catalogs",analyzer,work_dir=work),root,work,max_recoveries=3)
+    base = run_with_drive_recovery(lambda:prepare_disk_catalog(build,candidate,inputs,
+        root / "retrieval/catalogs",analyzer,work_dir=work,
+        stage_build=lambda:stage_scope_catalog(build,candidate,inputs,work_dir=work)),root,work,max_recoveries=3)
     try:
         identity = base.identity
     finally:
