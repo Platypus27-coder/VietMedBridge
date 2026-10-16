@@ -47,6 +47,14 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Hai báo cáo alias vẫn giữ trên Drive cùng hash trong candidate; không tải chúng để resume Index inputs.
   Runtime mới vẫn cần dựng lại spool local; đó là đọc dữ liệu nguồn cho dedup, không phải tính embedding.
   Log `Index inputs` ghi rõ số part `reused` và `new`.
+- Workflow submission dùng `index_inputs/resume.json` có digest, signature và khóa hash cuối để tiếp tục
+  từ prefix đã publish. Lần chuyển từ checkpoint cũ đọc các `.done.json` nhỏ bằng 8 luồng và kiểm một part biên;
+  các lần sau dùng cursor. Không quét lại nội dung toàn bộ input part cũ trong bước resume.
+  File đã lưu vẫn được xác minh SHA256 khi native cache/embedding/catalog reader thực sự dùng file;
+  manifest input hoàn tất thể hiện đủ metadata/range, không thay thế kiểm tra payload của consumer.
+  API mặc định ngoài workflow vẫn kiểm ngay (`verify_now`); workflow gọi rõ `verify_on_use`.
+  Runtime mới vẫn đọc và kiểm checksum source document/child, nhưng SQLite chỉ giữ đại diện có hash sau cursor;
+  số text đã lưu cộng số đại diện còn lại phải bằng distinct count trong health của candidate đã freeze.
 - Parent chỉ được tải cùng document/child khi cần xây catalog mới. Catalog hoàn tất được khôi phục
   từ phần nén, không tải lại source payload. Section, ledger và failure không được tải cho hai bước này.
   Mọi payload thực sự dùng vẫn được kiểm SHA256; identity và checkpoint cũ được giữ.

@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .artifacts import digest_json, verify_file
@@ -19,9 +20,10 @@ FORMAT = "sqlite-min-child-representatives-v1"
 
 
 class InputSpool:
-    def __init__(self, root, candidate, directory, signature, *, source_loader=None):
+    def __init__(self, root, candidate, directory, signature, *, source_loader=None, minimum_id=None):
         self.root, self.candidate = Path(root).resolve(), candidate
         self.source_loader = source_loader
+        self.minimum_id = minimum_id
         self.directory = Path(directory)
         self.directory.mkdir(parents=True,exist_ok=True)
         self.path = self.directory / "representatives.sqlite"
@@ -44,8 +46,10 @@ class InputSpool:
                     text TEXT NOT NULL,heading TEXT NOT NULL,
                     FOREIGN KEY(doc_id) REFERENCES documents(doc_id)) WITHOUT ROWID;
             """)
-            identity = digest_json({"format":FORMAT,"input_signature":signature,
-                                   "candidate":candidate["candidate_manifest_sha256"]})
+            contract = {"format":FORMAT,"input_signature":signature,"candidate":candidate["candidate_manifest_sha256"]}
+            if minimum_id is not None:
+                contract["minimum_id"] = minimum_id
+            identity = digest_json(contract)
             old = self.con.execute("SELECT value FROM metadata WHERE key='identity'").fetchone()
             if old is not None and old[0] != identity:
                 raise ValueError("Local model-input spool identity changed.")
@@ -100,7 +104,11 @@ class InputSpool:
                     # committed parts remain reusable in this runtime.
                     with self.con:
                         for batch in source.iter_batches(batch_size=BATCH_ROWS,columns=columns,use_threads=False):
-                            rows = batch.to_pylist()
+                            seen += batch.num_rows
+                            selected = batch
+                            if kind == "children" and self.minimum_id is not None:
+                                selected = batch.filter(pc.greater(batch.column(0),self.minimum_id))
+                            rows = selected.to_pylist()
                             if kind == "documents":
                                 self.con.executemany("INSERT INTO documents VALUES (?,?)",
                                     [(r["doc_id"],r["title"]) for r in rows])
@@ -111,7 +119,6 @@ class InputSpool:
                                     WHERE excluded.chunk_id<representatives.chunk_id""",
                                     [(r["retrieval_representation_hash"],r["chunk_id"],r["doc_id"],
                                       r["text"],r["heading"]) for r in rows])
-                            seen += len(rows)
                         if seen != source.metadata.num_rows:
                             raise ValueError("Input spool source row count changed.")
                         self.con.execute("INSERT INTO completed VALUES (?,?,?,?)",
@@ -129,8 +136,12 @@ class InputSpool:
             raise ValueError("Completed local input spool count changed.")
         with self.con:
             self.con.execute("INSERT OR IGNORE INTO metadata VALUES ('ready_count',?)",(str(count),))
-        print(f"Index dedup ready: {count:,} unique texts on local disk",flush=True)
+        label = "remaining unique texts" if self.minimum_id is not None else "unique texts"
+        print(f"Index dedup ready: {count:,} {label} on local disk",flush=True)
         return count
+
+    def count_through(self, last):
+        return self.con.execute("SELECT count(*) FROM representatives WHERE id<=?",(last,)).fetchone()[0]
 
     def keys_after(self, last, count):
         return [r[0] for r in self.con.execute(

@@ -162,7 +162,7 @@ def _complete_scope(target, local, signature, candidate, snapshot, tokenizer, wo
     def restore_input_source(entry):
         _copy_checked(_bound(target,entry["path"]),_bound(local,entry["path"]),entry["sha256"])
     inputs = prepare_index_inputs(local,filename,tokenizer,work_dir=work,
-        checkpoint_root=target / "index_inputs",source_loader=restore_input_source)
+        checkpoint_root=target / "index_inputs",source_loader=restore_input_source,resume_policy="verify_on_use")
     handoff = {"scope_signature":signature,"candidate_name":filename,
         "candidate_manifest_sha256":candidate["candidate_manifest_sha256"],
         "index_inputs_manifest_sha256":inputs["manifest_sha256"],"official_snapshot":snapshot,

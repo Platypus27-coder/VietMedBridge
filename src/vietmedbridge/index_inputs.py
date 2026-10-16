@@ -9,6 +9,7 @@ import pyarrow.parquet as pq
 
 from .artifacts import atomic_json, digest_json, local_workspace, publish_file, read_json, utc_now, verify_file
 from .input_spool import InputSpool
+from .input_resume import InputResume, metadata_parts
 from .representation import BUILDER_VERSION, build_dense_text, representation_hash
 
 UNIT_SCHEMA = pa.schema([("id",pa.string()),("text",pa.large_string())])
@@ -22,10 +23,21 @@ def _part_path(root, relative):
     return path
 
 
+def _publish_inputs(target, policy, signature, parts, cursor, started):
+    report = policy | {"signature":signature,"input_count":cursor,"parts":parts,"state":"COMPLETE",
+        "scope":"Disk-partitioned model inputs, not encoded vectors or a completed retrieval index",
+        "seconds_this_call":round(time.perf_counter()-started,3),"created_at":utc_now()}
+    report["manifest_sha256"] = digest_json(report)
+    atomic_json(target / "units.json",report)
+    return report
+
+
 def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None, part_size=4096,
-                         checkpoint_root=None, source_loader=None):
+                         checkpoint_root=None, source_loader=None, resume_policy="verify_now"):
     if type(part_size) is not int or part_size < 1:
         raise ValueError("Invalid input part size.")
+    if resume_policy not in {"verify_now","verify_on_use"}:
+        raise ValueError("Invalid input resume policy.")
     root = Path(build_dir).resolve()
     path = (root / candidate_name).resolve()
     if not path.is_relative_to(root):
@@ -54,19 +66,59 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
         if (saved["signature"] != signature or saved["state"] != "COMPLETE"
             or digest_json({k:v for k,v in saved.items() if k != "manifest_sha256"}) != saved["manifest_sha256"]):
             raise ValueError("Index input manifest changed.")
-        for part in saved["parts"]:
-            verify_file(_part_path(target,part["path"]),part["sha256"])
+        if resume_policy == "verify_now":
+            for part in saved["parts"]:
+                verify_file(_part_path(target,part["path"]),part["sha256"])
+        else:
+            _,count = metadata_parts(saved["parts"],signature,part_size,{p.name for p in target.iterdir()},
+                                     total=saved["input_count"])
+            if count != saved["input_count"]:
+                raise ValueError("Completed input range changed.")
+            print(f"Restored complete inputs: {count:,} texts | payload SHA checked when consumed",flush=True)
         return saved
     started = time.perf_counter()
     parts, cursor, reused_parts, new_parts = [],0,0,0
+    expected_total = candidate.get("health",{}).get("chunks",{}).get("distinct_representations")
+    if expected_total is not None and (type(expected_total) is not int or expected_total < 1):
+        raise ValueError("Frozen unique input count is invalid.")
+    resume = InputResume(target,signature,part_size,expected_total=expected_total).load() if resume_policy == "verify_on_use" else None
+    last = ""
+    if resume is not None:
+        parts,cursor,last = list(resume.parts),resume.cursor,resume.last
+        reused_parts = len(parts)
+        if cursor == expected_total:
+            print(f"All {cursor:,} input texts already checkpointed; sealing manifest without rebuilding spool",flush=True)
+            resume.save(parts,last,expected_total)
+            return _publish_inputs(target,policy,signature,parts,cursor,started)
     with local_workspace(work_dir) as temporary:
         # Keep the local spool across a cell retry. It is derived scratch only;
         # completed model-input parts are independently published to target.
         spool_dir = (Path(work_dir) / "index_spools" / signature[:24]) if work_dir is not None else Path(temporary) / "spool"
-        spool = InputSpool(root,candidate,spool_dir,signature,source_loader=source_loader)
+        base_id,base_rows = None,0
+        # Keep an existing full spool. A new runtime needs only representatives
+        # beyond the saved key; source checks still cover every source row/file.
+        if resume is not None and cursor and expected_total is not None and not (spool_dir / "representatives.sqlite").exists():
+            if resume.spool_base_id is not None:
+                cached = spool_dir.with_name(spool_dir.name+"-tail-"+resume.spool_base_id[:16])
+                if (cached / "representatives.sqlite").exists():
+                    base_id,base_rows = resume.spool_base_id,resume.spool_base_rows
+            if base_id is None:
+                base_id,base_rows = last,cursor
+            spool_dir = spool_dir.with_name(spool_dir.name+"-tail-"+base_id[:16])
+            print(f"Runtime spool: stage only hashes after {base_rows:,} saved texts; earlier representatives skipped",flush=True)
+        if resume is not None and expected_total is not None:
+            resume.save(parts,last,expected_total,spool_base_id=base_id,spool_base_rows=base_rows)
+        spool = InputSpool(root,candidate,spool_dir,signature,source_loader=source_loader,minimum_id=base_id)
         try:
-            total = spool.stage()
-            last = ""
+            total = spool.stage()+base_rows
+            if expected_total is not None and total != expected_total:
+                raise ValueError("Index input spool coverage differs from frozen distinct representations.")
+            if cursor:
+                metadata_parts(parts,signature,part_size,resume.names,total=total)
+                if base_rows+spool.count_through(last) != cursor:
+                    raise ValueError("Index input resume sorted boundary/coverage changed.")
+                print(f"Index inputs RESUME: {cursor:,}/{total:,} texts already saved"
+                      f" | reused {reused_parts:,} parts, new 0; continuing missing parts",flush=True)
             while cursor < total:
                 stem = f"units-{cursor:012d}"
                 marker = target / (stem+".done.json")
@@ -101,15 +153,13 @@ def prepare_index_inputs(build_dir, candidate_name, tokenizer, *, work_dir=None,
                     new_parts += 1
                 parts.append(part);cursor += part["rows"]
                 last = keys[-1]
+                if resume is not None:
+                    resume.save(parts,last,total,spool_base_id=base_id,spool_base_rows=base_rows)
                 print(f"Index inputs: {cursor:,}/{total:,} unique texts"
                       f" | reused {reused_parts:,} parts, new {new_parts:,}",flush=True)
         finally:
             spool.close()
-    report = policy | {"signature":signature,"input_count":cursor,"parts":parts,"state":"COMPLETE",
-        "scope":"Disk-partitioned model inputs, not encoded vectors or a completed retrieval index",
-        "seconds_this_call":round(time.perf_counter()-started,3),"created_at":utc_now()}
-    report["manifest_sha256"] = digest_json(report)
-    atomic_json(manifest_path,report)
+    report = _publish_inputs(target,policy,signature,parts,cursor,started)
     try:
         spool.discard_completed()
     except OSError as error:
