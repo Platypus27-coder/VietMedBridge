@@ -91,6 +91,7 @@ def _restore(target, saved, local):
         return
     temporary = local.with_name(f".{uuid4().hex}.restore.tmp")
     try:
+        decoded = hashlib.sha256()
         with temporary.open("wb") as output:
             for index, part in enumerate(_storage_parts(saved), 1):
                 path = bound(target, part["path"])
@@ -102,9 +103,14 @@ def _restore(target, saved, local):
                 if len(data) != part["bytes"] or hashlib.sha256(data).hexdigest() != part["raw_sha256"]:
                     raise ValueError("Catalog decoded part changed.")
                 output.write(data)
+                decoded.update(data)
                 print(f"Restore CPU catalog: {index}/{len(saved['storage']['parts'])} parts", flush=True)
-        verify_file(temporary, saved["sha256"])
+        # Verify the whole decoded file while writing it, rather than reread a
+        # multi-GB catalog after the counter has already reached its last part.
+        if decoded.hexdigest() != saved["sha256"]:
+            raise ValueError("Restored catalog checksum changed.")
         os.replace(temporary, local)
+        print("Restore CPU catalog: complete, full SHA256 verified", flush=True)
     finally:
         temporary.unlink(missing_ok=True)
 

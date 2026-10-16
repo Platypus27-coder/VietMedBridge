@@ -29,6 +29,9 @@ def notebook():
     Catalog đã hoàn tất của nguồn cũ được kế thừa khi receipt xác nhận toàn bộ nguồn vẫn còn:
     giữ BM25/document/child/parent cũ, chỉ dựng lại ánh xạ dense position và index phần mới.
     Log `Catalog reuse` và `Disk catalog/BM25 delta` ghi riêng phần cũ/mới; CPU vẫn cần cho delta.
+    Khôi phục catalog xác minh SHA ngay lúc giải nén. Bước kế thừa báo phase mỗi 15 giây,
+    lưu cursor chuyển ánh xạ theo khối 65.536 dòng; ngắt cùng runtime tiếp tục khối đã commit.
+    Không đọc/quick_check toàn catalog thêm lần nữa trong bước kế thừa. Catalog cuối vẫn được kiểm đầy đủ.
     Chỉ cần chỉnh `DATA_ROOT_PATH` nếu Drive của tài khoản đang chạy dùng đường dẫn khác.
 
     Giữ URL thuộc snapshot gốc, kể cả URL bị BTC loại trong bản dataset mới, theo yêu cầu
@@ -63,7 +66,7 @@ def notebook():
     WORK_DIR = Path("/content/vmb_submit_work")
     CHECKOUT = Path("/content/VietMedBridge-submit")
     REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
-    WORKFLOW_VERSION = "all-available-legacy-20261016-v7"
+    WORKFLOW_VERSION = "all-available-legacy-20261016-v8"
     os.environ["HF_HOME"] = "/content/hf_cache"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     WORK_DIR.mkdir(parents=True,exist_ok=True)

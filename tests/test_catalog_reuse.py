@@ -1,5 +1,6 @@
 """Inherit actual FTS postings, remap dense positions, and append only new IDs."""
 from dataclasses import asdict
+import json
 from pathlib import Path
 import sqlite3
 
@@ -190,3 +191,88 @@ def test_valid_checksum_with_wrong_database_policy_cannot_be_inherited(tmp_path,
     atomic_json(marker,saved)
     with pytest.raises(ValueError,match="database producer policy"):
         extended(tmp_path,enlarged)
+
+
+@pytest.mark.parametrize("interruption",["during_copy","after_copy"])
+def test_interrupted_inheritance_keeps_committed_units_without_restore_or_recopy(tmp_path,enlarged,monkeypatch,interruption):
+    build,candidate,inputs,analyzer,root = enlarged
+    policy = storage._contract(build,candidate,inputs,analyzer)
+    seed = reuse.find_seed(build,candidate,inputs,root,policy)
+    local = tmp_path / "migration"
+    local.mkdir()
+    building = local / "building.sqlite"
+    con = sqlite3.connect(building)
+    state = fast._create(con,policy)
+    ids = [key for part in inputs["parts"] for key in pq.read_table(
+        build / "index_inputs" / part["path"],columns=["id"]).column("id").to_pylist()]
+    con.executemany("INSERT INTO units VALUES (?,?)",enumerate(ids))
+    state["units_cursor"] = len(ids)
+    fast._state(con,state)
+    con.commit()
+    con.close()
+    original_hash = sha256_file(building)
+    monkeypatch.setattr(reuse,"UNIT_COPY_ROWS",1)
+    report = reuse._Progress.report
+    blocks = []
+    def stop(progress,phase):
+        if phase.startswith("copy dense positions"):
+            blocks.append(phase)
+            if interruption == "during_copy" and len(blocks) == 2:
+                raise KeyboardInterrupt("simulated interruption")
+        if interruption == "after_copy" and phase == "preserve previous SQL checkpoint":
+            raise KeyboardInterrupt("simulated interruption")
+        report(progress,phase)
+    monkeypatch.setattr(reuse._Progress,"report",stop)
+    with pytest.raises(KeyboardInterrupt,match="simulated"):
+        reuse.initialize_seed(local,candidate,policy,seed,tmp_path / "no-cache")
+    assert sha256_file(building) == original_hash
+    pending = sqlite3.connect(local / "seed-copy.sqlite")
+    saved = json.loads(pending.execute("SELECT payload FROM metadata").fetchone()[0])
+    committed = saved["units_cursor"]
+    assert committed == (1 if interruption == "during_copy" else len(ids))
+    assert pending.execute("SELECT count(*) FROM units").fetchone()[0] == committed
+    pending.close()
+    monkeypatch.setattr(storage,"_restore",lambda *a:pytest.fail("Restored BM25 must not be downloaded again"))
+    remaining = []
+    def resume(progress,phase):
+        if phase.startswith("copy dense positions"):
+            remaining.append(phase)
+        report(progress,phase)
+    monkeypatch.setattr(reuse._Progress,"report",resume)
+    reuse.initialize_seed(local,candidate,policy,seed,tmp_path / "no-cache")
+    assert len(remaining) == len(ids)-committed
+    actual = sqlite3.connect(building)
+    assert actual.execute("SELECT * FROM units ORDER BY position").fetchall() == list(enumerate(ids))
+    assert actual.execute("SELECT count(*) FROM documents").fetchone()[0] == seed["manifest"]["counts"]["documents"]
+    assert actual.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    actual.close()
+
+
+def test_resume_v7_remap_committed_before_silent_quick_check(tmp_path,enlarged,monkeypatch):
+    build,candidate,inputs,analyzer,root = enlarged
+    policy = storage._contract(build,candidate,inputs,analyzer)
+    seed = reuse.find_seed(build,candidate,inputs,root,policy)
+    local = tmp_path / "v7"
+    local.mkdir()
+    saved = seed["manifest"]
+    pending = local / "seed-copy.sqlite"
+    storage._restore(seed["directory"],saved,pending)
+    # v7 had already committed the entire replacement map before quick_check.
+    con = sqlite3.connect(pending)
+    con.executescript("DROP TABLE units; CREATE TABLE units(position INTEGER PRIMARY KEY,id TEXT UNIQUE NOT NULL)")
+    ids = [key for part in inputs["parts"] for key in pq.read_table(
+        build / "index_inputs" / part["path"],columns=["id"]).column("id").to_pylist()]
+    con.executemany("INSERT INTO units VALUES (?,?)",enumerate(ids))
+    state = {"builder":"parallel-catalog-v1","policy":policy,"units_cursor":len(ids),
+        "next_part":len(seed["plan"]["part_indexes"]),"counts":saved["counts"],"seed":{
+            "plan_manifest_sha256":seed["plan"]["manifest_sha256"],"source_catalog_sha256":saved["sha256"],
+            "source_candidate":saved["candidate"],"part_indexes":seed["plan"]["part_indexes"],"counts":saved["counts"]}}
+    fast._state(con,state)
+    con.commit()
+    con.close()
+    monkeypatch.setattr(storage,"_restore",lambda *a:pytest.fail("v7 completed seed must not restore again"))
+    reuse.initialize_seed(local,candidate,policy,seed,tmp_path / "no-cache")
+    assert (local / "building.sqlite").is_file() and not pending.exists()
+    con = sqlite3.connect(local / "building.sqlite")
+    assert con.execute("SELECT * FROM units ORDER BY position").fetchall() == list(enumerate(ids))
+    con.close()

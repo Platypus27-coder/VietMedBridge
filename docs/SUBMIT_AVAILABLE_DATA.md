@@ -75,6 +75,13 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   nếu đã xử lý đến delta thì giữ tiến độ đó. Log tách `Catalog reuse`, `Catalog delta staging`,
   `Catalog unit map` và `Disk catalog/BM25 delta`; bảng unit là SQL, không phải encode neural.
   `reused_catalog` trong manifest/report ghi nguồn, checksum, số part và counts đã kế thừa.
+  Bản v8 tính SHA256 toàn file ngay lúc giải nén 220 phần, không đọc lại file lớn sau dòng cuối.
+  Kế thừa dùng page cache SQLite 128 MiB; chuyển ánh xạ đã tính theo khối 65.536 dòng,
+  commit cursor cùng dữ liệu. Cùng runtime có thể tiếp tục bản `seed-copy.sqlite` đang chuyển dở,
+  hoặc bản v7 đã commit xong trước khi bị ngắt trong kiểm tra/copy backup; không khôi phục lại nguồn.
+  Phase và heartbeat mỗi 15 giây ghi SQL steps, elapsed và dung lượng file local.
+  Bỏ lượt `quick_check` lặp ở bước kế thừa; kiểm toàn DB vẫn chạy khi catalog cuối hoàn tất.
+  Giữ SQL checkpoint cũ bằng hard link trên cùng ổ khi có thể, tránh copy thêm một file lớn.
   Bản v6 dùng tối đa 4 process theo CPU quota/affinity, cache hash token và ghi SQL theo lô;
   giữ nguyên PyVi/Jieba, medical aliases, token hash, trọng số BM25 và source span.
   Log ghi riêng thời gian lexical/SQL từng shard để đo nút thắt trên phiên thực tế.

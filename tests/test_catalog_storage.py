@@ -199,3 +199,22 @@ def test_local_disk_full_during_restore_does_not_trigger_expensive_rebuild(tmp_p
     monkeypatch.setattr(storage, "publish_file", lambda *a: (_ for _ in ()).throw(OSError("No space left on device")))
     with pytest.raises(OSError, match="No space"):
         prepare("full-runtime")
+
+
+def test_streaming_restore_verifies_whole_checksum_without_second_read(tmp_path,setup_catalog,monkeypatch):
+    prepare,_ = setup_catalog
+    catalog = prepare()
+    catalog.close()
+    marker = next((tmp_path / "catalogs").glob("*/catalog.json"))
+    saved = read_json(marker)
+    verify = storage.verify_file
+    def no_second_read(path,checksum):
+        assert not str(path).endswith(".restore.tmp"), "Decoded checksum must be verified while restoring"
+        return verify(path,checksum)
+    monkeypatch.setattr(storage,"verify_file",no_second_read)
+    output = tmp_path / "restored.sqlite"
+    storage._restore(marker.parent,saved,output)
+    assert sha256_file(output) == saved["sha256"]
+    with pytest.raises(ValueError,match="checksum"):
+        storage._restore(marker.parent,saved | {"sha256":"0"*64},tmp_path / "invalid.sqlite")
+    assert not (tmp_path / "invalid.sqlite").exists()
