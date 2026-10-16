@@ -1,8 +1,8 @@
 """Recover and transfer derived SQLite catalogs without changing their data policy.
 
-The original writer stays byte-for-byte unchanged so existing catalog identities
-remain usable. Build on the runtime's local disk first, retain that completed DB,
-and publish bounded compressed parts before the Drive completion manifest.
+The original reader/policy stays unchanged so completed catalogs remain usable.
+New builds use parallel lexical preparation and resumable local shard commits.
+Publish bounded compressed parts before the Drive completion manifest.
 """
 from __future__ import annotations
 
@@ -211,11 +211,13 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
             atomic_json(local_marker, saved)
         else:
             _preserve_bad_local(local_dir)
-    # The unchanged writer targets local disk. Its completed DB/marker survive
-    # publication failure in this runtime instead of being deleted with a tempdir.
+    # Healthy existing catalogs above retain their original bytes/identity.
+    # A new catalog uses the same schema/analyzer policy with a faster executor.
     if stage_build is not None and not local_marker.exists():
         build = stage_build()
-    base = writer.prepare_disk_catalog(build, candidate, inputs, Path(work_dir), analyzer, work_dir=work_dir)
+    from .catalog_builder import prepare_catalog
+    base = prepare_catalog(build,candidate,inputs,Path(work_dir),analyzer,work_dir=work_dir,
+        policy=policy,checkpoint_dir=Path(output_dir) / "lexical_cache")
     try:
         saved = _publish(local, target, base.manifest)
     finally:

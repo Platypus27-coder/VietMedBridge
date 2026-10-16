@@ -22,6 +22,9 @@ def notebook():
     chưa tải parent/section/ledger ở bước Index inputs. Log ghi riêng part reused/new.
     Resume dùng cursor trên Drive để bỏ qua nội dung input part cũ. Runtime mới vẫn đọc source,
     nhưng spool chỉ giữ hash sau cursor. SHA256 input cũ được kiểm khi bước tiếp theo dùng file.
+    Catalog tự dùng tối đa 4 CPU process, giữ nguyên PyVi/Jieba và BM25. Mỗi shard có
+    checkpoint tách từ trên Drive; SQLite tiếp tục từ shard đã commit nếu còn cùng runtime.
+    Runtime mới phải nhập lại SQL nhưng dùng lại checkpoint tách từ, không tính embedding lại.
     Chỉ cần chỉnh `DATA_ROOT_PATH` nếu Drive của tài khoản đang chạy dùng đường dẫn khác.
 
     Giữ URL thuộc snapshot gốc, kể cả URL bị BTC loại trong bản dataset mới, theo yêu cầu
@@ -56,7 +59,7 @@ def notebook():
     WORK_DIR = Path("/content/vmb_submit_work")
     CHECKOUT = Path("/content/VietMedBridge-submit")
     REPO_URL = "https://github.com/Platypus27-coder/VietMedBridge.git"
-    WORKFLOW_VERSION = "all-available-legacy-20261016-v5"
+    WORKFLOW_VERSION = "all-available-legacy-20261016-v6"
     os.environ["HF_HOME"] = "/content/hf_cache"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     WORK_DIR.mkdir(parents=True,exist_ok=True)
@@ -140,7 +143,8 @@ def notebook():
     importlib.invalidate_caches()
     for module_name in ("vietmedbridge.artifacts","vietmedbridge.colab_storage","vietmedbridge.content_embeddings",
                         "vietmedbridge.input_resume","vietmedbridge.input_spool","vietmedbridge.index_inputs",
-                        "vietmedbridge.catalog_storage","vietmedbridge.official_scope","vietmedbridge.submission_workflow"):
+                        "vietmedbridge.catalog_builder","vietmedbridge.catalog_storage",
+                        "vietmedbridge.official_scope","vietmedbridge.submission_workflow"):
         if module_name in sys.modules:
             importlib.reload(sys.modules[module_name])
     from vietmedbridge.artifacts import atomic_json, read_json, sha256_file, verify_file

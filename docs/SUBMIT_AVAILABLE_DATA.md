@@ -64,6 +64,17 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Mọi payload thực sự dùng vẫn được kiểm SHA256; identity và checkpoint cũ được giữ.
 - Embedding dùng `data/model_cache` theo nội dung và đúng model/runtime; không gán lại vector của producer khác.
 - CPU catalog được tạo trên ổ local Colab và lưu các phần nén trên Drive theo cơ chế catalog hiện có.
+  Bản v6 dùng tối đa 4 process theo CPU quota/affinity, cache hash token và ghi SQL theo lô;
+  giữ nguyên PyVi/Jieba, medical aliases, token hash, trọng số BM25 và source span.
+  Log ghi riêng thời gian lexical/SQL từng shard để đo nút thắt trên phiên thực tế.
+  Kết quả lexical mỗi shard được nén Parquet và publish cùng receipt SHA256 ở
+  `retrieval/catalogs/lexical_cache/` trước khi commit SQL. Receipt khóa analyzer/encoding/source hash,
+  không khóa candidate: part nguồn còn nguyên dùng lại khi bổ sung batch URL mới.
+  Cùng runtime: `building.sqlite` ghi cursor và dữ liệu trong cùng transaction, tiếp tục shard đã commit.
+  Runtime mới: nhập SQL lại từ nguồn đã kiểm nhưng dùng receipt lexical để bỏ qua tách từ đã làm.
+  Đây không phải snapshot SQLite đầy đủ mỗi shard trên Drive; không tuyên bố SQL tiếp tục nguyên vị trí khi mất VM.
+  Bản cũ dùng TemporaryDirectory không có các receipt này: đổi code giữa lượt có thể mất tiến độ catalog dở;
+  model input, chunk, vector và catalog đã hoàn tất vẫn dùng lại. Catalog hoàn tất không bị chuyển định dạng hoặc xây lại do nâng cấp executor.
 - Report chính: `data/retrieval/current_submission.json`.
 - Các artifact inference mới, query checkpoint và ZIP: **`VietMedBridge/submission_runs/<build-run>`** trên Drive,
   nằm cạnh `data`. Runtime mất không làm mất những checkpoint đã publish xong.
