@@ -121,6 +121,38 @@ def test_scope_reuses_unchanged_vectors_without_neural_inference(tmp_path,frozen
     np.testing.assert_array_equal(new_store.gather(range(len(new_ids))),old_store.gather([old_ids.index(i) for i in new_ids]))
 
 
+def test_finished_family_inventory_resumes_without_corpus_rescan(tmp_path,frozen,monkeypatch):
+    old_build,_,old_inputs = frozen
+    encoder = Encoder()
+    content_embeddings(tmp_path,old_build / "index_inputs",old_inputs,encoder,tmp_path / "old_vectors",work_dir=tmp_path / "work")
+    snap = current(tmp_path,[{"id":921,"url":"https://example.org/article#evidence"}])
+    build,candidate,inputs = derive(tmp_path,frozen,snap)
+    producer = {"encoder":encoder.identity,"dimension":encoder.dimension}
+    output = tmp_path / "new_vectors"
+    report = scope.rebind_cached_family(tmp_path,build,candidate,inputs,producer,output,work_dir=tmp_path / "work")
+    monkeypatch.setattr(scope,"ContentBlocks",lambda *a,**k:pytest.fail("Completed family lookup rebuilt"))
+    monkeypatch.setattr(scope,"content_embeddings",lambda *a,**k:pytest.fail("Completed family remapped"))
+    assert scope.rebind_cached_family(tmp_path,build,candidate,inputs,producer,output,work_dir=tmp_path / "fresh") == report
+    changed = {"encoder":encoder.identity | {"revision":"other-producer"},"dimension":encoder.dimension}
+    with pytest.raises(ValueError,match="checkpoint input/model changed"):
+        scope.rebind_cached_family(tmp_path,build,candidate,inputs,changed,output,work_dir=tmp_path / "fresh")
+
+
+def test_family_inventory_refreshes_when_gpu_maps_advance(tmp_path,frozen):
+    old_build,_,old_inputs = frozen
+    snap = current(tmp_path,[{"id":921,"url":"https://example.org/article#evidence"}])
+    build,candidate,inputs = derive(tmp_path,frozen,snap)
+    encoder = Encoder()
+    producer = {"encoder":encoder.identity,"dimension":encoder.dimension}
+    output = tmp_path / "new_vectors"
+    initial = scope.rebind_cached_family(tmp_path,build,candidate,inputs,producer,output,work_dir=tmp_path / "work")
+    assert initial["cached_inputs"] == initial["complete_mapped_parts"] == 0
+    content_embeddings(tmp_path,old_build / "index_inputs",old_inputs,encoder,tmp_path / "seed",work_dir=tmp_path / "work")
+    content_embeddings(tmp_path,build / "index_inputs",inputs,encoder,output,work_dir=tmp_path / "work",encode_missing=False)
+    refreshed = scope.rebind_cached_family(tmp_path,build,candidate,inputs,producer,output,work_dir=tmp_path / "work")
+    assert refreshed["missing_inputs"] == 0 and refreshed["complete_mapped_parts"] == len(inputs["parts"])
+
+
 def test_legacy_all_keeps_both_old_ids_without_new_btc_filter(tmp_path,frozen,external):
     snap = {"revision":"old-source","files":{"links_corpus.parquet":{
         "path":external[1].name,"sha256":sha256_file(external[1])}}}

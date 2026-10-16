@@ -137,6 +137,94 @@ def test_preflight_repairs_mount_before_starting_model_stage(mounted, monkeypatc
     assert result == "ready" and len(model_loads) == 1 and len(remounts) == 1
 
 
+def test_drive_read_abort_103_recovers_same_stage(mounted,monkeypatch):
+    root,work,remounts = mounted
+    monkeypatch.setattr(storage.time,"sleep",lambda *a:None)
+    attempts = []
+    def run():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise ConnectionAbortedError(103,"Software caused connection abort",str(root / "cache.done.json"))
+        return "cache-restored"
+    assert storage.run_with_drive_recovery(run,root,work) == "cache-restored"
+    assert len(attempts) == 2 and len(remounts) == 1
+
+
+def test_pathlib_abort_without_filename_requires_drive_read_frame(mounted,monkeypatch):
+    root,work,remounts = mounted
+    monkeypatch.setattr(storage.time,"sleep",lambda *a:None)
+    attempts = []
+    def read_json(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise ConnectionAbortedError(103,"Software caused connection abort")
+        return "ok"
+    assert storage.run_with_drive_recovery(lambda:read_json(root / "block.done.json"),root,work) == "ok"
+    assert len(remounts) == 1
+
+
+def test_unattributed_socket_abort_does_not_remount_drive(mounted):
+    root,work,remounts = mounted
+    def run():
+        raise ConnectionAbortedError(103,"socket aborted without a file path")
+    with pytest.raises(ConnectionAbortedError):
+        storage.run_with_drive_recovery(run,root,work)
+    assert not remounts
+
+
+@pytest.mark.parametrize("error_number",[103,errno.ENOSPC])
+def test_other_file_abort_or_quota_does_not_remount_drive(mounted,error_number):
+    root,work,remounts = mounted
+    def run():
+        raise OSError(error_number,"file error",str(work / "local.json"))
+    with pytest.raises(OSError):
+        storage.run_with_drive_recovery(run,root,work)
+    assert not remounts
+
+
+def test_drive_json_retries_only_interrupted_file(monkeypatch):
+    from vietmedbridge import artifacts
+    monkeypatch.setattr(artifacts.time,"sleep",lambda *a:None)
+    reads = []
+    def read_text(path,**kwargs):
+        reads.append(path)
+        if len(reads) < 3:
+            raise ConnectionAbortedError(103,"Software caused connection abort")
+        return '{"state":"ok"}'
+    monkeypatch.setattr(Path,"read_text",read_text)
+    assert artifacts.read_json("/content/drive/MyDrive/data/cache.done.json") == {"state":"ok"}
+    assert len(reads) == 3
+
+
+def test_drive_json_persistent_abort_has_bounded_retries(monkeypatch):
+    from vietmedbridge import artifacts
+    monkeypatch.setattr(artifacts.time,"sleep",lambda *a:None)
+    reads = []
+    def read_text(path,**kwargs):
+        reads.append(path)
+        raise ConnectionAbortedError(103,"persistent Drive read abort")
+    monkeypatch.setattr(Path,"read_text",read_text)
+    with pytest.raises(ConnectionAbortedError):
+        artifacts.read_json("/content/drive/MyDrive/data/cache.done.json")
+    assert len(reads) == 3
+
+
+@pytest.mark.parametrize("failure",[OSError(103,"local file abort"),OSError(errno.ENOSPC,"quota"),"invalid-json"])
+def test_json_retry_does_not_hide_local_errors_quota_or_corruption(monkeypatch,failure):
+    from vietmedbridge import artifacts
+    reads = []
+    def read_text(path,**kwargs):
+        reads.append(path)
+        if isinstance(failure,OSError):
+            raise failure
+        return failure
+    monkeypatch.setattr(Path,"read_text",read_text)
+    path = "local.json" if getattr(failure,"errno",None) == 103 else "/content/drive/MyDrive/data/cache.done.json"
+    with pytest.raises((OSError,ValueError)):
+        artifacts.read_json(path)
+    assert len(reads) == 1
+
+
 def test_remount_cannot_switch_the_active_corpus(mounted, monkeypatch):
     root, work, _ = mounted
     attempts = []

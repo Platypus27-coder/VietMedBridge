@@ -32,7 +32,23 @@ def _disconnected(error, mount):
         return False
     if error.filename is not None and not Path(error.filename).is_relative_to(mount):
         return False
-    return error.errno in {107, errno.ENOTCONN} or "transport endpoint is not connected" in str(error).lower()
+    if error.errno in {107, errno.ENOTCONN} or "transport endpoint is not connected" in str(error).lower():
+        return True
+    if error.errno not in {103, errno.ECONNABORTED}:
+        return False
+    if error.filename is not None:
+        return True  # The filename was positively bound to this Drive above.
+    # Some pathlib/FUSE aborts omit filename. Require the interrupted file-read
+    # frame's path, so a network socket abort is not mistaken for a Drive fault.
+    trace = error.__traceback__
+    while trace is not None:
+        frame = trace.tb_frame
+        if frame.f_code.co_name in {"read_text","read_bytes","open","read_json","sha256_file"}:
+            value = frame.f_locals.get("self") if frame.f_code.co_name in {"read_text","read_bytes","open"} else frame.f_locals.get("path")
+            if isinstance(value,(str,Path)) and Path(value).is_relative_to(mount):
+                return True
+        trace = trace.tb_next
+    return False
 
 
 def _remount(mount, *, readonly):
@@ -48,7 +64,7 @@ def _remount(mount, *, readonly):
 
 
 def run_with_drive_recovery(operation, root, work_dir, *, readonly=False, max_recoveries=1):
-    """Preflight before weights; recover only ENOTCONN, never corruption or quota.
+    """Preflight before weights; recover Drive ENOTCONN/ECONNABORTED, never corruption or quota.
 
     The operation must publish resumable checkpoints and release resources on
     failure. Recovery runs on the calling thread, after the operation's finally
@@ -108,7 +124,7 @@ def run_with_drive_recovery(operation, root, work_dir, *, readonly=False, max_re
                 raise unavailable(error) from error
             recoveries += 1
             delay = min(2 ** (recoveries - 1), 8)
-            print(f"Drive disconnected (Errno 107). Recovery {recoveries}/{max_recoveries}: "
+            print(f"Drive disconnected (Errno {error.errno}). Recovery {recoveries}/{max_recoveries}: "
                   f"unmount, remount, verify candidate, then resume checkpoints (wait {delay}s).", flush=True)
             try:
                 time.sleep(delay)

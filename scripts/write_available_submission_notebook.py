@@ -138,7 +138,8 @@ def notebook():
     if Path(vietmedbridge.__file__).resolve() != (CHECKOUT / "src/vietmedbridge/__init__.py").resolve():
         raise RuntimeError("Kernel đang giữ package của checkout khác. Restart session rồi Run all.")
     importlib.invalidate_caches()
-    for module_name in ("vietmedbridge.input_resume","vietmedbridge.input_spool","vietmedbridge.index_inputs",
+    for module_name in ("vietmedbridge.artifacts","vietmedbridge.colab_storage","vietmedbridge.content_embeddings",
+                        "vietmedbridge.input_resume","vietmedbridge.input_spool","vietmedbridge.index_inputs",
                         "vietmedbridge.catalog_storage","vietmedbridge.official_scope","vietmedbridge.submission_workflow"):
         if module_name in sys.modules:
             importlib.reload(sys.modules[module_name])

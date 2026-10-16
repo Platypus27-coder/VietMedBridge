@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,21 @@ def digest_json(value: Any) -> str:
 
 
 def read_json(path: str | Path) -> Any:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    source = Path(path)
+    for attempt in range(3):
+        try:
+            payload = source.read_text(encoding="utf-8")
+            break
+        except OSError as error:
+            # A transient Drive read abort should retry this small file first,
+            # rather than discard an entire cache inventory. Corruption, quota,
+            # other mounts and a persistent failure keep their original error.
+            if (error.errno != 103 or not source.is_relative_to(Path("/content/drive"))
+                or attempt == 2):
+                raise
+            print(f"Drive read aborted (Errno 103): retry {attempt+1}/2 for {source.name}",flush=True)
+            time.sleep(0.5*(attempt+1))
+    return json.loads(payload)
 
 
 def atomic_json(path: str | Path, value: Any) -> None:

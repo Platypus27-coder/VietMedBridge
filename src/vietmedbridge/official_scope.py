@@ -399,6 +399,30 @@ def activate_scope(data_root, build, candidate, inputs, snapshot):
 def rebind_cached_family(data_root, build, candidate, inputs, producer, output_dir, *, work_dir):
     """CPU-only cache inventory and maps; never initializes a neural model."""
     encoder = SimpleNamespace(identity=producer["encoder"],dimension=producer["dimension"])
+    output_dir = Path(output_dir)
+    report_path = output_dir / "scope_cache_coverage.json"
+    if report_path.exists():
+        saved = read_json(report_path)
+        identity = {"input_manifest_sha256":inputs["manifest_sha256"],"input_count":inputs["input_count"],
+            "encoder":encoder.identity,"dimension":encoder.dimension,"format":"content-reference-v1"}
+        mapped = checked(read_json(output_dir / "embeddings.json"))
+        if (read_json(output_dir / "config.json") != identity
+            or any(mapped.get(k) != v for k,v in identity.items())
+            or mapped.get("signature") != digest_json(identity)
+            or saved.get("candidate_manifest_sha256") != candidate["candidate_manifest_sha256"]
+            or saved.get("model_id") != encoder.identity.get("model_id")
+            or saved.get("total_inputs") != inputs["input_count"] or saved.get("total_parts") != len(inputs["parts"])
+            or saved.get("neural_inference_used") is not False
+            or mapped.get("state") != ("COMPLETE" if len(mapped["parts"]) == len(inputs["parts"]) else "IN_PROGRESS")
+            or type(saved.get("cached_inputs")) is not int or not 0 <= saved["cached_inputs"] <= inputs["input_count"]
+            or saved.get("missing_inputs") != inputs["input_count"]-saved["cached_inputs"]):
+            raise ValueError("CPU cache inventory checkpoint input/model changed.")
+        if (saved.get("complete_mapped_parts") == len(mapped["parts"])
+            and saved.get("mapped_manifest_sha256",mapped["manifest_sha256"]) == mapped["manifest_sha256"]):
+            print(f"Reused CPU cache inventory: {saved['model_id']} | {saved['cached_inputs']:,}/{saved['total_inputs']:,} cached texts"
+                  " | saved snapshot, no corpus rescan; payload checked on use",flush=True)
+            return saved
+        print("Cache mappings advanced after the saved inventory; refreshing CPU coverage.",flush=True)
     cached = 0
     with_cache = ContentBlocks(data_root,encoder,Path(work_dir) / "scope-cache-inventory")
     try:
@@ -418,5 +442,6 @@ def rebind_cached_family(data_root, build, candidate, inputs, producer, output_d
         "missing_inputs":inputs["input_count"]-cached,"total_inputs":inputs["input_count"],
         "complete_mapped_parts":len(mapped["parts"]),"total_parts":len(inputs["parts"]),
         "neural_inference_used":False,"candidate_manifest_sha256":candidate["candidate_manifest_sha256"]}
-    atomic_json(Path(output_dir) / "scope_cache_coverage.json",report)
+    report["mapped_manifest_sha256"] = mapped["manifest_sha256"]
+    atomic_json(report_path,report)
     return report
