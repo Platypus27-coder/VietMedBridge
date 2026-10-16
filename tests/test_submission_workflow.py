@@ -138,6 +138,44 @@ def test_legacy_baseline_zip_and_resume(prepared,monkeypatch):
     assert repeated["ready"]["zip_sha256"] == saved["zip_sha256"] and p.counters == before
 
 
+def test_complete_primary_cache_skips_model_loading(prepared,monkeypatch):
+    from vietmedbridge import retrieval_models
+    p = prepared
+    setup_workflow(p,monkeypatch)
+    monkeypatch.setattr(retrieval_models,"TorchDenseEncoder",lambda *a,**k:pytest.fail("Complete BGE cache must skip model loading"))
+    before = dict(p.counters)
+    workflow._ensure_primary(workflow._submission_context(p.root,p.checkout),p.work)
+    assert p.counters == before
+
+
+def test_primary_honors_bge_batch_and_reuses_existing_vectors_when_remapping(prepared,monkeypatch):
+    from vietmedbridge import retrieval_models, runtime_profile, full_scale_runtime, portable_embeddings
+    p = prepared
+    setup_workflow(p,monkeypatch)
+    context = workflow._submission_context(p.root,p.checkout)
+    build,candidate,inputs = context[3:6]
+    view = p.root / portable_embeddings.resources_relative(candidate,p.config) / "bge"
+    for path in view.glob("map-*.done.json"):
+        path.unlink()  # Simulate missing maps while paid-for vectors remain.
+    fake = full_scale_runtime.TorchDenseEncoder
+    batches = []
+    class NoReencode(fake):
+        def encode(self,*a,**kw):
+            pytest.fail("Remapping existing content vectors must not encode again")
+    monkeypatch.setattr(retrieval_models,"TorchDenseEncoder",NoReencode)
+    monkeypatch.setattr(runtime_profile,"inference_batches",lambda:{"embedding":16})
+    from vietmedbridge import content_embeddings as content
+    original = content.content_embeddings
+    def record(*a,**kw):
+        batches.append(kw["batch_size"])
+        return original(*a,**kw)
+    monkeypatch.setattr(content,"content_embeddings",record)
+    workflow._ensure_primary(context,p.work)
+    assert batches == [32]
+    manifest = read_json(view / "embeddings.json")
+    assert manifest["state"] == "COMPLETE" and len(manifest["parts"]) == len(inputs["parts"])
+
+
 def test_submission_notebook_has_two_phases_and_persistent_results():
     root = Path(__file__).resolve().parents[1]
     notebook = nbformat.read(root / "notebooks/04_colab_submit_available_data.ipynb",as_version=4)

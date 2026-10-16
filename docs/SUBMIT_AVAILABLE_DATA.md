@@ -63,6 +63,14 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   từ phần nén, không tải lại source payload. Section, ledger và failure không được tải cho hai bước này.
   Mọi payload thực sự dùng vẫn được kiểm SHA256; identity và checkpoint cũ được giữ.
 - Embedding dùng `data/model_cache` theo nội dung và đúng model/runtime; không gán lại vector của producer khác.
+  `cache.cached_inputs` trong CPU preparation là snapshot lúc inventory, không phải bộ đếm GPU trực tiếp.
+  `Index inputs: COMPLETE` xác nhận đầu vào model đã đủ; `Catalog unit map` là ánh xạ SQL.
+  Hoàn tất embedding phải đối chiếu manifest/map BGE của đúng candidate, không suy từ hai mốc trên.
+  Bước BGE còn thiếu dùng batch riêng `retrieval_scale.json:bge_batch_size` (hiện là 32),
+  hoặc batch lớn hơn của GPU profile; T4 không bị giới hạn bởi batch Qwen dùng chung là 16.
+  Encoder giữ cơ chế giảm một nửa batch khi CUDA OOM. Vector theo nội dung đã có được dùng lại;
+  chỉ sửa batch thực thi, giữ nguyên model/revision/pooling/runtime và model producer code.
+  Cấu hình này chưa phải số đo tốc độ trên GPU thực tế.
 - CPU catalog được tạo trên ổ local Colab và lưu các phần nén trên Drive theo cơ chế catalog hiện có.
   Bản v7 tự tìm catalog nguồn đã hoàn tất và kế thừa nguyên BM25/document/child/parent khi bộ gộp
   giữ toàn bộ nguồn. SHA của các file giữ nguyên có thể chứng minh trực tiếp; khi nguồn cũ được

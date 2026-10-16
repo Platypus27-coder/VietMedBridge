@@ -207,10 +207,18 @@ def _ensure_primary(context, work):
         if existing is not None and existing["state"] == "COMPLETE":
             print("BGE corpus cache complete; no child corpus encoding needed.",flush=True)
             return existing
+        # The generic execution profile also serves the much larger Qwen
+        # encoder. Honor BGE's own throughput batch instead of capping a T4 at
+        # Qwen's batch of 16; the unchanged encoder halves batches on CUDA OOM.
+        configured_batch = read_json(checkout / "configs/retrieval_scale.json")["bge_batch_size"]
+        if type(configured_batch) is not int or configured_batch < 1:
+            raise ValueError("BGE batch size must be a positive integer.")
+        batch = max(configured_batch,inference_batches()["embedding"])
+        print(f"BGE corpus: batch {batch}; existing content vectors reused; CUDA OOM halves batch",flush=True)
         encoder = TorchDenseEncoder(config["dense"])
         try:
             return content_embeddings(root,build / "index_inputs",inputs,encoder,resources / "bge",
-                work_dir=work,batch_size=inference_batches()["embedding"])
+                work_dir=work,batch_size=batch)
         finally:
             encoder.close()
     result = run_with_drive_recovery(primary,root,work,max_recoveries=3)
