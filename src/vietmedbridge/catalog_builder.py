@@ -203,7 +203,7 @@ def prepare_catalog(build,candidate,inputs,output_dir,analyzer,*,work_dir,policy
             cursor = state["units_cursor"]
             if cursor and con.execute("SELECT count(*) FROM units").fetchone()[0] != cursor:
                 raise ValueError("Partial catalog unit cursor changed.")
-            for part in inputs["parts"]:
+            for unit_index,part in enumerate(inputs["parts"],1):
                 if part["start"]+part["rows"] <= cursor:
                     continue
                 if part["start"] != cursor:
@@ -218,6 +218,8 @@ def prepare_catalog(build,candidate,inputs,output_dir,analyzer,*,work_dir,policy
                     cursor += len(ids)
                     state["units_cursor"] = cursor
                     _state(con,state)
+                if unit_index % 64 == 0 or cursor == inputs["input_count"]:
+                    print(f"Catalog unit map: {cursor:,}/{inputs['input_count']:,} rows | SQL checkpoint saved",flush=True)
             if cursor != inputs["input_count"]:
                 raise ValueError("Incomplete unit mapping.")
             if workers > 1 and state["next_part"] < len(candidate["parts"]):
