@@ -126,9 +126,12 @@ def prepare_current_submission(data_root, checkout, work_dir):
     print("CPU catalog: all available validated documents, including legacy URLs; source spans unchanged.",flush=True)
     base = run_with_drive_recovery(lambda:prepare_disk_catalog(build,candidate,inputs,
         root / "retrieval/catalogs",analyzer,work_dir=work,
-        stage_build=lambda:stage_scope_catalog(build,candidate,inputs,work_dir=work)),root,work,max_recoveries=3)
+        stage_build=lambda:stage_scope_catalog(build,candidate,inputs,work_dir=work),
+        stage_delta=lambda indexes:stage_scope_catalog(build,candidate,inputs,work_dir=work,skip_parts=indexes)),
+        root,work,max_recoveries=3)
     try:
         identity = base.identity
+        reused_catalog = base.manifest.get("reused_catalog")
     finally:
         base.close()
     report = {"state":"CPU_PREPARATION_COMPLETE","build_run":build.name,
@@ -140,7 +143,7 @@ def prepare_current_submission(data_root, checkout, work_dir):
         "results_root":str(root.parent / "submission_runs" / build.name),"updated_at":utc_now(),
         "scope":"ALL_AVAILABLE_VALIDATED_DATA_LEGACY_URLS_RETAINED",
         "legacy_urls_retained":True,"current_btc_membership_validated":False,
-        "source_builds":sources}
+        "source_builds":sources,"reused_catalog":reused_catalog}
     atomic_json(report_path,report)
     atomic_json(root / "retrieval/cpu_preparation" / (candidate["candidate_manifest_sha256"][:16]+".json"),report)
     atomic_json(root / "retrieval/current_submission.json",report)

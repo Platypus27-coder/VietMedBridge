@@ -64,6 +64,17 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Mọi payload thực sự dùng vẫn được kiểm SHA256; identity và checkpoint cũ được giữ.
 - Embedding dùng `data/model_cache` theo nội dung và đúng model/runtime; không gán lại vector của producer khác.
 - CPU catalog được tạo trên ổ local Colab và lưu các phần nén trên Drive theo cơ chế catalog hiện có.
+  Bản v7 tự tìm catalog nguồn đã hoàn tất và kế thừa nguyên BM25/document/child/parent khi bộ gộp
+  giữ toàn bộ nguồn. SHA của các file giữ nguyên có thể chứng minh trực tiếp; khi nguồn cũ được
+  đóng gói Parquet lại, receipt scope phải khóa đúng source snapshot/part, giữ đủ ID và đủ counts.
+  Chỉ cho phép kế thừa prefix nguyên vẹn, cùng analyzer/glossary/encoding/chunk/tokenizer/snapshot;
+  không áp dụng cho scope lọc whitelist BTC hoặc selection thiếu một phần nguồn cũ.
+  Catalog cũ được clone/restore có kiểm SHA, không sửa hay xóa bản gốc. Cập nhật bảng dense position
+  theo input hiện tại, giữ các postings/index cũ và chỉ phân tích/index các shard delta.
+  Catalog local đang dở ở trong prefix cũ giữ được bảng units khi nâng cấp sang kế thừa;
+  nếu đã xử lý đến delta thì giữ tiến độ đó. Log tách `Catalog reuse`, `Catalog delta staging`,
+  `Catalog unit map` và `Disk catalog/BM25 delta`; bảng unit là SQL, không phải encode neural.
+  `reused_catalog` trong manifest/report ghi nguồn, checksum, số part và counts đã kế thừa.
   Bản v6 dùng tối đa 4 process theo CPU quota/affinity, cache hash token và ghi SQL theo lô;
   giữ nguyên PyVi/Jieba, medical aliases, token hash, trọng số BM25 và source span.
   Log ghi riêng thời gian lexical/SQL từng shard để đo nút thắt trên phiên thực tế.
@@ -71,7 +82,8 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   `retrieval/catalogs/lexical_cache/` trước khi commit SQL. Receipt khóa analyzer/encoding/source hash,
   không khóa candidate: part nguồn còn nguyên dùng lại khi bổ sung batch URL mới.
   Cùng runtime: `building.sqlite` ghi cursor và dữ liệu trong cùng transaction, tiếp tục shard đã commit.
-  Runtime mới: nhập SQL lại từ nguồn đã kiểm nhưng dùng receipt lexical để bỏ qua tách từ đã làm.
+  Runtime mới: kế thừa catalog nguồn hoàn tất, nhập SQL delta còn dở từ nguồn đã kiểm
+  và dùng receipt lexical để bỏ qua tách từ đã làm.
   Đây không phải snapshot SQLite đầy đủ mỗi shard trên Drive; không tuyên bố SQL tiếp tục nguyên vị trí khi mất VM.
   Bản cũ dùng TemporaryDirectory không có các receipt này: đổi code giữa lượt có thể mất tiến độ catalog dở;
   model input, chunk, vector và catalog đã hoàn tất vẫn dùng lại. Catalog hoàn tất không bị chuyển định dạng hoặc xây lại do nâng cấp executor.

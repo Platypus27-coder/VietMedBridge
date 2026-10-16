@@ -198,6 +198,9 @@ def prepare_catalog(build,candidate,inputs,output_dir,analyzer,*,work_dir,policy
             or not 0 <= state.get("next_part",-1) <= len(candidate["parts"])):
             raise ValueError("Partial catalog source/analyzer policy changed.")
         if state != policy:
+            seed = state.get("seed")
+            if seed is not None:
+                atomic_json(target / "catalog_seed.json",{"policy":policy,"seed":seed})
             print(f"Catalog CPU workers: {workers} | local SQL resume {state['next_part']}/{len(candidate['parts'])} shards"
                   " | lexical checkpoints on Drive",flush=True)
             cursor = state["units_cursor"]
@@ -261,7 +264,11 @@ def prepare_catalog(build,candidate,inputs,output_dir,analyzer,*,work_dir,policy
                     state["next_part"] = index+1
                     _state(con,state)
                 elapsed = time.perf_counter()-started
-                print(f"Disk catalog/BM25: {index+1}/{len(candidate['parts'])} shards |"
+                inherited = len(seed["part_indexes"]) if seed else 0
+                label = (f"Disk catalog/BM25 delta: {index+1-inherited}/{len(candidate['parts'])-inherited} new shards"
+                         f" | inherited {inherited}" if seed else
+                         f"Disk catalog/BM25: {index+1}/{len(candidate['parts'])} shards")
+                print(f"{label} |"
                       f" lexical {'reused' if reused else 'new'} {analyzed-started:.1f}s |"
                       f" SQL {time.perf_counter()-analyzed:.1f}s | {elapsed:.1f}s/shard",flush=True)
             counts = state["counts"]
@@ -304,6 +311,12 @@ def prepare_catalog(build,candidate,inputs,output_dir,analyzer,*,work_dir,policy
                 raise ValueError("Catalog local copy changed.")
     saved = policy | {"signature":signature,"counts":{k:candidate["counts"][k] for k in ("documents","children","parents")},
         "unit_count":inputs["input_count"],"path":"catalog.sqlite","sha256":checksum,"state":"COMPLETE"}
+    seed_receipt = target / "catalog_seed.json"
+    if seed_receipt.is_file():
+        reused = read_json(seed_receipt)
+        if reused.get("policy") != policy:
+            raise ValueError("Catalog inheritance publication policy changed.")
+        saved["reused_catalog"] = reused["seed"]
     saved["manifest_sha256"] = digest_json(saved)
     atomic_json(marker,saved)
     building.unlink()

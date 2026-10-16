@@ -157,7 +157,7 @@ def _preserve_bad_local(local_dir):
 
 
 def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work_dir, read_only=False,
-                         stage_build=None):
+                         stage_build=None, stage_delta=None):
     """Reuse healthy catalogs, repair from local bytes, otherwise rebuild only this derived index."""
     policy = _contract(build, candidate, inputs, analyzer)
     signature = digest_json(policy)
@@ -211,10 +211,17 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
             atomic_json(local_marker, saved)
         else:
             _preserve_bad_local(local_dir)
-    # Healthy existing catalogs above retain their original bytes/identity.
-    # A new catalog uses the same schema/analyzer policy with a faster executor.
-    if stage_build is not None and not local_marker.exists():
-        build = stage_build()
+    # A compatible source catalog keeps its FTS postings and source rows.
+    # Only dense position mapping and new source parts need further work.
+    from .catalog_reuse import find_seed, initialize_seed
+    seed = find_seed(build,candidate,inputs,output_dir,policy) if not local_marker.exists() else None
+    if seed is not None:
+        initialize_seed(local_dir,candidate,policy,seed,work_dir)
+    if not local_marker.exists():
+        if seed is not None and stage_delta is not None:
+            build = stage_delta(seed["plan"]["part_indexes"])
+        elif stage_build is not None:
+            build = stage_build()
     from .catalog_builder import prepare_catalog
     base = prepare_catalog(build,candidate,inputs,Path(work_dir),analyzer,work_dir=work_dir,
         policy=policy,checkpoint_dir=Path(output_dir) / "lexical_cache")

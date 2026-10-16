@@ -173,18 +173,29 @@ def _complete_scope(target, local, signature, candidate, snapshot, tokenizer, wo
     return target,candidate,inputs
 
 
-def stage_scope_catalog(build, candidate, inputs, *, work_dir):
+def stage_scope_catalog(build, candidate, inputs, *, work_dir, skip_parts=()):
     """Copy only catalog inputs, and only when a catalog actually needs building."""
     target = Path(build)
     local = Path(work_dir) / "official_scope" / target.name
     _copy_checked(target / "config.json",local / "config.json",sha256_file(target / "config.json"))
+    skip = set(skip_parts)
+    if any(type(i) is not int or not 0 <= i < len(candidate["parts"]) for i in skip):
+        raise ValueError("Invalid inherited catalog source part.")
+    staged = 0
     for ordinal, part in enumerate(candidate["parts"],1):
+        if ordinal-1 in skip:
+            continue
         for kind in ("documents","children","parents"):
             entry = part["files"][kind]
             _copy_checked(_bound(target,entry["path"]),_bound(local,entry["path"]),entry["sha256"])
-        if ordinal % 16 == 0 or ordinal == len(candidate["parts"]):
-            print(f"Catalog input staging: {ordinal:,}/{len(candidate['parts']):,} parts"
-                  " | documents/children/parents only",flush=True)
+        staged += 1
+        if staged % 16 == 0 or staged == len(candidate["parts"])-len(skip):
+            if skip:
+                print(f"Catalog delta staging: {staged:,}/{len(candidate['parts'])-len(skip):,} new parts"
+                      f" | inherited {len(skip)} source parts skipped",flush=True)
+            else:
+                print(f"Catalog input staging: {ordinal:,}/{len(candidate['parts']):,} parts"
+                      " | documents/children/parents only",flush=True)
     for part in inputs["parts"]:
         _copy_checked(_bound(target / "index_inputs",part["path"]),
                       _bound(local / "index_inputs",part["path"]),part["sha256"])
