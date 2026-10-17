@@ -168,12 +168,59 @@ def test_primary_honors_bge_batch_and_reuses_existing_vectors_when_remapping(pre
     original = content.content_embeddings
     def record(*a,**kw):
         batches.append(kw["batch_size"])
+        assert Path(a[1]) == p.work / "official_scope" / build.name / "index_inputs"
         return original(*a,**kw)
     monkeypatch.setattr(content,"content_embeddings",record)
     workflow._ensure_primary(context,p.work)
     assert batches == [32]
     manifest = read_json(view / "embeddings.json")
     assert manifest["state"] == "COMPLETE" and len(manifest["parts"]) == len(inputs["parts"])
+
+
+def test_completed_catalog_releases_only_local_source_copies(prepared,monkeypatch):
+    from vietmedbridge import official_scope
+    p = prepared
+    setup_workflow(p,monkeypatch)
+    context = workflow._submission_context(p.root,p.checkout)
+    build,candidate,inputs = context[3:6]
+    stage = official_scope.stage_scope_catalog(build,candidate,inputs,work_dir=p.work)
+    source_hashes = {f:sha256_file(f) for f in p.root.rglob("*") if f.is_file()}
+    local_catalogs = {f:sha256_file(f) for f in p.work.glob("catalog-*/catalog.sqlite")}
+    protected = stage / "parts/user-note.txt"
+    protected.write_text("Keep this unrelated file")
+    copies = [stage / part["files"][kind]["path"] for part in candidate["parts"]
+              for kind in ("documents","children","parents")]
+    expected = sum(f.stat().st_size for f in copies)
+    assert workflow._release_catalog_staging(context,p.work) == expected and expected > 0
+    assert not any(f.exists() for f in copies)
+    assert protected.read_text() == "Keep this unrelated file"
+    assert (stage / "config.json").exists()
+    assert all((stage / "index_inputs" / part["path"]).exists() for part in inputs["parts"])
+    assert source_hashes == {f:sha256_file(f) for f in p.root.rglob("*") if f.is_file()}
+    assert local_catalogs and local_catalogs == {f:sha256_file(f) for f in p.work.glob("catalog-*/catalog.sqlite")}
+    assert workflow._release_catalog_staging(context,p.work) == 0
+
+
+@pytest.mark.parametrize("fault",["unpublished","wrong-stage","work-on-drive"])
+def test_catalog_staging_cleanup_rejects_unfinished_or_unrelated_state(prepared,monkeypatch,fault):
+    from vietmedbridge import official_scope
+    p = prepared
+    setup_workflow(p,monkeypatch)
+    context = workflow._submission_context(p.root,p.checkout)
+    build,candidate,inputs = context[3:6]
+    work = p.root / "unsafe-work" if fault == "work-on-drive" else p.work
+    stage = official_scope.stage_scope_catalog(build,candidate,inputs,work_dir=work)
+    files = {f:sha256_file(f) for f in stage.rglob("*") if f.is_file()}
+    if fault == "unpublished":
+        for f in (p.root / "retrieval/catalogs").glob("catalog-*/catalog.json"):
+            if read_json(f)["manifest_sha256"] == context[2]["catalog"]["disk_catalog_manifest_sha256"]:
+                f.unlink()
+    if fault == "wrong-stage":
+        atomic_json(stage / "config.json",{"signature":"other-corpus"})
+        files[stage / "config.json"] = sha256_file(stage / "config.json")
+    with pytest.raises(ValueError,match="Publish|different candidate|work disk"):
+        workflow._release_catalog_staging(context,work)
+    assert files == {f:sha256_file(f) for f in stage.rglob("*") if f.is_file()}
 
 
 def test_submission_notebook_has_two_phases_and_persistent_results():

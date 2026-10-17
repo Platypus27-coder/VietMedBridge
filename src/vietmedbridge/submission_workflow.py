@@ -215,15 +215,68 @@ def _ensure_primary(context, work):
             raise ValueError("BGE batch size must be a positive integer.")
         batch = max(configured_batch,inference_batches()["embedding"])
         print(f"BGE corpus: batch {batch}; existing content vectors reused; CUDA OOM halves batch",flush=True)
+        input_root = build / "index_inputs"
+        staged = Path(work) / "official_scope" / build.name / "index_inputs"
+        from .scale_vectors import bound
+        if ((staged / "units.json").is_file() and read_json(staged / "units.json") == inputs
+            and all(bound(staged,p["path"]).is_file() for p in inputs["parts"])):
+            input_root = staged
+            print("BGE inputs: reuse local CPU-stage files; each payload checked before encoding",flush=True)
         encoder = TorchDenseEncoder(config["dense"])
         try:
-            return content_embeddings(root,build / "index_inputs",inputs,encoder,resources / "bge",
+            return content_embeddings(root,input_root,inputs,encoder,resources / "bge",
                 work_dir=work,batch_size=batch)
         finally:
             encoder.close()
     result = run_with_drive_recovery(primary,root,work,max_recoveries=3)
     if result["state"] != "COMPLETE":
         raise ValueError("Complete the primary BGE corpus before submission inference.")
+
+
+def _release_catalog_staging(context, work):
+    """Release only named local Parquet copies after the Drive catalog is sealed.
+
+    Keep model inputs, SQL/vector caches, metadata and every original Drive file.
+    Candidate-declared copies can always be restored from the original build.
+    """
+    from .scale_vectors import bound, check_manifest
+    root,checkout,report,build,candidate,inputs,config = context
+    work = Path(work).resolve()
+    stage = work / "official_scope" / build.name
+    if not stage.exists():
+        return 0
+    if (work.is_relative_to(root.resolve()) or stage.resolve() != stage
+        or not stage.resolve().is_relative_to(work)):
+        raise ValueError("Catalog staging cleanup must stay on the runtime work disk.")
+    if (not (stage / "config.json").is_file()
+        or read_json(stage / "config.json").get("signature") != candidate["signature"]):
+        raise ValueError("Local catalog staging belongs to a different candidate.")
+    marker = next((p for p in (root / "retrieval/catalogs").glob("catalog-*/catalog.json")
+        if read_json(p).get("manifest_sha256") == report["catalog"]["disk_catalog_manifest_sha256"]),None)
+    if marker is None:
+        raise ValueError("Publish the complete CPU catalog before releasing staging copies.")
+    saved = read_json(marker)
+    check_manifest(saved)
+    if (saved.get("state") != "COMPLETE" or saved.get("candidate") != candidate["candidate_manifest_sha256"]
+        or saved.get("inputs") != inputs["manifest_sha256"]
+        or saved.get("counts") != {k:candidate["counts"][k] for k in ("documents","children","parents")}
+        or saved.get("unit_count") != inputs["input_count"]):
+        raise ValueError("Completed catalog does not match the local staging copies.")
+    copies = []
+    for part in candidate["parts"]:
+        for kind in ("documents","children","parents"):
+            name = part["files"][kind]["path"]
+            path = stage / name
+            if path.exists() or path.is_symlink():
+                if path.is_symlink() or bound(stage,name) != path:
+                    raise ValueError("Refusing to remove a staging link outside its runtime directory.")
+                copies.append(path)
+    total = sum(p.stat().st_size for p in copies)
+    print(f"Release CPU staging: {len(copies)} local documents/children/parents Parquet copies"
+          f" under {stage / 'parts'} | {total/2**30:.2f} GiB; model inputs and catalog retained",flush=True)
+    for path in copies:
+        path.unlink()
+    return total
 
 
 def _publish_submission(result, root, outputs, report, name):
@@ -279,6 +332,7 @@ def run_current_baseline(data_root, checkout, work_dir, *, code_commit, max_new_
         return saved
     root,checkout,report,*_ = context
     work = Path(work_dir)
+    run_with_drive_recovery(lambda:_release_catalog_staging(context,work),root,work,max_recoveries=3)
     _ensure_primary(context,work)
     outputs = Path(report["results_root"])
     result = run_with_drive_recovery(lambda:run_large_baseline(root,checkout,code_commit=code_commit,
@@ -291,12 +345,14 @@ def run_current_baseline(data_root, checkout, work_dir, *, code_commit, max_new_
 def run_current_submission(data_root, checkout, work_dir, *, code_commit, max_new_queries=None):
     """Translation/document dense/Qwen rerank/ZIP; no incomplete Qwen corpus encoding."""
     from .full_scale_runtime import run_scale_full_pipeline
+    from .colab_storage import run_with_drive_recovery
     context = _submission_context(data_root,checkout)
     saved = _saved_submission(context,"strong")
     if saved is not None:
         return saved
     root,checkout,report,*_ = context
     work = Path(work_dir)
+    run_with_drive_recovery(lambda:_release_catalog_staging(context,work),root,work,max_recoveries=3)
     _ensure_primary(context,work)
     outputs = Path(report["results_root"])
     print("Strong submission: full selected BGE/BM25 corpus + document dense + translation/expansion + Qwen reranker.",flush=True)

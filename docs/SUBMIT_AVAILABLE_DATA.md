@@ -71,6 +71,13 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Encoder giữ cơ chế giảm một nửa batch khi CUDA OOM. Vector theo nội dung đã có được dùng lại;
   chỉ sửa batch thực thi, giữ nguyên model/revision/pooling/runtime và model producer code.
   Cấu hình này chưa phải số đo tốc độ trên GPU thực tế.
+  Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
+  khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
+  Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng
+  riêng các bản chép Parquet documents/children/parents được candidate liệt kê trong
+  `WORK_DIR/official_scope/<build>/parts/`, để dành chỗ cho vector cache. Log ghi thư mục,
+  số file và dung lượng trước khi dọn. Không xóa model inputs, SQL/vector cache, metadata,
+  file không liên quan hoặc dữ liệu gốc trên Drive; từ chối thư mục nằm trên DATA_ROOT và symlink.
 - CPU catalog được tạo trên ổ local Colab và lưu các phần nén trên Drive theo cơ chế catalog hiện có.
   Bản v7 tự tìm catalog nguồn đã hoàn tất và kế thừa nguyên BM25/document/child/parent khi bộ gộp
   giữ toàn bộ nguồn. SHA của các file giữ nguyên có thể chứng minh trực tiếp; khi nguồn cũ được
