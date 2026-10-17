@@ -218,3 +218,69 @@ def test_streaming_restore_verifies_whole_checksum_without_second_read(tmp_path,
     with pytest.raises(ValueError,match="checksum"):
         storage._restore(marker.parent,saved | {"sha256":"0"*64},tmp_path / "invalid.sqlite")
     assert not (tmp_path / "invalid.sqlite").exists()
+
+
+def test_local_sha_reuse_keeps_restore_and_remote_integrity_checks(tmp_path,frozen,setup_catalog,monkeypatch):
+    prepare,analyzer = setup_catalog
+    built = prepare()
+    identity = built.identity
+    built.close()
+    build,candidate,inputs = frozen
+    monkeypatch.setattr(storage,"_LOCAL_CTIME_SUPPORTED",True)
+    original = storage.sha256_file
+    hashes = []
+    def count_hash(path):
+        hashes.append(Path(path))
+        return original(path)
+    monkeypatch.setattr(storage,"sha256_file",count_hash)
+    work = tmp_path / "fresh-runtime"
+    for _ in range(2):
+        catalog = storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+            work_dir=work,read_only=True)
+        assert catalog.identity == identity
+        catalog.close()
+    local = next(work.glob("catalog-*/catalog.sqlite"))
+    assert hashes and local not in hashes  # Restore verified bytes while decoding; second open reuses proof.
+    local.write_bytes(b"broken cache")
+    restored = storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+        work_dir=work,read_only=True)
+    assert restored.identity == identity and local in hashes
+    restored.close()
+    storage._LOCAL_CHECKS.clear()  # A new process has no verification proof.
+    hashes.clear()
+    restored = storage.prepare_disk_catalog(build,candidate,inputs,tmp_path / "catalogs",analyzer,
+        work_dir=work,read_only=True)
+    restored.close()
+    assert local in hashes
+
+
+def test_local_sha_proof_is_bound_to_checksum_and_file_generation(tmp_path,monkeypatch):
+    path = tmp_path / "catalog.sqlite"
+    path.write_bytes(b"verified content")
+    checksum = sha256_file(path)
+    generation = [1,2,16,100,100]
+    monkeypatch.setattr(storage,"_local_stamp",lambda p:tuple(generation))
+    assert storage._local_matches(path,checksum)
+    path.write_bytes(b"corrupted bytes!")  # Same length and mtime; Linux ctime invalidates the proof.
+    generation[-1] += 1
+    assert not storage._local_matches(path,checksum)
+    assert not storage._local_matches(path,"0"*64)
+
+
+def test_drive_paths_never_use_local_sha_memo(monkeypatch):
+    monkeypatch.setattr(storage,"_LOCAL_CTIME_SUPPORTED",True)
+    assert storage._local_stamp(Path("/content/drive/MyDrive/catalog.sqlite")) is None
+
+
+def test_local_file_changed_during_sha_check_is_not_accepted(tmp_path,monkeypatch):
+    path = tmp_path / "catalog.sqlite"
+    path.write_bytes(b"verified content")
+    checksum = sha256_file(path)
+    generation = [1,2,16,100,100]
+    monkeypatch.setattr(storage,"_local_stamp",lambda p:tuple(generation))
+    def changed_while_reading(p):
+        generation[-1] += 1
+        return checksum
+    monkeypatch.setattr(storage,"sha256_file",changed_while_reading)
+    assert not storage._local_matches(path,checksum)
+    assert path.resolve() not in storage._LOCAL_CHECKS

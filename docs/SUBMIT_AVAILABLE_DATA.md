@@ -2,6 +2,10 @@
 
 Mở [04_colab_submit_available_data.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/04_colab_submit_available_data.ipynb).
 Đây là notebook dùng cho lượt nộp hiện tại, thay cho việc cấu hình nhiều chế độ trong notebook 04 cũ.
+Notebook v9 lấy bản tối ưu bằng code lock riêng khi mở bản mới; giữ nguyên candidate, runtime model
+và checkpoint dữ liệu/vector/query. Code lock v8 vẫn giữ để phiên đang chạy không bị đổi code.
+Không dừng phiên đang chạy để nâng cấp. Lần resume sau dùng notebook mới cùng DATA_ROOT;
+CPU preparation đã COMPLETE được khôi phục từ report, không dựng lại catalog.
 
 Theo yêu cầu ngày 14/10, giữ các URL thuộc snapshot nguồn ban đầu, kể cả URL đã bị BTC loại trong dataset mới.
 Không áp danh sách `01_already_chunked` của audit dataset mới làm bộ lọc. Không đổi ID, không xóa source,
@@ -96,6 +100,10 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   hoặc bản v7 đã commit xong trước khi bị ngắt trong kiểm tra/copy backup; không khôi phục lại nguồn.
   Phase và heartbeat mỗi 15 giây ghi SQL steps, elapsed và dung lượng file local.
   Bỏ lượt `quick_check` lặp ở bước kế thừa; kiểm toàn DB vẫn chạy khi catalog cuối hoàn tất.
+  Trong cùng tiến trình Linux, catalog local đã kiểm SHA256 được nhận lại khi inode/device,
+  size, mtime và ctime còn nguyên. Baseline → strong không băm lại toàn bộ SQL local lần nữa.
+  Proof chỉ ở RAM; runtime/process mới, file bị thay đổi hoặc checksum yêu cầu khác đều kiểm lại.
+  Không dùng memo này cho file trên `/content/drive`, không bỏ kiểm manifest/part khi restore.
   Giữ SQL checkpoint cũ bằng hard link trên cùng ổ khi có thể, tránh copy thêm một file lớn.
   Bản v6 dùng tối đa 4 process theo CPU quota/affinity, cache hash token và ghi SQL theo lô;
   giữ nguyên PyVi/Jieba, medical aliases, token hash, trọng số BM25 và source span.

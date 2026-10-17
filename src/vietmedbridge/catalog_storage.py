@@ -19,6 +19,8 @@ from .artifacts import atomic_json, digest_json, publish_file, read_json, sha256
 from .scale_vectors import bound, check_manifest
 
 CHUNK_BYTES = 64 * 1024 * 1024
+_LOCAL_CHECKS = {}
+_LOCAL_CTIME_SUPPORTED = os.name == "posix"
 
 
 def _contract(build, candidate, inputs, analyzer):
@@ -52,6 +54,39 @@ def _manifest(path, policy, candidate, inputs):
 
 def _matches(path, checksum):
     return Path(path).is_file() and sha256_file(path) == checksum
+
+
+def _local_stamp(path):
+    """Use Linux change-time only for runtime-local files, never mounted Drive."""
+    path = Path(path)
+    if (not _LOCAL_CTIME_SUPPORTED or path.is_symlink()
+        or path.resolve().is_relative_to(Path("/content/drive").resolve())):
+        return None
+    try:
+        value = path.stat()
+    except FileNotFoundError:
+        return None
+    return (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+
+
+def _remember_local(path, checksum):
+    stamp = _local_stamp(path)
+    if stamp is not None:
+        _LOCAL_CHECKS[Path(path).resolve()] = (checksum,stamp)
+
+
+def _local_matches(path, checksum):
+    """Reuse a full SHA check only in this process while the local file is unchanged."""
+    stamp = _local_stamp(path)
+    if stamp is not None and _LOCAL_CHECKS.get(Path(path).resolve()) == (checksum,stamp):
+        print("Catalog local: reuse SHA256 verified in this runtime; file unchanged",flush=True)
+        return True
+    matched = _matches(path,checksum)
+    if matched and stamp is not None:
+        if _local_stamp(path) != stamp:
+            return False
+        _LOCAL_CHECKS[Path(path).resolve()] = (checksum,stamp)
+    return matched
 
 
 def _storage_parts(saved):
@@ -88,6 +123,7 @@ def _restore(target, saved, local):
         verify_file(target / saved["path"], saved["sha256"])
         if publish_file(target / saved["path"], local) != saved["sha256"]:
             raise ValueError("Catalog cache copy changed.")
+        _remember_local(local,saved["sha256"])
         return
     temporary = local.with_name(f".{uuid4().hex}.restore.tmp")
     try:
@@ -110,6 +146,7 @@ def _restore(target, saved, local):
         if decoded.hexdigest() != saved["sha256"]:
             raise ValueError("Restored catalog checksum changed.")
         os.replace(temporary, local)
+        _remember_local(local,saved["sha256"])
         print("Restore CPU catalog: complete, full SHA256 verified", flush=True)
     finally:
         temporary.unlink(missing_ok=True)
@@ -117,6 +154,7 @@ def _restore(target, saved, local):
 
 def _publish(local, target, saved):
     verify_file(local, saved["sha256"])
+    _remember_local(local,saved["sha256"])
     parts = []
     size = local.stat().st_size
     total = (size + CHUNK_BYTES - 1) // CHUNK_BYTES
@@ -182,7 +220,7 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
         # completed catalog; the default repair/publish path below stays intact.
         if saved is None:
             raise ValueError(f"Completed CPU catalog missing: {marker}. Read-only inference will not rebuild it.")
-        if not _matches(local, saved["sha256"]):
+        if not _local_matches(local, saved["sha256"]):
             size = saved["storage"]["bytes"] if "storage" in saved else (target / saved["path"]).stat().st_size
             if size + 2 * 2**30 > shutil.disk_usage(local_dir).free:
                 raise ValueError("Insufficient Colab disk to restore the completed CPU catalog.")
@@ -192,7 +230,7 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
     if saved is not None:
         # A corrupt contract is never ignored. Only derived payload availability
         # can be repaired; inputs and the current data policy were checked above.
-        if _matches(local, saved["sha256"]):
+        if _local_matches(local, saved["sha256"]):
             try:
                 _verify_remote(target, saved)
             except (ValueError, FileNotFoundError) as error:
@@ -208,12 +246,12 @@ def prepare_disk_catalog(build, candidate, inputs, output_dir, analyzer, *, work
     local_marker = local_dir / "catalog.json"
     if local_marker.exists():
         cached = _manifest(local_marker, policy, candidate, inputs)
-        if not _matches(local, cached["sha256"]):
+        if not _local_matches(local, cached["sha256"]):
             _preserve_bad_local(local_dir)
     elif local.exists():
         # Old runtimes retained a DB without its local marker. Reuse only if it
         # matches the independently sealed Drive manifest byte for byte.
-        if saved is not None and _matches(local, saved["sha256"]):
+        if saved is not None and _local_matches(local, saved["sha256"]):
             atomic_json(local_marker, saved)
         else:
             _preserve_bad_local(local_dir)
