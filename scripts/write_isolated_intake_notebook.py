@@ -5,18 +5,19 @@ from write_notebooks import ROOT, code, md, save
 def main():
     save("02_colab_import_new_data.ipynb", [
         md("""
-        # 02 — Nhập data mới song song với submission (CPU)
+        # 02 — Chỉ nhập URL thuộc dataset BTC mới (CPU)
 
         **Chọn CPU → Run all.** Dùng một phiên cho notebook này. Luồng submission
         vẫn chạy riêng với candidate hiện tại; notebook này không đổi active
         candidate, snapshot, model cache hoặc khóa code của luồng đó.
 
-        Lượt mặc định `ai-guru-20261019-v1`: sáu frontier mới 00000–00005,
-        shard cũ 00014/00015 và phần phục hồi 00013. Chọn đúng phiên bản tích lũy
+        Lượt mặc định `btc-new-71be0e12-20261019-v1`: chỉ sáu frontier mới
+        00000–00005, gắn với dataset BTC revision `71be0e12`. Không nhập shard
+        thuộc snapshot cũ. Chọn đúng phiên bản tích lũy
         đã audit, kể cả TAR lồng TAR. Đọc nguồn qua Drive API, không cần tạo
         shortcut AI Guru hay tải toàn bộ TAR về /content.
 
-        Checkpoint và kết quả: `VietMedBridge/data_staging/ai-guru-20261019-v1/`.
+        Checkpoint và kết quả: `VietMedBridge/data_staging/btc-new-71be0e12-20261019-v1/`.
         Ngắt phiên: mở lại cùng notebook, cùng folder, Run all; từng source/shard
         hoàn tất được giữ. Shard đang ghi dở sẽ chạy lại. Đây là import, kiểm tra
         và chia chunk, chưa chạy embedding hay ghép vào submission.
@@ -45,7 +46,7 @@ def main():
                 PROJECT = shared
             else:
                 raise FileNotFoundError("Chưa tìm thấy folder VietMedBridge dùng chung. Thêm shortcut VietMedBridge vào My Drive.")
-        CAMPAIGN = "ai-guru-20261019-v1"
+        CAMPAIGN = "btc-new-71be0e12-20261019-v1"
         INTAKE_ROOT = PROJECT.resolve() / "data_staging" / CAMPAIGN
         INTAKE_ROOT.mkdir(parents=True, exist_ok=True)
         WORK_DIR = Path("/content/vmb_intake_work")
@@ -100,7 +101,18 @@ def main():
         from vietmedbridge.chunks import load_bge_tokenizer, ChunkConfig
         from vietmedbridge.golden import run_golden_suite
 
+        def validate_new_btc_plan(plan):
+            required = "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6"
+            if (plan.get("required_snapshot_id") != required
+                    or set(plan["snapshots"]) != {required}
+                    or not plan["sources"]
+                    or any(source["snapshot_id"] != required
+                           or source["mode"] != "NEW_SNAPSHOT_SOURCE"
+                           for source in plan["sources"])):
+                raise ValueError("Lượt này chỉ nhận URL thuộc snapshot BTC mới 71be0e12; không nhập nguồn legacy.")
+
         PLAN = read_json(CHECKOUT / "configs/intake_ai_guru_20261019.json")
+        validate_new_btc_plan(PLAN)
         pin_plan(INTAKE_ROOT, PLAN)
         credentials, _ = google.auth.default()
         READER = DriveSource(AuthorizedSession(credentials))
@@ -126,7 +138,7 @@ def main():
         atomic_json(INTAKE_ROOT / "golden.json", GOLDEN)
         if not GOLDEN["passed"]:
             raise RuntimeError("Golden failed; chưa chạy import.")
-        print("Golden passed. Nguồn khóa:", len(PLAN["sources"]), "| CPU only", flush=True)
+        print("Golden passed. Chỉ dataset BTC mới 71be0e12 | Nguồn khóa:", len(PLAN["sources"]), "| CPU only", flush=True)
         '''),
         code(r'''
         #@title 3. Import, kiểm tra, chia chunk và lưu checkpoint riêng

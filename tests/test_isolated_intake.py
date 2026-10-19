@@ -329,7 +329,23 @@ def test_notebook_default_is_cpu_separate_checkout_and_no_publication():
     assert "load_bge_tokenizer" in code and "run_golden_suite" in code
     assert "publish_data_handoff" not in code and "snapshot_dataset" not in code
     plan = read_json(root/"configs/intake_ai_guru_20261019.json")
-    assert len(plan["sources"]) == 9
-    assert len({(s["snapshot_id"], s["frontier_sha256"]) for s in plan["sources"]}) == 9
+    assert len(plan["sources"]) == 6
+    assert len({(s["snapshot_id"], s["frontier_sha256"]) for s in plan["sources"]}) == 6
     assert sum(s["mode"] == "NEW_SNAPSHOT_SOURCE" for s in plan["sources"]) == 6
-    assert len(plan["snapshots"]) == 2
+    assert set(plan["snapshots"]) == {plan["required_snapshot_id"]}
+    assert {s["job_id"] for s in plan["sources"]} == {f"new-{i:05d}" for i in range(6)}
+    assert 'CAMPAIGN = "btc-new-71be0e12-20261019-v1"' in code
+    # Execute the notebook's scope guard without mounting Drive/importing Colab.
+    guard = next(node for node in ast.parse(code).body if isinstance(node, ast.FunctionDef)
+                 and node.name == "validate_new_btc_plan")
+    scope = {}
+    exec(compile(ast.Module(body=[guard], type_ignores=[]), "scope_guard", "exec"), scope)
+    scope["validate_new_btc_plan"](plan)
+    mixed = copy.deepcopy(plan)
+    mixed["sources"].append(dict(plan["sources"][0], snapshot_id="old", mode="LEGACY_SOURCE_NOT_YET_IMPORTED"))
+    with pytest.raises(ValueError, match="snapshot BTC mới"):
+        scope["validate_new_btc_plan"](mixed)
+    mixed = copy.deepcopy(plan)
+    mixed["snapshots"]["old"] = {}
+    with pytest.raises(ValueError, match="snapshot BTC mới"):
+        scope["validate_new_btc_plan"](mixed)

@@ -6,15 +6,18 @@ khi Colab hỏi. Notebook tự tìm project dùng chung, cài checkout riêng, k
 code/runtime và chọn các nguồn trong `configs/intake_ai_guru_20261019.json`.
 Không cần tạo shortcut từng archive, sửa `INPUT_KIND`, chọn `WORKER_ID` hay bật GPU.
 
-Lượt này dùng chín frontier đã audit ngày 19/10: sáu frontier mới 00000–00005,
-shard cũ 00014/00015, và bản phục hồi 00013. Các phiên bản TAR chứa TAR được mở
+Lượt này **chỉ dùng sáu frontier mới 00000–00005** đã audit ngày 19/10, thuộc
+dataset BTC revision `71be0e1239a19dfd7a717e2bc13e3bec21bd0334`.
+Shard legacy 00013–00015 không nằm trong lượt nhập này. Notebook chặn plan có
+nguồn khác snapshot BTC mới trước khi tải mapping hoặc chạy importer.
+Các phiên bản TAR chứa TAR được mở
 theo đúng inner member. Notebook chỉ tải bốn metadata cần thiết qua các khoảng
 byte của Drive API; không tải/copy toàn bộ archive hoặc crawl lại URL.
 
 Đầu ra riêng nằm tại:
 
 ```
-VietMedBridge/data_staging/ai-guru-20261019-v1/
+VietMedBridge/data_staging/btc-new-71be0e12-20261019-v1/
   intake_plan.json
   intake_code_lock.json
   intake_runtime_lock.json
@@ -35,12 +38,20 @@ cache, khóa code/runtime, hoặc `submission_runs` của luồng nộp bài. Da
 chưa được tự ghép vào candidate đang dùng. Hai runtime có thể cùng đọc Drive;
 tốc độ vẫn phụ thuộc tài nguyên CPU và I/O của mỗi phiên.
 
-Mỗi nguồn được gắn với đúng file links và SHA-256 của snapshot tương ứng.
+Mọi nguồn được gắn với đúng file links và SHA-256 của snapshot BTC mới.
 Mapping baseline được khóa theo candidate đã audit; không đọc lại active
 candidate để tự đổi phạm vi giữa lượt. Chỉ bỏ qua URL khi **mọi native ID/URL
 alias** của URL ấy đã có tài liệu hợp lệ trong baseline hoặc nguồn trước đó.
 Một alias còn thiếu làm cả nhóm alias được đưa qua pipeline để giữ đúng mapping.
-ID trùng nhưng URL khác là lỗi binding, không được tự ghép.
+ID trùng nhưng URL khác là lỗi binding, không được tự ghép. Mapping baseline chỉ
+được đọc để nhận biết tài liệu đã xử lý: không kéo các URL ngoài snapshot BTC mới
+vào lượt nhập này. URL đã có trong baseline vẫn giữ được công việc trước đó.
+
+Sáu frontier bao phủ 600.000 URL (600.703 native IDs). Audit trước import ghi nhận
+174 URL đã có trong baseline và 599.826 URL chưa có; không phải tất cả đều crawl
+thành công. Có 321.499 `EXTRACT_SUCCESS` theo báo cáo crawler trước các bước kiểm
+tra/chunking. Đây là một phần của 1.220.598 bản ghi BTC mới, chưa phải
+độ phủ toàn bộ dataset. Số document thực tế được báo sau khi chạy.
 
 Trước khi lọc phần trùng, importer kiểm tra metadata gốc để không che mất record
 ngoài frontier, extraction sai raw hash, hoặc snapshot sai. Phần mới dùng nguyên
@@ -56,7 +67,7 @@ Các URL lỗi/pending vẫn có kết quả theo từng native ID trong
 - `PIPELINE_FAILURE`: giữ nguyên reason code để xử lý sau; không biến thành document giả.
 
 `intake_status.json` tổng hợp **lượt ID nguồn**, không phải số URL duy nhất:
-cùng URL có thể xuất hiện ở nhiều frontier/snapshot. Không cộng các lượt này
+cùng URL có thể có nhiều native ID. Không cộng các lượt này
 để báo độ phủ URL duy nhất. `EXTRACT_SUCCESS` của crawler cũng chưa phải số
 document cuối cùng qua quality/chunk gates.
 

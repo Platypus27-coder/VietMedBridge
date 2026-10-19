@@ -15,9 +15,10 @@ Xem [hướng dẫn nộp từ dữ liệu hiện có](docs/SUBMIT_AVAILABLE_DAT
 
 **Nhập data mới trong lúc submission đang chạy:** mở
 [02_colab_import_new_data.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_import_new_data.ipynb)
-trên **Colab CPU riêng → Run all**. Lượt AI Guru đã audit ngày 19/10 tự chọn
-đúng snapshot, TAR/inner TAR và phục hồi checkpoint; lưu riêng vào
-`data_staging/ai-guru-20261019-v1`, không đổi candidate/cache của phiên submission.
+trên **Colab CPU riêng → Run all**. Chỉ xử lý sáu frontier mới 00000–00005 thuộc
+dataset BTC revision `71be0e12`, dùng đúng TAR/inner TAR và phục hồi checkpoint;
+lưu riêng vào `data_staging/btc-new-71be0e12-20261019-v1`, không đổi
+candidate/cache của phiên submission. Shard legacy 00013–00015 không nằm trong lượt này.
 Xem [phạm vi, kiểm tra và cách resume](docs/ISOLATED_DATA_INTAKE.md).
 
 ## Quy trình Colab đã chốt

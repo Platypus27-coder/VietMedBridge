@@ -3,7 +3,6 @@
   "audit_date": "2026-10-19",
   "active_candidate_action": "KEEP_UNCHANGED",
   "new_snapshot": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
-  "old_snapshot": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
   "sources": [
     {
       "drive_file_id": "1tVX24iYCthJSYyMsKLdoVBJrgWtUmG-k",
@@ -76,42 +75,6 @@
       "mode": "NEW_SNAPSHOT_SOURCE",
       "job_id": "new-00005",
       "archive_bytes": 3269468160
-    },
-    {
-      "drive_file_id": "1kJcovO03-NMyGMa_13ArwoxbXseNaibB",
-      "archive": "vibiomir_shard_00014.tar",
-      "inner_tar": null,
-      "snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
-      "frontier": "data/crawl_shards/shard_00014.parquet",
-      "frontier_sha256": "28915fb7740e73f79b51451af85d7681c594938695f5bbe01c9a4370344fd878",
-      "extract_success_url_count_before_pipeline": 89607,
-      "mode": "LEGACY_SOURCE_NOT_YET_IMPORTED",
-      "job_id": "legacy-00014",
-      "archive_bytes": 3145973760
-    },
-    {
-      "drive_file_id": "1gzxCUsfCj4GqL6QH0Xo7bvpBc1hk5_UN",
-      "archive": "vibiomir_shard_00014_with_resume_00013.tar",
-      "inner_tar": "vibiomir_shard_00013.tar",
-      "snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
-      "frontier": "data/crawl_shards/shard_00013.parquet",
-      "frontier_sha256": "0332fc14169433da78764352a056da30c6ed4d708c2bdda925a2ad8d8c77efe0",
-      "extract_success_url_count_before_pipeline": 79544,
-      "mode": "RECOVERY_ONLY_EXISTING_SHARD",
-      "job_id": "legacy-00013",
-      "archive_bytes": 3049994240
-    },
-    {
-      "drive_file_id": "1SJ2YwU4N8tzDeUfT1AT1cG44WjF-mxq2",
-      "archive": "vibiomir_shard_00015.tar",
-      "inner_tar": null,
-      "snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
-      "frontier": "data/crawl_shards/shard_00015.parquet",
-      "frontier_sha256": "205979a2f2e35b7fff49bcfc6258e98e07558e649e0467d2c97e6ddcc9175312",
-      "extract_success_url_count_before_pipeline": 90476,
-      "mode": "LEGACY_SOURCE_NOT_YET_IMPORTED",
-      "job_id": "legacy-00015",
-      "archive_bytes": 3178035200
     }
   ],
   "rules": [
@@ -120,10 +83,11 @@
     "Bind new shards to their new links snapshot; never relabel them as old-snapshot inputs",
     "Deduplicate against existing valid documents by exact URL/ID; preserve failed/pending URL ledger entries",
     "Keep ongoing submission candidate frozen; stage additions without switching active pointers",
-    "EXTRACT_SUCCESS goes through normal quality/chunk gates; only new text hashes need embedding"
+    "EXTRACT_SUCCESS goes through normal quality/chunk gates; only new text hashes need embedding",
+    "Only import sources from the new BTC snapshot; exclude all legacy-snapshot archive jobs"
   ],
   "schema_version": 1,
-  "campaign": "ai-guru-20261019-v1",
+  "campaign": "btc-new-71be0e12-20261019-v1",
   "tokenizer_revision": "5617a9f61b028005a4858fdac845db406aefb181",
   "chunking": {
     "child_tokens": 180,
@@ -144,10 +108,8 @@
       "revision": "71be0e1239a19dfd7a717e2bc13e3bec21bd0334",
       "filename": "links_corpus_vi_en_zh.parquet",
       "sha256": "87e44a792d7a99fb0fde5dff7f09f1a38a0a1fdf02ddd1ac93a005736e00b0a7"
-    },
-    "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7": {
-      "drive_file_id": "1FeaMqXpY6Mrc6fEDPRqdShV8lKFSOMSw",
-      "sha256": "dee1153f5b9d9010dea18e1b7724b4915ff847b711d036bec8b933486802a971"
     }
-  }
+  },
+  "required_snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+  "scope": "NEW_BTC_DATASET_ONLY"
 }
