@@ -94,6 +94,10 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Nếu bản nén chưa lưu thành công thì vẫn giữ checkpoint local trong runtime hiện tại.
   Bảng tra chỉ trỏ tới vector gốc: native reader tiếp tục kiểm SHA256/shape khi dùng vector;
   không dùng bảng tra hoặc số receipt để tuyên bố corpus đã embedding đủ.
+  Nếu lối tắt `MyDrive/VietMedBridge/data` không hiện trên tài khoản đang chạy, preflight thử
+  đường dẫn target ID đã biết của thư mục dùng chung và trả lại `DATA_ROOT` thực tế.
+  Cell 3–4 gán lại đường dẫn này, chỉ chấp nhận đúng candidate SHA từ `PREPARATION`;
+  không tìm toàn Drive, tạo handoff rỗng hoặc tự chạy lại preparation khi thiếu file.
   Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
   khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
   Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng

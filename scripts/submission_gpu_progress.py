@@ -226,24 +226,46 @@ def read_bge_maps_parallel(data_root, candidate, inputs, config, *, progress=pri
 
 
 def ensure_submission_mount(data_root, expected_candidate_sha256):
-    """Recover a dead mount before workflow JSON reads; never re-run preparation."""
+    """Return the matching root through known Drive aliases; JSON only."""
     from vietmedbridge.colab_storage import _disconnected, _drive_mountpoint, _remount
     from vietmedbridge.scale_benchmark import load_handoff
     if not isinstance(expected_candidate_sha256, str) or not expected_candidate_sha256:
         raise ValueError('Expected frozen candidate is required before reconnecting.')
     print('SUBMISSION preflight: read frozen handoff JSON; preparation is not repeated', flush=True)
-    try:
-        _, candidate, _ = load_handoff(data_root)
-    except OSError as error:
-        mount = _drive_mountpoint(data_root)
-        if mount is None or not _disconnected(error, mount):
-            raise
-        print('SUBMISSION preflight: reconnect disconnected Drive; retaining runtime and local receipt lookup', flush=True)
-        _remount(mount, readonly=False)
-        _, candidate, _ = load_handoff(data_root)
-    if candidate['candidate_manifest_sha256'] != expected_candidate_sha256:
-        raise ValueError('Active candidate changed; refusing to resume another submission corpus.')
-    print('SUBMISSION preflight: same frozen candidate verified', flush=True)
+    root = Path(data_root)
+    mount = _drive_mountpoint(root)
+    # These are observed aliases of this shared project, not a Drive-wide search.
+    aliases = [root]
+    if mount is not None:
+        aliases += [Path('/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge/data'),
+            Path('/content/drive/MyDrive/VietMedBridge/data')]
+    aliases = list(dict.fromkeys(aliases))
+    missing = None
+    for attempt in range(2 if mount is not None else 1):
+        for location in aliases:
+            try:
+                _, candidate, _ = load_handoff(location)
+            except FileNotFoundError as error:
+                missing = error
+                continue
+            except OSError as error:
+                if mount is None or not _disconnected(error, mount):
+                    raise
+                if attempt:
+                    raise
+                break
+            else:
+                if candidate['candidate_manifest_sha256'] != expected_candidate_sha256:
+                    raise ValueError('Active candidate changed; refusing to resume another submission corpus.')
+                print('SUBMISSION preflight: same frozen candidate verified | DATA_ROOT:', location, flush=True)
+                return location
+        if mount is not None and not attempt:
+            print('SUBMISSION preflight: handoff unavailable; reconnect Drive, retain runtime and local lookup', flush=True)
+            _remount(mount, readonly=False)
+    if mount is None and missing is not None:
+        raise missing
+    raise FileNotFoundError('Frozen submission handoff not found after reconnect. Checked only: '
+        + ', '.join(map(str, aliases)) + '. No data or checkpoint was created.')
 
 
 class SubmissionProgress:

@@ -79,10 +79,25 @@ def notebook():
         raise RuntimeError("Notebook này chạy trên Google Colab. Kaggle dùng notebook embedding worker riêng.")
     from google.colab import drive, userdata
     drive.mount("/content/drive")
+    # The shared-folder shortcut may exist only under its target ID on another account.
+    bootstrap_roots = list(dict.fromkeys([DATA_ROOT,
+        Path("/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge/data"),
+        Path("/content/drive/MyDrive/VietMedBridge/data")]))
+    for bootstrap_root in bootstrap_roots:
+        try:
+            json.loads((bootstrap_root / "active_data_candidate.json").read_text())
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            if error.errno in (103,107):
+                break  # The preflight below reconnects before code/model setup.
+            raise
+        DATA_ROOT = bootstrap_root
+        break
     try:
         (DATA_ROOT / "active_data_candidate.json").read_bytes()
     except OSError as error:
-        if error.errno != 107:
+        if error.errno not in (103,107):
             raise
         print("Drive preflight: remount trước khi đọc code lock hoặc nạp model.",flush=True)
         drive.mount("/content/drive",force_remount=True)
@@ -194,7 +209,7 @@ def notebook():
     from vietmedbridge.submission_workflow import run_current_baseline
     BASELINE = None
     if GPU_SESSION:
-        ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+        DATA_ROOT = ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
         with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="baseline"):
             BASELINE = run_current_baseline(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(BASELINE["ready"],ensure_ascii=False,indent=2),flush=True)
@@ -208,7 +223,7 @@ def notebook():
     from vietmedbridge.submission_workflow import run_current_submission
     STRONG = None
     if GPU_SESSION:
-        ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+        DATA_ROOT = ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
         with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="strong"):
             STRONG = run_current_submission(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(STRONG["ready"],ensure_ascii=False,indent=2),flush=True)

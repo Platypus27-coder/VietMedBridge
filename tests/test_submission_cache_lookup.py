@@ -165,3 +165,54 @@ def test_preflight_refuses_candidate_change_without_restarting_preparation(monke
     monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: pytest.fail('Remounted a healthy corpus'))
     with pytest.raises(ValueError, match='Active candidate changed'):
         adapter.ensure_submission_mount(Path('/content/drive/MyDrive/VietMedBridge/data'), 'original')
+
+
+def test_missing_mydrive_handoff_uses_verified_shared_folder_without_remount(monkeypatch):
+    from vietmedbridge import colab_storage, scale_benchmark
+    root = Path('/content/drive/MyDrive/VietMedBridge/data')
+    shared = Path('/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge/data')
+    visited = []
+    def handoff(path):
+        visited.append(path)
+        if path == root:
+            raise FileNotFoundError(2, 'No such file', str(path / 'active_data_candidate.json'))
+        assert path == shared
+        return None, {'candidate_manifest_sha256': 'expected'}, None
+    monkeypatch.setattr(scale_benchmark, 'load_handoff', handoff)
+    monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: pytest.fail('Healthy shared alias remounted'))
+    assert adapter.ensure_submission_mount(root, 'expected') == shared
+    assert visited == [root, shared]
+
+
+def test_unmounted_drive_recovers_once_on_enoent_without_creating_data(monkeypatch):
+    from vietmedbridge import colab_storage, scale_benchmark
+    root = Path('/content/drive/MyDrive/VietMedBridge/data')
+    remounts = []
+    def missing(path):
+        raise FileNotFoundError(2, 'No such file', str(path / 'active_data_candidate.json'))
+    monkeypatch.setattr(scale_benchmark, 'load_handoff', missing)
+    monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: remounts.append((a,k)))
+    with pytest.raises(FileNotFoundError, match='No data or checkpoint was created'):
+        adapter.ensure_submission_mount(root, 'expected')
+    assert len(remounts) == 1
+
+
+def test_notebook_bootstrap_finds_shared_alias_before_package_setup(tmp_path):
+    import ast
+    import json
+    import nbformat
+    repo = Path(__file__).resolve().parents[1]
+    book = nbformat.read(repo / 'notebooks/04_colab_submit_available_data.ipynb', as_version=4)
+    tree = ast.parse(next(c.source for c in book.cells if c.cell_type == 'code'))
+    start = next(i for i, node in enumerate(tree.body) if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == 'bootstrap_roots' for target in node.targets))
+    nodes = tree.body[start:start+2]
+    assert isinstance(nodes[-1], ast.For)
+    shared = tmp_path / 'shared'
+    shared.mkdir()
+    atomic_json(shared / 'active_data_candidate.json', {'candidate_manifest_sha256': 'expected'})
+    def mapped_path(value):
+        return shared if '.shortcut-targets-by-id/' in value else tmp_path / 'absent'
+    scope = {'DATA_ROOT': tmp_path / 'absent', 'Path': mapped_path, 'json': json}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'bootstrap-test', 'exec'), scope)
+    assert scope['DATA_ROOT'] == shared
