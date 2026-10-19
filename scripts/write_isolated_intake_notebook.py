@@ -1,21 +1,27 @@
-"""Generate the one CPU notebook for additions while submission stays frozen."""
+"""Generate the CPU intake notebook and four statically assigned worker presets."""
 from write_notebooks import ROOT, code, md, save
 import json
+from copy import deepcopy
 
 RESUME_TOOLS = (ROOT / "scripts/intake_resume.py").read_text(encoding="utf-8")
 RETAINED_TOOLS = (ROOT / "scripts/retained_intake.py").read_text(encoding="utf-8")
 FULL_TOOLS = (ROOT / "scripts/full_intake.py").read_text(encoding="utf-8")
+PARALLEL_TOOLS = (ROOT / "scripts/parallel_intake.py").read_text(encoding="utf-8")
 FULL_SCOPE = json.loads((ROOT / "configs/intake_ai_guru_full_20261019.json").read_text(encoding="utf-8"))
 
 
-def main():
-    save("02_colab_import_new_data.ipynb", [
+def make_cells():
+    return [
         md("""
         # 02 — Chỉ nhập URL thuộc dataset BTC mới (CPU)
 
         **Chọn CPU → Run all.** Dùng một phiên cho notebook này. Luồng submission
         vẫn chạy riêng với candidate hiện tại; notebook này không đổi active
         candidate, snapshot, model cache hoặc khóa code của luồng đó.
+
+        Để chạy 4 CPU accounts cùng lúc, dùng bốn bản điền sẵn trong
+        `notebooks/parallel_cpu/02_cpu_worker_0.ipynb` đến `02_cpu_worker_3.ipynb`.
+        Dừng phiên intake tuần tự trước khi chuyển; giữ nguyên luồng submit.
 
         Đọc đủ 7 TAR đã audit: tám frontier 00000–00007 và gói retained,
         gắn với corpus BTC revision `71be0e12`. Giữ nguyên sáu nguồn đang chạy,
@@ -101,7 +107,9 @@ def main():
         print("Code:", commit, "\nCheckpoint:", INTAKE_ROOT, flush=True)
         '''),
         code('#@title 2. Nhận checkpoint; nối đủ 8 frontier và retained của BTC mới\n'
-             + RESUME_TOOLS + '\n' + RETAINED_TOOLS + '\n' + FULL_TOOLS + '\n'
+             + 'RUN_MODE = "sequential" #@param ["sequential", "parallel", "collect"]\n'
+             + 'WORKER_ID = 0 #@param {type:"integer"}\nTEAM_SIZE = 4\n'
+             + RESUME_TOOLS + '\n' + RETAINED_TOOLS + '\n' + FULL_TOOLS + '\n' + PARALLEL_TOOLS + '\n'
              + 'FULL_SCOPE = json.loads(' + repr(json.dumps(FULL_SCOPE, ensure_ascii=False)) + ')\n' + r'''
 import json
 from huggingface_hub import hf_hub_download
@@ -124,10 +132,18 @@ PLAN = FULL_SCOPE["base_plan"]
 validate_new_btc_plan(PLAN)
 CONFIG = ChunkConfig(**PLAN["chunking"])
 TOKENIZER_SPEC = {"model_id": "BAAI/bge-m3", "revision": PLAN["tokenizer_revision"], "special_tokens": False}
-CONTROLLER = FullIntake(FULL_SCOPE, root=INTAKE_ROOT, work_dir=WORK_DIR,
+CONTROLLER_OPTIONS = dict(root=INTAKE_ROOT, work_dir=WORK_DIR,
     tokenizer_spec=TOKENIZER_SPEC, chunk_config=CONFIG, shard_size=2048,
     controller_type=IntakeResume, retained_type=RetainedAdapter,
     sql_context=bounded_intake_sql, parquet_writer=bounded_intake_parquet)
+if RUN_MODE == "sequential":
+    CONTROLLER = FullIntake(FULL_SCOPE, **CONTROLLER_OPTIONS)
+elif RUN_MODE in ("parallel", "collect"):
+    CONTROLLER = ParallelIntake(FULL_SCOPE, worker_id=WORKER_ID, team_size=TEAM_SIZE, **CONTROLLER_OPTIONS)
+else:
+    raise ValueError("RUN_MODE phải là sequential, parallel hoặc collect.")
+REFERENCE_DIR = (INTAKE_ROOT / "references" if RUN_MODE == "sequential" else
+                 INTAKE_ROOT / "parallel_cpu4" / f"worker-{WORKER_ID}" / "references")
 CHECKPOINT_STATUS = CONTROLLER.status()
 print("Checkpoint:", CHECKPOINT_STATUS["completed_sources"], "/", CHECKPOINT_STATUS["total_sources"],
       "nguồn đã xong | chỉ đọc receipt nhỏ, chưa tải lại dữ liệu cũ", flush=True)
@@ -146,7 +162,8 @@ def load_reader():
 def load_baseline():
     if "baseline" not in LAZY_RESOURCES:
         reference = PLAN["baseline"]
-        target = INTAKE_ROOT / "references/baseline_aliases.parquet"
+        shared = INTAKE_ROOT / "references/baseline_aliases.parquet"
+        target = shared if shared.is_file() else REFERENCE_DIR / "baseline_aliases.parquet"
         if not target.is_file():
             fetch_reference(load_reader(), reference, target)
         print("Cần mapping cũ để chọn phần mới; chỉ đưa mapping lên ổ local một lần.", flush=True)
@@ -157,7 +174,8 @@ def load_links(snapshot_id):
     key = "links-"+snapshot_id
     if key not in LAZY_RESOURCES:
         spec = PLAN["snapshots"][snapshot_id]
-        target = INTAKE_ROOT / "references" / (snapshot_id[:16]+"-links.parquet")
+        shared = INTAKE_ROOT / "references" / (snapshot_id[:16]+"-links.parquet")
+        target = shared if shared.is_file() else REFERENCE_DIR / (snapshot_id[:16]+"-links.parquet")
         if not target.is_file():
             print("Tải official links:", spec["revision"], flush=True)
             downloaded = Path(hf_hub_download("AIGuruTinix/ViBioMIR", spec["filename"],
@@ -171,7 +189,7 @@ def load_tokenizer():
     if "tokenizer" not in LAZY_RESOURCES:
         tokenizer, spec = load_bge_tokenizer(PLAN["tokenizer_revision"])
         golden = run_golden_suite(CHECKOUT / "tests/golden/cases.json", tokenizer, spec, CONFIG)
-        atomic_json(INTAKE_ROOT / "golden.json", golden)
+        atomic_json((INTAKE_ROOT if RUN_MODE == "sequential" else REFERENCE_DIR.parent) / "golden.json", golden)
         if not golden["passed"]:
             raise RuntimeError("Golden failed; chưa chia chunk mới.")
         LAZY_RESOURCES["tokenizer"] = (tokenizer, spec)
@@ -181,6 +199,8 @@ def load_tokenizer():
         #@title 3. Chỉ tiếp tục nguồn thiếu, lưu checkpoint từng shard và từng nguồn
 
         def continue_intake():
+            if RUN_MODE == "collect":
+                return CONTROLLER.collect()
             return CONTROLLER.run(load_reader=load_reader, load_links=load_links,
                 load_baseline=load_baseline, load_tokenizer=load_tokenizer)
 
@@ -193,8 +213,21 @@ def load_tokenizer():
             drive.mount("/content/drive", force_remount=True)
             RESULT = continue_intake()
         print(json.dumps(RESULT, ensure_ascii=False, indent=2))
-        print("Hoàn tất lượt nhập CPU. Giữ nguyên luồng submission đang chạy.")
-        print("Bàn giao toàn bộ lượt data mới:", INTAKE_ROOT / "full_intake_status.json")
+        if RUN_MODE == "parallel":
+            print("Worker hoàn tất phần được giao; chưa đồng nghĩa 9/9 nguồn. Acc 0 chạy cell 4 để tổng hợp.")
+        else:
+            print("Bàn giao toàn bộ lượt data mới:", INTAKE_ROOT / "full_intake_status.json")
+        print("Giữ nguyên luồng submission đang chạy.")
+        '''),
+        code(r'''
+        #@title 4. Tổng hợp 4 CPU workers (acc 0; chạy lại cell này sau khi cả 4 xong)
+        if RUN_MODE == "parallel" and WORKER_ID == 0:
+            COLLECTION = CONTROLLER.collect()
+            print(json.dumps(COLLECTION, ensure_ascii=False, indent=2))
+            if COLLECTION["state"] == "WAITING_FOR_CPU_WORKERS":
+                print("Chờ các nguồn trong pending_sources. Khi các acc xong, chỉ chạy lại cell 4 này.")
+        elif RUN_MODE == "parallel":
+            print(f"Acc worker {WORKER_ID} đã lưu phần được giao. Acc 0 tổng hợp bằng cell 4.")
         '''),
         md("""
         `FULL_INTAKE_COMPLETE` và `completed_sources=9/9` nghĩa là mọi ID trong
@@ -219,7 +252,31 @@ def load_tokenizer():
         là freeze/chuẩn bị index cho **lượt thêm riêng**, rồi chỉ embedding text
         chưa có; ghép vào phiên submission kế tiếp sau khi ZIP hiện tại hoàn tất.
         """),
-    ])
+    ]
+
+
+def main():
+    cells = make_cells()
+    save("02_colab_import_new_data.ipynb", cells)
+    assignments = (("00000, 00001, 00005"), ("00002, 00003"), ("00004, 00006"), ("00007 và retained"))
+    for worker in range(4):
+        preset = deepcopy(cells)
+        preset[0] = md(f'''# 02 — CPU worker {worker}/4: {assignments[worker]}
+
+        **Dừng phiên nhập tuần tự cũ → mỗi tài khoản mở đúng một worker → CPU → Run all.**
+        Dùng chung folder VietMedBridge. Cả bốn worker chạy ngay, không cần chờ acc 0.
+        WORKER_ID={worker}, TEAM_SIZE=4 đã điền sẵn; không đổi trong khi chạy.
+        Không chạy hai phiên cùng worker ID. Luồng submission tiếp tục riêng.
+
+        Nguồn hoàn tất dùng lại receipt. Nguồn dở tiếp tục checkpoint cũ;
+        nguồn chưa chạy ghi riêng trong parallel_cpu4/jobs. Khi cả 4 worker xong,
+        acc 0 chạy lại **cell 4** để kiểm đủ 9/9 nguồn và ID duy nhất.
+        ''')
+        for cell in preset:
+            if cell["cell_type"] == "code":
+                cell["source"] = cell["source"].replace('RUN_MODE = "sequential" #@param', 'RUN_MODE = "parallel" #@param')
+                cell["source"] = cell["source"].replace('WORKER_ID = 0 #@param', f'WORKER_ID = {worker} #@param')
+        save(f"parallel_cpu/02_cpu_worker_{worker}.ipynb", preset)
 
 
 if __name__ == "__main__":

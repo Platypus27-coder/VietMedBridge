@@ -198,7 +198,10 @@ class IntakeResume:
 
     @bounded_intake_sql()
     def run(self, *, load_reader, load_links, load_baseline, load_tokenizer, load_metadata=None,
-            select_metadata=None, source_completed=None):
+            select_metadata=None, source_completed=None, max_new_sources=None):
+        if max_new_sources is not None and (type(max_new_sources) is not int or max_new_sources < 1):
+            raise ValueError("max_new_sources must be a positive integer.")
+        newly_completed = 0
         self.refresh()
         for saved in self.completed:
             print(f"SKIP_COMPLETED_SOURCE {saved['source']['job_id']} | receipt only; payload checked on use", flush=True)
@@ -279,4 +282,7 @@ class IntakeResume:
             print(f"SOURCE_CHECKPOINT_SAVED {job} | {counts}", flush=True)
             if source_completed is not None:
                 source_completed()
+            newly_completed += 1
+            if max_new_sources is not None and newly_completed >= max_new_sources:
+                return result
         return result

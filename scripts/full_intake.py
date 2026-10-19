@@ -85,9 +85,15 @@ class FullIntake:
         return result
 
     def status(self):
+        self._serial_guard()
         return self._status()
 
+    def _serial_guard(self):
+        if (self.root/"parallel_cpu4/parallel_plan.json").exists():
+            raise ValueError("Lượt này đã chuyển sang 4 CPU workers. Mở notebook worker 0–3 hoặc chọn RUN_MODE='collect'; không chạy lại sequential.")
+
     def run(self, **loaders):
+        self._serial_guard()
         print("FULL_INTAKE: original frontiers -> additional frontiers -> retained recovery", flush=True)
         self.base.run(**loaders, source_completed=self._status)
         self._status()

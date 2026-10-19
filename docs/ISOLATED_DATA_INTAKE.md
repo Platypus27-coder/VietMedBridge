@@ -6,6 +6,38 @@ khi Colab hỏi. Notebook tự tìm project dùng chung, cài checkout riêng, k
 code/runtime và chọn toàn bộ nguồn đã audit trong `configs/intake_ai_guru_full_20261019.json`.
 Không cần tạo shortcut từng archive, sửa `INPUT_KIND`, chọn `WORKER_ID` hay bật GPU.
 
+Để tăng tốc bằng **4 tài khoản Colab CPU**, dừng phiên intake tuần tự cũ trước,
+giữ luồng submission chạy riêng. Mỗi tài khoản dùng chung đúng folder VietMedBridge
+và mở một bản điền sẵn dưới đây, chọn **CPU → Run all**; không cần sửa code:
+
+- Acc 0: [02_cpu_worker_0.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/parallel_cpu/02_cpu_worker_0.ipynb) — 00000, 00001, 00005.
+- Acc 1: [02_cpu_worker_1.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/parallel_cpu/02_cpu_worker_1.ipynb) — 00002, 00003.
+- Acc 2: [02_cpu_worker_2.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/parallel_cpu/02_cpu_worker_2.ipynb) — 00004, 00006.
+- Acc 3: [02_cpu_worker_3.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/parallel_cpu/02_cpu_worker_3.ipynb) — 00007 và retained.
+
+Cả bốn chạy ngay, không cần một acc chuẩn bị trước. WORKER_ID=0–3 và TEAM_SIZE=4
+đã điền sẵn. Không mở hai phiên cùng ID. Các nguồn hoàn tất từ bản cũ được tham
+chiếu bằng receipt, không copy hoặc chia chunk lại. Nguồn đang dở tiếp tục tại
+root cũ và chỉ hoàn tất đúng nguồn đó; nguồn chưa bắt đầu có controller root riêng
+trong `parallel_cpu4/jobs/<job>/`. Mỗi nguồn có một owner cố định; worker chỉ ghi
+binding/result và báo cáo của mình. Reference chưa có được tải vào thư mục riêng
+của worker, không cùng ghi một file `.partial` trên Drive.
+
+Các frontier/retained đã audit có tập ID rời nhau. Với các nguồn mới chạy song
+song, dedup dùng baseline cố định, không chờ output của worker khác. Nguồn dở
+giữ nguyên dependency/selection ban đầu để signature của các shard đã commit
+không đổi. Sau khi cả bốn báo `CPU_WORKER_COMPLETE`, **acc 0 chạy lại cell 4**
+để tổng hợp. `WAITING_FOR_CPU_WORKERS` chỉ liệt kê nguồn chưa bàn giao, không
+khởi động lại import. Reducer kiểm SHA các outcome/mapping cần dùng, ID duy nhất,
+đủ 9 nguồn, khớp 1.117.692 ID đầu vào và các bộ đếm trước khi ghi
+`FULL_INTAKE_COMPLETE` vào `full_intake_status.json`. Tệp thiếu/ID trùng không được
+coi là hoàn tất. Tổng hợp thành công được checkpoint để lần sau chỉ đọc receipt.
+
+Đổi runtime/tài khoản: mở lại đúng notebook worker ID đó, cùng folder project,
+Run all. Không đổi TEAM_SIZE hoặc assignment giữa lượt. Bản tuần tự mới chặn
+chạy khi đã có parallel plan để tránh vô tình xử lý lại các nguồn ở root cũ.
+Tốc độ thực tế còn phụ thuộc I/O Drive và CPU mỗi phiên; không bảo đảm nhanh gấp 4.
+
 Lượt đầy đủ gồm **tám frontier 00000–00007 và gói retained**, được xác minh lại
 trong folder AI Guru ngày 19/10. Tất cả ID phải thuộc corpus BTC revision
 `71be0e1239a19dfd7a717e2bc13e3bec21bd0334`. Bảy file vật lý cần dùng:
@@ -24,7 +56,7 @@ gói vào lượt corpus mới; gói retained cung cấp mapping chính thức c
 hợp lệ. Đọc metadata qua các khoảng byte của Drive API; không tải/copy toàn
 bộ archive hoặc crawl lại URL.
 
-Notebook tự tiếp tục ba chặng: giữ nguyên lượt sáu nguồn 00000–00005 đã khóa;
+Ở chế độ tuần tự, notebook tự tiếp tục ba chặng: giữ nguyên lượt sáu nguồn 00000–00005 đã khóa;
 chạy hai nguồn bổ sung trong `additional-frontiers/`; rồi chạy retained trong
 `retained-recovery/`. Mỗi chặng sau dùng mapping đã commit của chặng trước để
 bỏ qua tài liệu hợp lệ. Không sửa plan/receipt/code fingerprint của chặng cũ.
@@ -50,6 +82,13 @@ VietMedBridge/data_staging/btc-new-71be0e12-20261019-v1/
   processed/<job>/intake_provenance.json
   additional-frontiers/  # hai nguồn 00006–00007; cùng cấu trúc checkpoint
   retained-recovery/     # retained; cùng cấu trúc checkpoint
+  parallel_cpu4/         # chế độ 4 worker: contract và kết quả tổng hợp
+    jobs/<job>/         # nguồn chưa bắt đầu; cùng cấu trúc checkpoint
+    bindings/<job>.json
+    results/<job>.json
+    workers/worker-<id>.json
+    worker-<id>/references/
+    collection.json
 ```
 
 Luồng này không ghi vào `data/processed`, raw snapshot, active pointers, model
