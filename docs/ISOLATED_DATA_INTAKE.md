@@ -72,12 +72,32 @@ cùng URL có thể có nhiều native ID. Không cộng các lượt này
 document cuối cùng qua quality/chunk gates.
 
 Nếu runtime bị ngắt, mở lại cùng notebook và cùng project rồi Run all. Không
-đổi campaign hoặc xóa checkpoint. Source hoàn tất có receipt và được bỏ qua
-sau kiểm tra mapping/outcomes nhỏ. Trong source đang dở, các shard 2.048 ID đã
-commit được kiểm checksum và dùng lại; shard ghi dở chạy lại. Metadata phục vụ
-source đang dở có thể phải đọc lại từ cache Drive; không chia chunk lại shard
-đã hoàn tất. Đường dẫn/mtime của metadata local được cố định để đổi tài khoản
-Colab không làm đổi identity của importer. Không cho hai phiên cùng ghi campaign.
+đổi campaign hoặc xóa checkpoint. Notebook đọc receipt nhỏ trước, không nạp
+mapping/tokenizer nếu chưa cần. Các log tương ứng:
+
+- `SKIP_COMPLETED_SOURCE`: nguồn đã xong, chỉ đọc JSON và trạng thái file;
+  không băm/đọc lại nội dung Parquet, không khôi phục catalog hay embedding.
+- `REUSE_SELECTION`: nguồn dở đã chọn xong ID; dùng lại lựa chọn đó, không đọc
+  lại archive hoặc mapping baseline/nguồn trước để chọn lại URL.
+- `RESUME_PARTS`: shard 2.048 ID đã commit được kiểm checksum và dùng lại;
+  shard đang ghi dở chạy lại. Chỉ nguồn đang dở cần đọc metadata/kiểm shard cũ.
+- `REUSE_VALIDATED_BUILD`: nguồn đã qua integrity nhưng bị ngắt trước receipt;
+  tiếp tục bàn giao kết quả, không chia chunk hoặc kiểm toàn build lần nữa.
+  Chỉ kiểm SHA của document/failure và mapping cần dùng để hoàn tất bàn giao.
+- `SOURCE_CHECKPOINT_SAVED`: kết quả và receipt của nguồn đã được ghi xong lên Drive.
+
+Mapping được copy về local và kiểm SHA khi thực sự cần cho một lựa chọn mới.
+Receipt chỉ xác nhận lần xử lý đã commit; đọc trạng thái không thay thế một lần
+audit lại toàn payload. Khi dùng mapping để lọc data mới vẫn phải kiểm SHA; bước
+freeze sau này vẫn kiểm các artifact đầu vào. Tệp thiếu/đổi kích thước được báo
+lỗi, không tự xóa checkpoint rồi xử lý lại nguồn đã xong.
+
+Phần điều phối tiếp tục được nhúng vào notebook từ `scripts/intake_resume.py`,
+nằm ngoài package tạo dữ liệu: tối ưu resume không làm đổi code fingerprint của
+importer/chunking. Giữ nguyên campaign và code/runtime lock đã lưu, kể cả khi
+notebook mới mở với checkout cũ đã khóa. Đường dẫn/mtime metadata local cố định
+để đổi tài khoản Colab không làm đổi identity của importer. Không cho hai phiên
+cùng ghi campaign; không cần khởi động lại phiên đang chạy ổn chỉ để cập nhật notebook.
 
 Sau `INTAKE_COMPLETE`, gửi `intake_status.json` để đối chiếu số thực tế. Đây mới
 là đầu ra CPU; chưa có embedding, index hay ZIP cho phần bổ sung. Lượt tiếp theo

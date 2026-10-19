@@ -19,6 +19,8 @@ trên **Colab CPU riêng → Run all**. Chỉ xử lý sáu frontier mới 00000
 dataset BTC revision `71be0e12`, dùng đúng TAR/inner TAR và phục hồi checkpoint;
 lưu riêng vào `data_staging/btc-new-71be0e12-20261019-v1`, không đổi
 candidate/cache của phiên submission. Shard legacy 00013–00015 không nằm trong lượt này.
+Resume nhận receipt trước, bỏ qua nguồn đã xong, chỉ nạp mapping/tokenizer khi
+cần phần thiếu; không khôi phục catalog/embedding cũ trong lượt xử lý data này.
 Xem [phạm vi, kiểm tra và cách resume](docs/ISOLATED_DATA_INTAKE.md).
 
 ## Quy trình Colab đã chốt

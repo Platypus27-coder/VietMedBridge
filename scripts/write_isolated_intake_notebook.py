@@ -1,6 +1,8 @@
 """Generate the one CPU notebook for additions while submission stays frozen."""
 from write_notebooks import ROOT, code, md, save
 
+RESUME_TOOLS = (ROOT / "scripts/intake_resume.py").read_text(encoding="utf-8")
+
 
 def main():
     save("02_colab_import_new_data.ipynb", [
@@ -34,9 +36,8 @@ def main():
         if not (3, 11) <= sys.version_info[:2] < (3, 14):
             raise RuntimeError("Dùng runtime Colab Python 3.11–3.13.")
         print("Bắt đầu CPU intake; không nạp model embedding.", flush=True)
-        from google.colab import drive, auth
+        from google.colab import drive
         drive.mount("/content/drive")
-        auth.authenticate_user()
 
         # Chỉ sửa nếu project của team ở vị trí khác; tự tìm shortcut dùng chung.
         PROJECT = Path("/content/drive/MyDrive/VietMedBridge")
@@ -91,64 +92,85 @@ def main():
         _INTAKE_COMMIT = commit
         print("Code:", commit, "\nCheckpoint:", INTAKE_ROOT, flush=True)
         '''),
-        code(r'''
-        #@title 2. Khóa nguồn đã audit, tải mapping nhỏ và chạy golden trên CPU
+        code('#@title 2. Nhận checkpoint trước; chỉ nạp tài nguyên khi cần xử lý phần thiếu\n' + RESUME_TOOLS + '\n' + r'''
+import json
+from huggingface_hub import hf_hub_download
+from vietmedbridge.artifacts import verify_file, publish_file, digest_json
+from vietmedbridge.isolated_intake import DriveSource, fetch_reference
+from vietmedbridge.chunks import load_bge_tokenizer, ChunkConfig
+from vietmedbridge.golden import run_golden_suite
+
+def validate_new_btc_plan(plan):
+    required = "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6"
+    if (plan.get("required_snapshot_id") != required
+            or set(plan["snapshots"]) != {required}
+            or not plan["sources"]
+            or any(source["snapshot_id"] != required
+                   or source["mode"] != "NEW_SNAPSHOT_SOURCE"
+                   for source in plan["sources"])):
+        raise ValueError("Lượt này chỉ nhận URL thuộc snapshot BTC mới 71be0e12; không nhập nguồn legacy.")
+
+PLAN = read_json(CHECKOUT / "configs/intake_ai_guru_20261019.json")
+validate_new_btc_plan(PLAN)
+CONFIG = ChunkConfig(**PLAN["chunking"])
+TOKENIZER_SPEC = {"model_id": "BAAI/bge-m3", "revision": PLAN["tokenizer_revision"], "special_tokens": False}
+CONTROLLER = IntakeResume(PLAN, root=INTAKE_ROOT, work_dir=WORK_DIR,
+    tokenizer_spec=TOKENIZER_SPEC, chunk_config=CONFIG, shard_size=2048)
+CHECKPOINT_STATUS = CONTROLLER.status()
+print("Checkpoint:", CHECKPOINT_STATUS["completed_sources"], "/", CHECKPOINT_STATUS["total_sources"],
+      "nguồn đã xong | chỉ đọc receipt nhỏ, chưa tải lại dữ liệu cũ", flush=True)
+LAZY_RESOURCES = {}
+
+def load_reader():
+    if "reader" not in LAZY_RESOURCES:
+        from google.colab import auth
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
-        from huggingface_hub import hf_hub_download
-        from vietmedbridge.artifacts import verify_file, publish_file, digest_json
-        from vietmedbridge.isolated_intake import DriveSource, fetch_reference, pin_plan
-        from vietmedbridge.chunks import load_bge_tokenizer, ChunkConfig
-        from vietmedbridge.golden import run_golden_suite
-
-        def validate_new_btc_plan(plan):
-            required = "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6"
-            if (plan.get("required_snapshot_id") != required
-                    or set(plan["snapshots"]) != {required}
-                    or not plan["sources"]
-                    or any(source["snapshot_id"] != required
-                           or source["mode"] != "NEW_SNAPSHOT_SOURCE"
-                           for source in plan["sources"])):
-                raise ValueError("Lượt này chỉ nhận URL thuộc snapshot BTC mới 71be0e12; không nhập nguồn legacy.")
-
-        PLAN = read_json(CHECKOUT / "configs/intake_ai_guru_20261019.json")
-        validate_new_btc_plan(PLAN)
-        pin_plan(INTAKE_ROOT, PLAN)
+        auth.authenticate_user()
         credentials, _ = google.auth.default()
-        READER = DriveSource(AuthorizedSession(credentials))
-        BASELINE_ALIASES = fetch_reference(READER, PLAN["baseline"],
-            INTAKE_ROOT / "references/baseline_aliases.parquet")
-        LINKS = {}
-        for snapshot_id, spec in PLAN["snapshots"].items():
-            target = INTAKE_ROOT / "references" / (snapshot_id[:16]+"-links.parquet")
-            if target.is_file():
-                verify_file(target, spec["sha256"])
-            elif "drive_file_id" in spec:
-                fetch_reference(READER, spec, target)
-            else:
-                print("Tải official links:", spec["revision"], flush=True)
-                downloaded = Path(hf_hub_download("AIGuruTinix/ViBioMIR", spec["filename"],
-                    repo_type="dataset", revision=spec["revision"]))
-                verify_file(downloaded, spec["sha256"])
-                publish_file(downloaded, target)
-            LINKS[snapshot_id] = target
-        CONFIG = ChunkConfig(**PLAN["chunking"])
-        TOKENIZER, TOKENIZER_SPEC = load_bge_tokenizer(PLAN["tokenizer_revision"])
-        GOLDEN = run_golden_suite(CHECKOUT / "tests/golden/cases.json", TOKENIZER, TOKENIZER_SPEC, CONFIG)
-        atomic_json(INTAKE_ROOT / "golden.json", GOLDEN)
-        if not GOLDEN["passed"]:
-            raise RuntimeError("Golden failed; chưa chạy import.")
-        print("Golden passed. Chỉ dataset BTC mới 71be0e12 | Nguồn khóa:", len(PLAN["sources"]), "| CPU only", flush=True)
+        LAZY_RESOURCES["reader"] = DriveSource(AuthorizedSession(credentials))
+    return LAZY_RESOURCES["reader"]
+
+def load_baseline():
+    if "baseline" not in LAZY_RESOURCES:
+        reference = PLAN["baseline"]
+        target = INTAKE_ROOT / "references/baseline_aliases.parquet"
+        if not target.is_file():
+            fetch_reference(load_reader(), reference, target)
+        print("Cần mapping cũ để chọn phần mới; chỉ đưa mapping lên ổ local một lần.", flush=True)
+        LAZY_RESOURCES["baseline"] = intake_core._local_mapping(target, reference["sha256"], WORK_DIR)
+    return LAZY_RESOURCES["baseline"]
+
+def load_links(snapshot_id):
+    key = "links-"+snapshot_id
+    if key not in LAZY_RESOURCES:
+        spec = PLAN["snapshots"][snapshot_id]
+        target = INTAKE_ROOT / "references" / (snapshot_id[:16]+"-links.parquet")
+        if not target.is_file():
+            print("Tải official links:", spec["revision"], flush=True)
+            downloaded = Path(hf_hub_download("AIGuruTinix/ViBioMIR", spec["filename"],
+                repo_type="dataset", revision=spec["revision"]))
+            verify_file(downloaded, spec["sha256"])
+            publish_file(downloaded, target)
+        LAZY_RESOURCES[key] = intake_core._local_mapping(target, spec["sha256"], WORK_DIR)
+    return LAZY_RESOURCES[key]
+
+def load_tokenizer():
+    if "tokenizer" not in LAZY_RESOURCES:
+        tokenizer, spec = load_bge_tokenizer(PLAN["tokenizer_revision"])
+        golden = run_golden_suite(CHECKOUT / "tests/golden/cases.json", tokenizer, spec, CONFIG)
+        atomic_json(INTAKE_ROOT / "golden.json", golden)
+        if not golden["passed"]:
+            raise RuntimeError("Golden failed; chưa chia chunk mới.")
+        LAZY_RESOURCES["tokenizer"] = (tokenizer, spec)
+    return LAZY_RESOURCES["tokenizer"]
         '''),
         code(r'''
-        #@title 3. Import, kiểm tra, chia chunk và lưu checkpoint riêng
-        from vietmedbridge.isolated_intake import run_intake
+        #@title 3. Chỉ tiếp tục nguồn thiếu, lưu checkpoint từng shard và từng nguồn
 
         def continue_intake():
-            return run_intake(PLAN, root=INTAKE_ROOT, reader=READER,
-                links_by_snapshot=LINKS, baseline_aliases=BASELINE_ALIASES,
-                tokenizer=TOKENIZER, tokenizer_spec=TOKENIZER_SPEC, chunk_config=CONFIG,
-                work_dir=WORK_DIR, shard_size=2048)
+            return CONTROLLER.run(load_reader=load_reader, load_links=load_links,
+                load_baseline=load_baseline, load_tokenizer=load_tokenizer)
 
         try:
             RESULT = continue_intake()
@@ -167,6 +189,13 @@ def main():
         `ADDED_VALID_DOCUMENT`, `REUSED_EXISTING_DOCUMENT` hoặc `PIPELINE_FAILURE`.
         URL lỗi được giữ trong `sources/<job>/source_outcomes.parquet` và failure
         shards; trạng thái này không có nghĩa là crawl thành công 100%.
+
+        `SKIP_COMPLETED_SOURCE`: bỏ qua nguồn xong, chỉ đọc receipt/trạng thái file.
+        `REUSE_SELECTION`: tiếp tục nguồn dở, không chọn lại URL hoặc nạp mapping cũ.
+        `RESUME_PARTS`: giữ shard đã commit; chỉ source đang dở cần kiểm tra checksum.
+        `REUSE_VALIDATED_BUILD`: build đã qua integrity, chỉ hoàn tất bước bàn giao.
+        Mapping được kiểm SHA khi thực sự sử dụng; receipt không thay thế
+        một lần audit lại toàn bộ payload. Không nạp catalog/BM25 hoặc embedding cũ.
 
         Gửi `intake_status.json` sau khi xong để kiểm tra số thực tế. Bước kế tiếp
         là freeze/chuẩn bị index cho **lượt thêm riêng**, rồi chỉ embedding text
