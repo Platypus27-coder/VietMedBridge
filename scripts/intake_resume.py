@@ -6,14 +6,73 @@ Completed receipts are NOT a fresh payload-integrity audit: only metadata is
 read for status; mapping payloads are SHA-checked when actually used.
 """
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 import re
+import tempfile
 
 from vietmedbridge import isolated_intake as intake_core
 from vietmedbridge.artifacts import (atomic_json, code_fingerprint, digest_json,
     read_json, runtime_versions, sha256_file, utc_now, verify_file)
 from vietmedbridge.dataset import _connection
+
+
+def intake_memory_mb():
+    """At most 2 GiB and a quarter of available RAM; no reservation or GPU use."""
+    available = []
+    try:
+        match = re.search(r"^MemAvailable:\s+(\d+) kB", Path("/proc/meminfo").read_text(), re.M)
+        if match:
+            available.append(int(match[1])*1024)
+    except OSError:
+        pass
+    for limit, used in (("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+                        ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes")):
+        try:
+            available.append(max(0, int(Path(limit).read_text())-int(Path(used).read_text())))
+        except (OSError, ValueError):
+            pass
+    return min(2048, max(64, min(available)//(4*1024**2))) if available else 512
+
+
+def bounded_intake_parquet(con, query, destination, work_dir):
+    """Flush wide text every 2,048 rows, then atomically publish the full file."""
+    with tempfile.TemporaryDirectory(prefix="intake-table-", dir=work_dir) as temporary:
+        path = Path(temporary)/"table.parquet"
+        con.sql(query).write_parquet(str(path), compression="zstd", row_group_size=2048)
+        return intake_core.publish_file(path, destination)
+
+
+@contextmanager
+def bounded_intake_sql(memory_mb=None):
+    """Scoped I/O adapter for the single intake controller, including old locks.
+
+    The pinned producer files, policies and completed selections stay untouched.
+    Only this module's selection/outcome SQL and Parquet writer are adapted;
+    normal importer/chunk shards still use their original producer.
+    """
+    budget = intake_memory_mb() if memory_mb is None else memory_mb
+    if type(budget) is not int or not 64 <= budget <= 2048:
+        raise ValueError("Intake SQL budget must be 64..2048 MiB.")
+    original_connection, original_parquet = intake_core._connection, intake_core._parquet
+
+    def connect(temp_dir, memory_limit=None):
+        con = _connection(temp_dir, memory_limit=memory_limit or f"{budget}MiB")
+        try:
+            con.execute("SET threads=1")
+            con.execute("SET preserve_insertion_order=false")
+        except BaseException:
+            con.close()
+            raise
+        return con
+
+    intake_core._connection, intake_core._parquet = connect, bounded_intake_parquet
+    print(f"Intake SQL: RAM limit {budget} MiB | 1 thread | local spill | Parquet groups 2,048 rows", flush=True)
+    try:
+        yield
+    finally:
+        intake_core._connection, intake_core._parquet = original_connection, original_parquet
 
 
 class IntakeResume:
@@ -133,6 +192,7 @@ class IntakeResume:
         print(f"REUSE_VALIDATED_BUILD {source['job_id']} | no re-chunk or full validation replay", flush=True)
         return build
 
+    @bounded_intake_sql()
     def run(self, *, load_reader, load_links, load_baseline, load_tokenizer):
         self.refresh()
         for saved in self.completed:

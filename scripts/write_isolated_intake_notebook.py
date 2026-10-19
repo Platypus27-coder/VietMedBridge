@@ -23,6 +23,10 @@ def main():
         Ngắt phiên: mở lại cùng notebook, cùng folder, Run all; từng source/shard
         hoàn tất được giữ. Shard đang ghi dở sẽ chạy lại. Đây là import, kiểm tra
         và chia chunk, chưa chạy embedding hay ghép vào submission.
+
+        Ghi Parquet theo nhóm 2.048 dòng; SQL dùng một luồng, spill ở ổ local,
+        tối đa 2 GiB và không quá 1/4 RAM khả dụng tại lúc bắt đầu xử lý.
+        Giữ nguyên campaign/code lock khi chạy tiếp sau lỗi thiếu bộ nhớ.
         """),
         code(r'''
         #@title 1. Kết nối Drive và cài code riêng cho lượt nhập mới

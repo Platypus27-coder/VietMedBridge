@@ -7,7 +7,7 @@ from test_external_import import external, CharacterTokenizer, SPEC, CONFIG
 from test_isolated_intake import setup_intake
 from vietmedbridge.artifacts import read_json, sha256_file
 from vietmedbridge.isolated_intake import run_intake
-from scripts.intake_resume import IntakeResume
+from scripts.intake_resume import IntakeResume, bounded_intake_parquet, bounded_intake_sql
 from vietmedbridge import isolated_intake as core
 
 
@@ -162,3 +162,60 @@ def test_resume_controller_does_not_modify_pinned_producer_identity():
     assert (root/"scripts/intake_resume.py").read_text(encoding="utf-8").strip() in text
     assert "CONTROLLER.run(" in text and "from vietmedbridge.isolated_intake import run_intake" not in text
     assert "LAZY_RESOURCES" in text
+
+
+def test_wide_text_export_fits_128_mib_and_preserves_all_rows_and_strings(tmp_path):
+    import pyarrow.parquet as pq
+
+    # 512 MiB of unique wide values: the legacy default row group OOMs at
+    # this budget on the locked DuckDB 1.4.1. Generate rows in SQL, not Python RAM.
+    query = """SELECT i AS doc_id, repeat(md5(i::varchar),128) AS text,
+        repeat(md5((i+1)::varchar),128) AS markdown FROM range(65536) r(i)"""
+    target = tmp_path/"wide.parquet"
+    with bounded_intake_sql(memory_mb=128):
+        with core._connection(tmp_path) as con:
+            assert core._parquet(con, query, target, tmp_path) == sha256_file(target)
+            count, wrong = con.execute("""SELECT count(*), count(*) FILTER (WHERE
+                text != repeat(md5(doc_id::varchar),128) OR
+                markdown != repeat(md5((doc_id+1)::varchar),128)) FROM read_parquet(?)""",
+                [str(target)]).fetchone()
+    assert (count, wrong) == (65536, 0)
+    metadata = pq.ParquetFile(target).metadata
+    assert max(metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)) <= 2048
+    assert not list(tmp_path.glob("intake-table-*"))
+
+
+def test_selection_oom_resume_keeps_completed_source_and_downloaded_metadata(tmp_path, external, monkeypatch):
+    import duckdb
+    import scripts.intake_resume as resume
+
+    plan, kwargs, protected, before = setup_intake(tmp_path, external)
+    producer = resume.code_fingerprint()
+    original_connection, original_parquet = core._connection, core._parquet
+    second_export = kwargs["root"]/"sources/legacy-00014/selection"/core.MEMBERS["extracted"]
+
+    def oom(con, query, destination, work):
+        if destination == second_export:
+            raise duckdb.OutOfMemoryException("simulated wide Parquet export")
+        return bounded_intake_parquet(con, query, destination, work)
+
+    monkeypatch.setattr(resume, "bounded_intake_parquet", oom)
+    with pytest.raises(duckdb.OutOfMemoryException):
+        controller(plan, kwargs).run(**loaders(kwargs))
+    assert (core._connection, core._parquet) == (original_connection, original_parquet)
+    first = kwargs["root"]/"sources/new-00000"
+    committed = {str(p.relative_to(first)): p.read_bytes() for p in first.rglob("*") if p.is_file()}
+    assert "complete.json" in committed
+    assert (kwargs["root"]/"sources/legacy-00014/metadata/metadata.json").exists()
+    assert not (kwargs["root"]/"sources/legacy-00014/selection/selection.json").exists()
+    opens = kwargs["reader"].opens
+    monkeypatch.setattr(resume, "bounded_intake_parquet", bounded_intake_parquet)
+    result = controller(plan, kwargs).run(**loaders(kwargs))
+    assert result["state"] == "INTAKE_COMPLETE"
+    assert result["completed_sources"] == 2
+    assert result["counts"] == {"ADDED_VALID_DOCUMENT": 2, "PIPELINE_FAILURE": 4, "REUSED_EXISTING_DOCUMENT": 2}
+    assert kwargs["reader"].opens == opens  # metadata checkpoint avoids archive replay
+    assert committed == {str(p.relative_to(first)): p.read_bytes() for p in first.rglob("*") if p.is_file()}
+    assert before == {str(p.relative_to(protected)): p.read_bytes() for p in protected.rglob("*") if p.is_file()}
+    assert resume.code_fingerprint() == producer
+    assert (core._connection, core._parquet) == (original_connection, original_parquet)

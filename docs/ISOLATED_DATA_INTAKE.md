@@ -99,6 +99,15 @@ notebook mới mở với checkout cũ đã khóa. Đường dẫn/mtime metadat
 để đổi tài khoản Colab không làm đổi identity của importer. Không cho hai phiên
 cùng ghi campaign; không cần khởi động lại phiên đang chạy ổn chỉ để cập nhật notebook.
 
+Sau lỗi `OutOfMemoryException` khi ghi metadata Parquet, dùng bản notebook đã
+cập nhật nhưng giữ nguyên campaign và các code/runtime lock. Adapter SQL của
+phần điều phối ghi từng nhóm 2.048 dòng thay cho row group mặc định lớn; dùng
+một luồng, spill vào `WORK_DIR`, giới hạn tối đa 2 GiB và 1/4 RAM khả dụng lúc
+bắt đầu. Không đổi file producer, chính sách chunk hoặc runtime đã khóa. Nguồn
+đã có `SOURCE_CHECKPOINT_SAVED` được bỏ qua. Nếu chưa có `selection.json`, chỉ
+chọn/ghi lại metadata của nguồn đang dở; metadata tải thành công vẫn được dùng
+lại sau kiểm tra binding/SHA. File xuất chỉ được công bố sau khi ghi xong.
+
 Sau `INTAKE_COMPLETE`, gửi `intake_status.json` để đối chiếu số thực tế. Đây mới
 là đầu ra CPU; chưa có embedding, index hay ZIP cho phần bổ sung. Lượt tiếp theo
 cần kiểm tra/freeze additions, chuẩn bị index inputs, embedding text thiếu rồi
