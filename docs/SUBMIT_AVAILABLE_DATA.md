@@ -86,6 +86,14 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   `data/retrieval/submission_progress.json` lưu trạng thái khi chuyển stage và khi kết thúc;
   heartbeat chi tiết lưu local ở `WORK_DIR/submission_progress.json`.
   Hai file này chỉ là chẩn đoán tiến trình, không chứng nhận embedding hoặc ZIP đã hoàn tất.
+  Bảng tra `ContentBlocks` dùng SQLite bền trên ổ local ở `WORK_DIR/receipt_lookups`, commit từng
+  receipt cùng key/path/hash/row. Khi Drive ngắt, phần đã commit được giữ; lần khôi phục chỉ đọc
+  receipt chưa nhập, với tối đa 2 lượt đọc đồng thời và hàng đợi giới hạn 2 file.
+  Sau khi inventory đủ, bản nén có checksum được lưu trong `data/retrieval/content_lookups`;
+  runtime mới có thể khôi phục bảng tra rồi đọc phần receipt mới thêm.
+  Nếu bản nén chưa lưu thành công thì vẫn giữ checkpoint local trong runtime hiện tại.
+  Bảng tra chỉ trỏ tới vector gốc: native reader tiếp tục kiểm SHA256/shape khi dùng vector;
+  không dùng bảng tra hoặc số receipt để tuyên bố corpus đã embedding đủ.
   Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
   khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
   Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng

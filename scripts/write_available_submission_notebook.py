@@ -194,6 +194,7 @@ def notebook():
     from vietmedbridge.submission_workflow import run_current_baseline
     BASELINE = None
     if GPU_SESSION:
+        ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
         with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="baseline"):
             BASELINE = run_current_baseline(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(BASELINE["ready"],ensure_ascii=False,indent=2),flush=True)
@@ -207,6 +208,7 @@ def notebook():
     from vietmedbridge.submission_workflow import run_current_submission
     STRONG = None
     if GPU_SESSION:
+        ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
         with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="strong"):
             STRONG = run_current_submission(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(STRONG["ready"],ensure_ascii=False,indent=2),flush=True)
