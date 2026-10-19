@@ -14,16 +14,20 @@ chưa được chứng nhận phù hợp danh sách ID của dataset BTC mới. 
 
 ## Cách chạy
 
-1. Có thể chọn Colab **T4 GPU → Run all** trực tiếp. Notebook tự tiếp tục chuẩn bị bằng CPU khi chưa có report,
-   rồi mới nạp model GPU. Muốn tiết kiệm quota, chọn **CPU** cho lượt chuẩn bị trước.
+1. Khi resume, chọn Colab **T4 GPU → Run all**, giữ `ALLOW_CPU_PREPARATION=False` ở cell 2.
+   Cell 2 chỉ đọc manifest/báo cáo JSON, kiểm đúng candidate/config/snapshot/source và khôi phục handoff.
+   Không mở lại corpus Parquet, vector NPY, model cache hay catalog/BM25 trong cell này.
+   Nếu báo cáo thiếu/không khớp, báo `RESUME_ONLY_STOP` và dừng, không tự chạy preparation.
+   Chỉ khi chủ động chuẩn bị dữ liệu mới, bật `ALLOW_CPU_PREPARATION=True` và dùng CPU trước.
    Giữ `DATA_ROOT_PATH` trỏ đến data dùng chung.
    Notebook tự nhận candidate đang active, các nguồn của candidate đã ghép, batch hoàn tất gần nhất
    và pilot `stage-a-data-v5-clean-text` nếu còn. Nguồn phải hoàn tất, cùng snapshot gốc và cùng chính sách chunk/tokenizer.
-2. Chờ `CPU_PREPARATION_COMPLETE`. Output ghi số document, child, unique dense input,
-   danh sách source build và số vector cache được dùng lại/còn thiếu. Đây là số đo thực tế của lượt ghép,
+2. Chờ `RESUME_READY` và `CPU_PREPARATION_COMPLETE`. Output gọn ghi build/candidate, số document và unique dense input;
+   danh sách source build và số cache tại lúc chuẩn bị vẫn có trong report trên Drive. Đây là số đo của lượt ghép,
    không suy từ số tar hoặc từ tổng số URL đã từng thử crawl.
-3. Nếu đã chuẩn bị bằng CPU, đổi runtime sang **T4 GPU** rồi **Run all cùng notebook**. Không cần đổi ACTION, worker ID hoặc tài khoản Kaggle.
+3. Nếu đã chuẩn bị bằng CPU, tắt `ALLOW_CPU_PREPARATION`, đổi runtime sang **T4 GPU** rồi **Run all cùng notebook**. Không cần đổi ACTION, worker ID hoặc tài khoản Kaggle.
    GPU xác minh CPU preparation, code/model producer/runtime trước khi nạp weights.
+   Chế độ chỉ đọc JSON áp dụng cho cell 2; cell 3–4 vẫn kiểm tra payload checkpoint khi thực sự sử dụng.
 4. Cell 3 bổ sung **BGE còn thiếu** và xuất ZIP BGE/BM25 đủ 1.200 query. ZIP được giữ trên Drive trước khi nạp LLM
    cho cell 4. Đây là bản đầu để lấy phản hồi từ BTC, chưa có dịch, document dense hoặc neural reranking.
 5. Cell 4 tiếp tục bản nâng cấp: dịch EN/ZH, PICO/subqueries/HyDE, BGE document dense,
@@ -129,8 +133,9 @@ không nạp model để chạy lại toàn bộ inference. Chỉ một phiên w
 Không chạy notebook 03 hoặc notebook khác đổi active candidate giữa lượt submission.
 
 Đổi runtime chỉ mất biến và ổ tạm. Report chuẩn bị được lưu ở ba vị trí trên Drive: con trỏ chung,
-report trong build và marker CPU preparation theo candidate. Nếu thiếu con trỏ, notebook khôi phục từ report phù hợp;
-nếu bước chuẩn bị chưa xong, nó tiếp tục receipt đã ghi ngay trong phiên hiện tại. Không tạo report giả để bỏ qua kiểm tra.
+report trong build và marker CPU preparation theo candidate. Nếu thiếu con trỏ, notebook khôi phục từ report phù hợp.
+Nếu không có report phù hợp, mặc định dừng; chỉ tiếp tục preparation khi chủ động bật `ALLOW_CPU_PREPARATION`.
+Không tạo report giả để bỏ qua kiểm tra.
 
 Các batch 07–13 đã chia chunk nhưng chưa embedding sẽ làm tăng số BGE cần tính. Giữ URL cũ
 không biến những batch đó thành đã embedding. Thời gian phụ thuộc số text thiếu thực tế, GPU và Drive;

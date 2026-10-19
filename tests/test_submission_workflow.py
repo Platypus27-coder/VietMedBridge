@@ -77,7 +77,9 @@ def test_notebook_cell_two_survives_fresh_kernel(prepared,monkeypatch):
     notebook = nbformat.read(root / "notebooks/04_colab_submit_available_data.ipynb",as_version=4)
     source = [c.source for c in notebook.cells if c.cell_type == "code"][1]
     cpu = {"DATA_ROOT":p.root,"CHECKOUT":p.checkout,"WORK_DIR":p.work,"GPU_SESSION":False,"json":json}
-    exec(compile(source,"notebook-cell-2","exec"),cpu)
+    # First-time preparation is now an explicit opt-in; resume is the default.
+    initial = source.replace('ALLOW_CPU_PREPARATION = False', 'ALLOW_CPU_PREPARATION = True', 1)
+    exec(compile(initial,"notebook-cell-2","exec"),cpu)
     # A new kernel starts with NO PREPARATION variable and an empty work directory.
     gpu = {"DATA_ROOT":p.root,"CHECKOUT":p.checkout,"WORK_DIR":p.work / "empty-kernel",
            "GPU_SESSION":True,"json":json}
@@ -233,7 +235,8 @@ def test_submission_notebook_has_two_phases_and_persistent_results():
     joined = "\n".join(codes)
     assert joined.index("runtime_lock =") < joined.index("import torch")
     assert 'ensure_submission_preparation(DATA_ROOT,CHECKOUT,WORK_DIR,gpu_session=GPU_SESSION)' in codes[1]
-    assert 'raise RuntimeError' not in codes[1] and 'all-available-legacy-20261017-v9' in codes[0]
+    assert 'ALLOW_CPU_PREPARATION = False' in codes[1] and 'RESUME_ONLY_STOP' in codes[1]
+    assert 'all-available-legacy-20261017-v9' in codes[0]
     assert "run_current_baseline(" in codes[2] and "run_current_submission(" in codes[3]
     assert "latest_submission.json" in codes[4] and "verify_file(" in codes[4]
     assert "KAGGLE_JSON" not in joined and "BTC_REVISION" not in joined

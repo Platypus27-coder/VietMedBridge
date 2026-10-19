@@ -3,6 +3,7 @@ from pathlib import Path
 from textwrap import dedent
 import nbformat as nb
 
+RESUME_ONLY_TOOLS = (Path(__file__).resolve().parent / "submission_resume_only.py").read_text(encoding="utf-8")
 
 def code(value):
     return nb.v4.new_code_cell(dedent(value).strip()+"\n")
@@ -12,10 +13,12 @@ def notebook():
     cells = [nb.v4.new_markdown_cell(dedent('''
     # Submit từ toàn bộ dữ liệu đã xử lý — giữ URL cũ
 
-    **Chạy trên Colab, chọn T4 GPU → Run all.** Notebook tự khôi phục checkpoint Drive,
-    tiếp tục phần chuẩn bị CPU còn thiếu, rồi mới nạp model để inference.
-    Có thể chuẩn bị trên CPU trước để tiết kiệm quota GPU: khi báo
-    `CPU_PREPARATION_COMPLETE`, đổi sang T4 GPU và Run all cùng notebook.
+    **Chạy trên Colab, chọn T4 GPU → Run all.** Cell 2 mặc định chỉ khôi phục
+    checkpoint bằng manifest/báo cáo JSON. Không mở lại corpus, vector hoặc catalog/BM25.
+    Nếu báo cáo thiếu hoặc không khớp, cell 2 dừng; không tự chạy preparation lại.
+    Với dữ liệu mới chưa chuẩn bị, chủ động bật `ALLOW_CPU_PREPARATION` ở cell 2
+    và chạy CPU trước. Khi có `CPU_PREPARATION_COMPLETE`, tắt lại tùy chọn này,
+    đổi sang T4 GPU và Run all cùng notebook.
     Đổi runtime mất biến/ổ tạm; các checkpoint đã publish trên Drive vẫn được giữ và tự nhận lại.
     Khi đã có freeze receipt, resume bỏ qua vòng chọn/chép toàn bộ source part.
     Spool local còn thì dùng lại; runtime mới chỉ khôi phục document/child cần để dựng spool,
@@ -170,14 +173,22 @@ def notebook():
         print("CUDA:",torch.__version__,torch.cuda.get_device_name(0),flush=True)
     print("Code:",COMMIT,"| package:",vietmedbridge.__file__,flush=True)
     print("Phase:","GPU inference" if GPU_SESSION else "CPU corpus/catalog preparation",flush=True)
-    '''), code('''
-    #@title 2. Ghép toàn bộ build đã xử lý, giữ URL cũ (CPU)
-    from vietmedbridge.submission_workflow import ensure_submission_preparation
-    PREPARATION = ensure_submission_preparation(DATA_ROOT,CHECKOUT,WORK_DIR,gpu_session=GPU_SESSION)
-    print(json.dumps(PREPARATION,ensure_ascii=False,indent=2),flush=True)
-    if not GPU_SESSION:
-        print("CPU xong: đổi runtime sang T4 GPU rồi Run all cùng notebook. Không cần đổi worker_id hoặc ACTION.",flush=True)
-    '''), code('''
+    '''), code('#@title 2. Chỉ khôi phục checkpoint JSON; không tự chạy preparation lại\n'
+        + 'ALLOW_CPU_PREPARATION = False #@param {type:"boolean"}\n'
+        + RESUME_ONLY_TOOLS + '\n' + dedent('''
+    if ALLOW_CPU_PREPARATION:
+        from vietmedbridge.submission_workflow import ensure_submission_preparation
+        PREPARATION = ensure_submission_preparation(DATA_ROOT,CHECKOUT,WORK_DIR,gpu_session=GPU_SESSION)
+    else:
+        PREPARATION = restore_submission_preparation_only(DATA_ROOT,CHECKOUT)
+    print(json.dumps({k: PREPARATION[k] for k in (
+        "state", "build_run", "candidate_manifest_sha256", "documents", "unique_dense_inputs"
+    )},ensure_ascii=False,indent=2),flush=True)
+    if GPU_SESSION:
+        print("Tiếp tục cell 3. Cell 2 chưa kiểm payload; cell inference kiểm checkpoint khi sử dụng.",flush=True)
+    else:
+        print("CPU handoff đã có. Chọn GPU rồi chạy cell 1 → 2 → 3; giữ ALLOW_CPU_PREPARATION=False khi resume.",flush=True)
+    ''')), code('''
     #@title 3. BGE phần còn thiếu và ZIP đầu tiên đủ 1.200 query (GPU)
     from vietmedbridge.submission_workflow import run_current_baseline
     BASELINE = None
