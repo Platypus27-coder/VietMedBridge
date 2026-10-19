@@ -4,7 +4,8 @@ from textwrap import dedent
 import nbformat as nb
 
 RESUME_ONLY_TOOLS = (Path(__file__).resolve().parent / "submission_resume_only.py").read_text(encoding="utf-8")
-GPU_PROGRESS_TOOLS = (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
+MOUNT_TOOLS = (Path(__file__).resolve().parent / "colab_drive_mount.py").read_text(encoding="utf-8")
+GPU_PROGRESS_TOOLS = MOUNT_TOOLS + '\n' + (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
 
 def code(value):
     return nb.v4.new_code_cell(dedent(value).strip()+"\n")
@@ -52,8 +53,8 @@ def notebook():
     model input, query và ZIP lưu bền trên Drive. Nếu bị ngắt, Run all cùng notebook
     và cấu hình để tiếp tục checkpoint. Khi đã có ZIP baseline, có thể nộp thử trong
     lúc lượt strong còn đang chạy; ZIP mạnh hơn chỉ xuất sau khi đủ 1.200 query.
-    ''').strip()), code('''
-    #@title 1. Drive, code và môi trường (tự nhận CPU/GPU)
+    ''').strip()), code('#@title 1. Drive, code và môi trường (tự nhận CPU/GPU)\n'
+        + MOUNT_TOOLS + '\n' + dedent('''
     import hashlib
     import importlib
     import importlib.metadata
@@ -78,7 +79,7 @@ def notebook():
     if not Path("/var/colab/hostname").exists():
         raise RuntimeError("Notebook này chạy trên Google Colab. Kaggle dùng notebook embedding worker riêng.")
     from google.colab import drive, userdata
-    drive.mount("/content/drive")
+    safe_colab_mount("/content/drive")
     # The shared-folder shortcut may exist only under its target ID on another account.
     bootstrap_roots = list(dict.fromkeys([DATA_ROOT,
         Path("/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge/data"),
@@ -100,7 +101,7 @@ def notebook():
         if error.errno not in (103,107):
             raise
         print("Drive preflight: remount trước khi đọc code lock hoặc nạp model.",flush=True)
-        drive.mount("/content/drive",force_remount=True)
+        safe_colab_remount(Path("/content/drive"))
         (DATA_ROOT / "active_data_candidate.json").read_bytes()
     if not (DATA_ROOT / "active_data_candidate.json").is_file():
         raise RuntimeError("DATA_ROOT chưa trỏ tới data đã freeze. Chỉnh DATA_ROOT ở đầu cell, không tạo data rỗng.")
@@ -189,7 +190,7 @@ def notebook():
         print("CUDA:",torch.__version__,torch.cuda.get_device_name(0),flush=True)
     print("Code:",COMMIT,"| package:",vietmedbridge.__file__,flush=True)
     print("Phase:","GPU inference" if GPU_SESSION else "CPU corpus/catalog preparation",flush=True)
-    '''), code('#@title 2. Chỉ khôi phục checkpoint JSON; không tự chạy preparation lại\n'
+    ''')), code('#@title 2. Chỉ khôi phục checkpoint JSON; không tự chạy preparation lại\n'
         + 'ALLOW_CPU_PREPARATION = False #@param {type:"boolean"}\n'
         + RESUME_ONLY_TOOLS + '\n' + dedent('''
     if ALLOW_CPU_PREPARATION:

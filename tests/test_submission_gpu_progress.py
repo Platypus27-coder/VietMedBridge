@@ -64,15 +64,19 @@ def test_parallel_maps_do_not_promote_partial_or_changed_vectors(prepared, monke
 
 
 def test_progress_restores_native_bindings_after_interrupt(prepared, monkeypatch, capsys):
+    from vietmedbridge import colab_storage
     p = prepared
     original = scale_baseline.imported_bge_manifest
+    original_remount = colab_storage._remount
     native_context = submission_workflow._submission_context
     with pytest.raises(KeyboardInterrupt):
         with submission_gpu_progress(p.root, p.work):
             assert scale_baseline.imported_bge_manifest is not original
+            assert colab_storage._remount is adapter.safe_colab_remount
             raise KeyboardInterrupt()
     assert scale_baseline.imported_bge_manifest is original
     assert submission_workflow._submission_context is native_context
+    assert colab_storage._remount is original_remount
     assert read_json(p.root / 'retrieval/submission_progress.json')['state'] == 'STOPPED'
     assert 'SUBMISSION startup' in capsys.readouterr().out
 

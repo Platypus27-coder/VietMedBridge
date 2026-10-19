@@ -15,6 +15,11 @@ from vietmedbridge.content_embeddings import ContentBlocks as NativeContentBlock
 from vietmedbridge.portable_embeddings import resources_relative
 from vietmedbridge.scale_vectors import bound
 
+# Notebook cells embed the pure-stdlib mount helper before this adapter. Module
+# imports in local tests load the same helper from scripts, outside producer src.
+if 'safe_colab_remount' not in globals():
+    from scripts.colab_drive_mount import safe_colab_remount
+
 
 class ResumableContentBlocks(NativeContentBlocks):
     """Retain validated receipt lookups on local disk across Drive recovery.
@@ -227,7 +232,7 @@ def read_bge_maps_parallel(data_root, candidate, inputs, config, *, progress=pri
 
 def ensure_submission_mount(data_root, expected_candidate_sha256):
     """Return the matching root through known Drive aliases; JSON only."""
-    from vietmedbridge.colab_storage import _disconnected, _drive_mountpoint, _remount
+    from vietmedbridge.colab_storage import _disconnected, _drive_mountpoint
     from vietmedbridge.scale_benchmark import load_handoff
     if not isinstance(expected_candidate_sha256, str) or not expected_candidate_sha256:
         raise ValueError('Expected frozen candidate is required before reconnecting.')
@@ -261,7 +266,7 @@ def ensure_submission_mount(data_root, expected_candidate_sha256):
                 return location
         if mount is not None and not attempt:
             print('SUBMISSION preflight: handoff unavailable; reconnect Drive, retain runtime and local lookup', flush=True)
-            _remount(mount, readonly=False)
+            safe_colab_remount(mount, readonly=False)
     if mount is None and missing is not None:
         raise missing
     raise FileNotFoundError('Frozen submission handoff not found after reconnect. Checked only: '
@@ -322,10 +327,11 @@ class SubmissionProgress:
 @contextmanager
 def submission_gpu_progress(data_root, work_dir, *, label='baseline'):
     """Single-writer notebook adapter; restores every patched binding on exit."""
-    from vietmedbridge import content_embeddings, scale_baseline, submission_workflow
+    from vietmedbridge import colab_storage, content_embeddings, scale_baseline, submission_workflow
     progress = SubmissionProgress(data_root, work_dir, label)
     original_maps = scale_baseline.imported_bge_manifest
     original_blocks = content_embeddings.ContentBlocks
+    original_remount = colab_storage._remount
     names = ('_submission_context', '_saved_submission', '_release_catalog_staging', '_ensure_primary')
     originals = {name: getattr(submission_workflow, name) for name in names}
 
@@ -343,6 +349,7 @@ def submission_gpu_progress(data_root, work_dir, *, label='baseline'):
 
     scale_baseline.imported_bge_manifest = lambda *a, **k: read_bge_maps_parallel(*a, **k, progress=progress.report)
     content_embeddings.ContentBlocks = lambda *a, **k: ResumableContentBlocks(*a, **k, progress=progress.report)
+    colab_storage._remount = safe_colab_remount
     for name, function in originals.items():
         setattr(submission_workflow, name, wrap(name, function))
     thread = threading.Thread(target=progress.heartbeat, name='submission-progress', daemon=True)
@@ -357,6 +364,7 @@ def submission_gpu_progress(data_root, work_dir, *, label='baseline'):
         thread.join(timeout=1)
         scale_baseline.imported_bge_manifest = original_maps
         content_embeddings.ContentBlocks = original_blocks
+        colab_storage._remount = original_remount
         for name, function in originals.items():
             setattr(submission_workflow, name, function)
         status = progress.snapshot(state)

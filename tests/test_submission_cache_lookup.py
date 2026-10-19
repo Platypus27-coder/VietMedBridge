@@ -153,7 +153,7 @@ def test_preflight_recovers_dead_mount_and_preserves_expected_candidate(monkeypa
         return None, {'candidate_manifest_sha256': 'same-frozen-candidate'}, None
     remounts = []
     monkeypatch.setattr(scale_benchmark, 'load_handoff', handoff)
-    monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: remounts.append((a,k)))
+    monkeypatch.setattr(adapter, 'safe_colab_remount', lambda *a, **k: remounts.append((a,k)))
     adapter.ensure_submission_mount(root, 'same-frozen-candidate')
     assert len(calls) == 2 and remounts == [((Path('/content/drive'),), {'readonly': False})]
 
@@ -162,7 +162,7 @@ def test_preflight_refuses_candidate_change_without_restarting_preparation(monke
     from vietmedbridge import colab_storage, scale_benchmark
     monkeypatch.setattr(scale_benchmark, 'load_handoff',
         lambda _: (None, {'candidate_manifest_sha256': 'another-candidate'}, None))
-    monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: pytest.fail('Remounted a healthy corpus'))
+    monkeypatch.setattr(adapter, 'safe_colab_remount', lambda *a, **k: pytest.fail('Remounted a healthy corpus'))
     with pytest.raises(ValueError, match='Active candidate changed'):
         adapter.ensure_submission_mount(Path('/content/drive/MyDrive/VietMedBridge/data'), 'original')
 
@@ -179,7 +179,7 @@ def test_missing_mydrive_handoff_uses_verified_shared_folder_without_remount(mon
         assert path == shared
         return None, {'candidate_manifest_sha256': 'expected'}, None
     monkeypatch.setattr(scale_benchmark, 'load_handoff', handoff)
-    monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: pytest.fail('Healthy shared alias remounted'))
+    monkeypatch.setattr(adapter, 'safe_colab_remount', lambda *a, **k: pytest.fail('Healthy shared alias remounted'))
     assert adapter.ensure_submission_mount(root, 'expected') == shared
     assert visited == [root, shared]
 
@@ -191,7 +191,7 @@ def test_unmounted_drive_recovers_once_on_enoent_without_creating_data(monkeypat
     def missing(path):
         raise FileNotFoundError(2, 'No such file', str(path / 'active_data_candidate.json'))
     monkeypatch.setattr(scale_benchmark, 'load_handoff', missing)
-    monkeypatch.setattr(colab_storage, '_remount', lambda *a, **k: remounts.append((a,k)))
+    monkeypatch.setattr(adapter, 'safe_colab_remount', lambda *a, **k: remounts.append((a,k)))
     with pytest.raises(FileNotFoundError, match='No data or checkpoint was created'):
         adapter.ensure_submission_mount(root, 'expected')
     assert len(remounts) == 1

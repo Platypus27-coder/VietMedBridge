@@ -98,6 +98,10 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   đường dẫn target ID đã biết của thư mục dùng chung và trả lại `DATA_ROOT` thực tế.
   Cell 3–4 gán lại đường dẫn này, chỉ chấp nhận đúng candidate SHA từ `PREPARATION`;
   không tìm toàn Drive, tạo handoff rỗng hoặc tự chạy lại preparation khi thiếu file.
+  Khi Colab từ chối mount vì `/content/drive` còn file local, helper chỉ giữ nguyên thư mục đó
+  dưới `/content/vmb_drive_unmounted_<id>` sau khi bảng mount của kernel xác nhận không còn
+  mount tại đó hoặc bên trong. Sau đó mount lại đúng `/content/drive` và xác minh candidate cũ.
+  Không xóa hoặc tự nhập lại file trong thư mục được giữ; lỗi quyền/auth vẫn được báo riêng.
   Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
   khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
   Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng
