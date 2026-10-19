@@ -13,6 +13,13 @@ mọi checkpoint và ZIP mới lưu bền trên Drive. Qwen child dense chưa đ
 Theo yêu cầu của Sếp, không lọc URL bị BTC loại trong bản dataset mới; lượt này kiểm ID theo snapshot nguồn cũ.
 Xem [hướng dẫn nộp từ dữ liệu hiện có](docs/SUBMIT_AVAILABLE_DATA.md).
 
+**Nhập data mới trong lúc submission đang chạy:** mở
+[02_colab_import_new_data.ipynb](https://colab.research.google.com/github/Platypus27-coder/VietMedBridge/blob/main/notebooks/02_colab_import_new_data.ipynb)
+trên **Colab CPU riêng → Run all**. Lượt AI Guru đã audit ngày 19/10 tự chọn
+đúng snapshot, TAR/inner TAR và phục hồi checkpoint; lưu riêng vào
+`data_staging/ai-guru-20261019-v1`, không đổi candidate/cache của phiên submission.
+Xem [phạm vi, kiểm tra và cách resume](docs/ISOLATED_DATA_INTAKE.md).
+
 ## Quy trình Colab đã chốt
 
 Plan chính là [`R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md`](R2AI_STAGE3_FULL_COMPETITION_AND_BEST_OF_STAGE1_STAGE2.md).

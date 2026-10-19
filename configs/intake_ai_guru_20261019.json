@@ -1,0 +1,153 @@
+{
+  "state": "AUDITED_NOT_IMPORTED",
+  "audit_date": "2026-10-19",
+  "active_candidate_action": "KEEP_UNCHANGED",
+  "new_snapshot": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+  "old_snapshot": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
+  "sources": [
+    {
+      "drive_file_id": "1tVX24iYCthJSYyMsKLdoVBJrgWtUmG-k",
+      "archive": "vibiomir_retain_shard_00001_with_resume_00000.tar",
+      "inner_tar": "vibiomir_shard_00000.tar",
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00000.parquet",
+      "frontier_sha256": "2cf6be6537b6e4c73b25c421503a9e5b7247dddbd10abe8749ae0ac1dbcefcec",
+      "extract_success_url_count_before_pipeline": 11620,
+      "mode": "NEW_SNAPSHOT_SOURCE",
+      "job_id": "new-00000",
+      "archive_bytes": 5262612480
+    },
+    {
+      "drive_file_id": "1IwebnPLyQhXTphcRtfI7Pg1aZEiXdBEZ",
+      "archive": "vibiomir_retain_shard_00002_with_resume_00001.tar",
+      "inner_tar": "vibiomir_shard_00001.tar",
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00001.parquet",
+      "frontier_sha256": "7b5669ff5fe407205075957696fe846471c2c16cd3a91509406db6caf884c3f0",
+      "extract_success_url_count_before_pipeline": 69498,
+      "mode": "NEW_SNAPSHOT_SOURCE",
+      "job_id": "new-00001",
+      "archive_bytes": 7523225600
+    },
+    {
+      "drive_file_id": "1IwebnPLyQhXTphcRtfI7Pg1aZEiXdBEZ",
+      "archive": "vibiomir_retain_shard_00002_with_resume_00001.tar",
+      "inner_tar": "vibiomir_shard_00002.tar",
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00002.parquet",
+      "frontier_sha256": "36b93a5a17933403be8de662dd8a985eeb7287025201e056b61970b05f8b7a52",
+      "extract_success_url_count_before_pipeline": 58976,
+      "mode": "NEW_SNAPSHOT_SOURCE",
+      "job_id": "new-00002",
+      "archive_bytes": 7523225600
+    },
+    {
+      "drive_file_id": "1Z8_0BlP-WwVYkfARLDR7vUtRCa7Xh-69",
+      "archive": "vibiomir_retain_shard_00004_with_resume_00003.tar",
+      "inner_tar": "vibiomir_shard_00003.tar",
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00003.parquet",
+      "frontier_sha256": "cfc373b543d0253978a5fcd27c5f845ce64fbcd8ef349a137ee838ec51d3c2b9",
+      "extract_success_url_count_before_pipeline": 69237,
+      "mode": "NEW_SNAPSHOT_SOURCE",
+      "job_id": "new-00003",
+      "archive_bytes": 7277260800
+    },
+    {
+      "drive_file_id": "1Z8_0BlP-WwVYkfARLDR7vUtRCa7Xh-69",
+      "archive": "vibiomir_retain_shard_00004_with_resume_00003.tar",
+      "inner_tar": "vibiomir_shard_00004.tar",
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00004.parquet",
+      "frontier_sha256": "18a8db71eefd5b63874e229d42c6411dadd5efbdf810ed01bdc4e977295c2f32",
+      "extract_success_url_count_before_pipeline": 56845,
+      "mode": "NEW_SNAPSHOT_SOURCE",
+      "job_id": "new-00004",
+      "archive_bytes": 7277260800
+    },
+    {
+      "drive_file_id": "11Yl5P1lFYaCZbcydc5vsUPK2LyJ5fkyC",
+      "archive": "vibiomir_retain_shard_00005.tar",
+      "inner_tar": null,
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00005.parquet",
+      "frontier_sha256": "c102e6c47d672ff031d8eeb227d5491a0f49409bed8b1a24443bed2ea94aa1aa",
+      "extract_success_url_count_before_pipeline": 55323,
+      "mode": "NEW_SNAPSHOT_SOURCE",
+      "job_id": "new-00005",
+      "archive_bytes": 3269468160
+    },
+    {
+      "drive_file_id": "1kJcovO03-NMyGMa_13ArwoxbXseNaibB",
+      "archive": "vibiomir_shard_00014.tar",
+      "inner_tar": null,
+      "snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
+      "frontier": "data/crawl_shards/shard_00014.parquet",
+      "frontier_sha256": "28915fb7740e73f79b51451af85d7681c594938695f5bbe01c9a4370344fd878",
+      "extract_success_url_count_before_pipeline": 89607,
+      "mode": "LEGACY_SOURCE_NOT_YET_IMPORTED",
+      "job_id": "legacy-00014",
+      "archive_bytes": 3145973760
+    },
+    {
+      "drive_file_id": "1gzxCUsfCj4GqL6QH0Xo7bvpBc1hk5_UN",
+      "archive": "vibiomir_shard_00014_with_resume_00013.tar",
+      "inner_tar": "vibiomir_shard_00013.tar",
+      "snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
+      "frontier": "data/crawl_shards/shard_00013.parquet",
+      "frontier_sha256": "0332fc14169433da78764352a056da30c6ed4d708c2bdda925a2ad8d8c77efe0",
+      "extract_success_url_count_before_pipeline": 79544,
+      "mode": "RECOVERY_ONLY_EXISTING_SHARD",
+      "job_id": "legacy-00013",
+      "archive_bytes": 3049994240
+    },
+    {
+      "drive_file_id": "1SJ2YwU4N8tzDeUfT1AT1cG44WjF-mxq2",
+      "archive": "vibiomir_shard_00015.tar",
+      "inner_tar": null,
+      "snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
+      "frontier": "data/crawl_shards/shard_00015.parquet",
+      "frontier_sha256": "205979a2f2e35b7fff49bcfc6258e98e07558e649e0467d2c97e6ddcc9175312",
+      "extract_success_url_count_before_pipeline": 90476,
+      "mode": "LEGACY_SOURCE_NOT_YET_IMPORTED",
+      "job_id": "legacy-00015",
+      "archive_bytes": 3178035200
+    }
+  ],
+  "rules": [
+    "Open nested TAR members explicitly; do not import outer containers as flat archives",
+    "Use exactly one cumulative version of each canonical frontier; preserve original archives",
+    "Bind new shards to their new links snapshot; never relabel them as old-snapshot inputs",
+    "Deduplicate against existing valid documents by exact URL/ID; preserve failed/pending URL ledger entries",
+    "Keep ongoing submission candidate frozen; stage additions without switching active pointers",
+    "EXTRACT_SUCCESS goes through normal quality/chunk gates; only new text hashes need embedding"
+  ],
+  "schema_version": 1,
+  "campaign": "ai-guru-20261019-v1",
+  "tokenizer_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+  "chunking": {
+    "child_tokens": 180,
+    "overlap_tokens": 40,
+    "parent_tokens": 512,
+    "snap_sentences": true,
+    "prefer_sections": true,
+    "dense_max_tokens": 512
+  },
+  "baseline": {
+    "drive_file_id": "1JBnjci3WUfBlQ0VxKtGeGHTbmhGpydRp",
+    "sha256": "e34ea4e336ea37e42ffb338a3a97986c816b932fdc221c1843d5d3424782ab0c",
+    "candidate_manifest_sha256": "4de4b5c77b867e6017b0f93b56e6d32e1e0c9442ab05d4bdb8e14673e4f7bcda",
+    "documents": 1252445
+  },
+  "snapshots": {
+    "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6": {
+      "revision": "71be0e1239a19dfd7a717e2bc13e3bec21bd0334",
+      "filename": "links_corpus_vi_en_zh.parquet",
+      "sha256": "87e44a792d7a99fb0fde5dff7f09f1a38a0a1fdf02ddd1ac93a005736e00b0a7"
+    },
+    "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7": {
+      "drive_file_id": "1FeaMqXpY6Mrc6fEDPRqdShV8lKFSOMSw",
+      "sha256": "dee1153f5b9d9010dea18e1b7724b4915ff847b711d036bec8b933486802a971"
+    }
+  }
+}
