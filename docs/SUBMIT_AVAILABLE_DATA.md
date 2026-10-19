@@ -79,6 +79,13 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Encoder giữ cơ chế giảm một nửa batch khi CUDA OOM. Vector theo nội dung đã có được dùng lại;
   chỉ sửa batch thực thi, giữ nguyên model/revision/pooling/runtime và model producer code.
   Cấu hình này chưa phải số đo tốc độ trên GPU thực tế.
+  Cell 3–4 in tên stage ngay khi bắt đầu và heartbeat mỗi 15 giây, kể cả khi đang chờ I/O.
+  Kiểm tra mapping BGE dùng tối đa 8 reader, giữ nguyên identity, SHA256 và thứ tự input;
+  đây là đọc checkpoint để dùng lại, không phải encode lại vector đã lưu.
+  Adapter được nhúng trong notebook, không sửa source producer hoặc thay code/model/candidate lock.
+  `data/retrieval/submission_progress.json` lưu trạng thái khi chuyển stage và khi kết thúc;
+  heartbeat chi tiết lưu local ở `WORK_DIR/submission_progress.json`.
+  Hai file này chỉ là chẩn đoán tiến trình, không chứng nhận embedding hoặc ZIP đã hoàn tất.
   Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
   khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
   Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng

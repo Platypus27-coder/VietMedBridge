@@ -4,6 +4,7 @@ from textwrap import dedent
 import nbformat as nb
 
 RESUME_ONLY_TOOLS = (Path(__file__).resolve().parent / "submission_resume_only.py").read_text(encoding="utf-8")
+GPU_PROGRESS_TOOLS = (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
 
 def code(value):
     return nb.v4.new_code_cell(dedent(value).strip()+"\n")
@@ -188,31 +189,33 @@ def notebook():
         print("Tiếp tục cell 3. Cell 2 chưa kiểm payload; cell inference kiểm checkpoint khi sử dụng.",flush=True)
     else:
         print("CPU handoff đã có. Chọn GPU rồi chạy cell 1 → 2 → 3; giữ ALLOW_CPU_PREPARATION=False khi resume.",flush=True)
-    ''')), code('''
-    #@title 3. BGE phần còn thiếu và ZIP đầu tiên đủ 1.200 query (GPU)
+    ''')), code('#@title 3. BGE phần còn thiếu và ZIP đầu tiên đủ 1.200 query (GPU)\n'
+        + GPU_PROGRESS_TOOLS + '\n' + dedent('''
     from vietmedbridge.submission_workflow import run_current_baseline
     BASELINE = None
     if GPU_SESSION:
-        BASELINE = run_current_baseline(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
+        with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="baseline"):
+            BASELINE = run_current_baseline(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(BASELINE["ready"],ensure_ascii=False,indent=2),flush=True)
         if BASELINE["ready"]["state"] != "READY_FOR_MANUAL_UPLOAD":
             raise RuntimeError("Baseline chưa đủ query/index: Run all cùng cấu hình để resume. Chưa nạp Qwen reranker.")
         print("ĐÃ CÓ ZIP ĐẦU TIÊN trên Drive. Cell cuối có thể tải bản này trong lúc chuẩn bị bản mạnh hơn.",flush=True)
     else:
         print("GPU phase skipped on CPU.")
-    '''), code('''
-    #@title 4. Bản nâng cấp: dịch + expansion + document dense + Qwen rerank + ZIP (GPU)
+    ''')), code('#@title 4. Bản nâng cấp: dịch + expansion + document dense + Qwen rerank + ZIP (GPU)\n'
+        + GPU_PROGRESS_TOOLS + '\n' + dedent('''
     from vietmedbridge.submission_workflow import run_current_submission
     STRONG = None
     if GPU_SESSION:
-        STRONG = run_current_submission(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
+        with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="strong"):
+            STRONG = run_current_submission(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(STRONG["ready"],ensure_ascii=False,indent=2),flush=True)
         print("Diagnostics:",STRONG["diagnostics_path"],flush=True)
         if STRONG["ready"]["state"] != "READY_FOR_MANUAL_UPLOAD":
             print("Bản strong chưa hoàn tất; baseline ZIP vẫn còn trên Drive. Run all cùng notebook để tiếp tục checkpoint.",flush=True)
     else:
         print("GPU phase skipped on CPU.")
-    '''), code('''
+    ''')), code('''
     #@title 5. Tải ZIP mới nhất đã kiểm tra (chạy cell này riêng cũng được)
     from google.colab import files
     latest = DATA_ROOT / "retrieval/latest_submission.json"
