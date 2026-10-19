@@ -1,7 +1,11 @@
 """Generate the one CPU notebook for additions while submission stays frozen."""
 from write_notebooks import ROOT, code, md, save
+import json
 
 RESUME_TOOLS = (ROOT / "scripts/intake_resume.py").read_text(encoding="utf-8")
+RETAINED_TOOLS = (ROOT / "scripts/retained_intake.py").read_text(encoding="utf-8")
+FULL_TOOLS = (ROOT / "scripts/full_intake.py").read_text(encoding="utf-8")
+FULL_SCOPE = json.loads((ROOT / "configs/intake_ai_guru_full_20261019.json").read_text(encoding="utf-8"))
 
 
 def main():
@@ -13,10 +17,10 @@ def main():
         vẫn chạy riêng với candidate hiện tại; notebook này không đổi active
         candidate, snapshot, model cache hoặc khóa code của luồng đó.
 
-        Lượt mặc định `btc-new-71be0e12-20261019-v1`: chỉ sáu frontier mới
-        00000–00005, gắn với dataset BTC revision `71be0e12`. Không nhập shard
-        thuộc snapshot cũ. Chọn đúng phiên bản tích lũy
-        đã audit, kể cả TAR lồng TAR. Đọc nguồn qua Drive API, không cần tạo
+        Đọc đủ 7 TAR đã audit: tám frontier 00000–00007 và gói retained,
+        gắn với corpus BTC revision `71be0e12`. Giữ nguyên sáu nguồn đang chạy,
+        tự chạy tiếp 00006–00007, rồi chỉ thêm phần retained chưa có. Không nhập
+        lại các phiên bản TAR trùng. Đọc nguồn qua Drive API, không cần tạo
         shortcut AI Guru hay tải toàn bộ TAR về /content.
 
         Checkpoint và kết quả: `VietMedBridge/data_staging/btc-new-71be0e12-20261019-v1/`.
@@ -96,7 +100,9 @@ def main():
         _INTAKE_COMMIT = commit
         print("Code:", commit, "\nCheckpoint:", INTAKE_ROOT, flush=True)
         '''),
-        code('#@title 2. Nhận checkpoint trước; chỉ nạp tài nguyên khi cần xử lý phần thiếu\n' + RESUME_TOOLS + '\n' + r'''
+        code('#@title 2. Nhận checkpoint; nối đủ 8 frontier và retained của BTC mới\n'
+             + RESUME_TOOLS + '\n' + RETAINED_TOOLS + '\n' + FULL_TOOLS + '\n'
+             + 'FULL_SCOPE = json.loads(' + repr(json.dumps(FULL_SCOPE, ensure_ascii=False)) + ')\n' + r'''
 import json
 from huggingface_hub import hf_hub_download
 from vietmedbridge.artifacts import verify_file, publish_file, digest_json
@@ -114,12 +120,14 @@ def validate_new_btc_plan(plan):
                    for source in plan["sources"])):
         raise ValueError("Lượt này chỉ nhận URL thuộc snapshot BTC mới 71be0e12; không nhập nguồn legacy.")
 
-PLAN = read_json(CHECKOUT / "configs/intake_ai_guru_20261019.json")
+PLAN = FULL_SCOPE["base_plan"]
 validate_new_btc_plan(PLAN)
 CONFIG = ChunkConfig(**PLAN["chunking"])
 TOKENIZER_SPEC = {"model_id": "BAAI/bge-m3", "revision": PLAN["tokenizer_revision"], "special_tokens": False}
-CONTROLLER = IntakeResume(PLAN, root=INTAKE_ROOT, work_dir=WORK_DIR,
-    tokenizer_spec=TOKENIZER_SPEC, chunk_config=CONFIG, shard_size=2048)
+CONTROLLER = FullIntake(FULL_SCOPE, root=INTAKE_ROOT, work_dir=WORK_DIR,
+    tokenizer_spec=TOKENIZER_SPEC, chunk_config=CONFIG, shard_size=2048,
+    controller_type=IntakeResume, retained_type=RetainedAdapter,
+    sql_context=bounded_intake_sql, parquet_writer=bounded_intake_parquet)
 CHECKPOINT_STATUS = CONTROLLER.status()
 print("Checkpoint:", CHECKPOINT_STATUS["completed_sources"], "/", CHECKPOINT_STATUS["total_sources"],
       "nguồn đã xong | chỉ đọc receipt nhỏ, chưa tải lại dữ liệu cũ", flush=True)
@@ -186,11 +194,13 @@ def load_tokenizer():
             RESULT = continue_intake()
         print(json.dumps(RESULT, ensure_ascii=False, indent=2))
         print("Hoàn tất lượt nhập CPU. Giữ nguyên luồng submission đang chạy.")
-        print("Bàn giao lượt data mới:", INTAKE_ROOT / "intake_status.json")
+        print("Bàn giao toàn bộ lượt data mới:", INTAKE_ROOT / "full_intake_status.json")
         '''),
         md("""
-        `INTAKE_COMPLETE` nghĩa là mọi ID trong lượt nguồn đã có kết quả:
-        `ADDED_VALID_DOCUMENT`, `REUSED_EXISTING_DOCUMENT` hoặc `PIPELINE_FAILURE`.
+        `FULL_INTAKE_COMPLETE` và `completed_sources=9/9` nghĩa là mọi ID trong
+        toàn bộ nguồn đã audit có kết quả: `ADDED_VALID_DOCUMENT`,
+        `REUSED_EXISTING_DOCUMENT` hoặc `PIPELINE_FAILURE`.
+        `INTAKE_COMPLETE` chỉ xác nhận một chặng trong lượt đầy đủ.
         URL lỗi được giữ trong `sources/<job>/source_outcomes.parquet` và failure
         shards; trạng thái này không có nghĩa là crawl thành công 100%.
 
@@ -201,7 +211,11 @@ def load_tokenizer():
         Mapping được kiểm SHA khi thực sự sử dụng; receipt không thay thế
         một lần audit lại toàn bộ payload. Không nạp catalog/BM25 hoặc embedding cũ.
 
-        Gửi `intake_status.json` sau khi xong để kiểm tra số thực tế. Bước kế tiếp
+        Gói retained được kiểm mapping BTC mới và SHA nguồn cũ, không đổi snapshot
+        của lần crawl/extraction. Nhóm LOW/QUARANTINE giữ để review. Metadata lớn
+        tải theo range và lưu checkpoint mỗi 8 MiB; không tải raw HTML của TAR.
+
+        Gửi `full_intake_status.json` sau khi xong để kiểm tra số thực tế. Bước kế tiếp
         là freeze/chuẩn bị index cho **lượt thêm riêng**, rồi chỉ embedding text
         chưa có; ghép vào phiên submission kế tiếp sau khi ZIP hiện tại hoàn tất.
         """),

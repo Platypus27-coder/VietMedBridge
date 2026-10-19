@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-10-19",
+  "folder_id": "1P2ke-yIDwj443R_GMegaiH9RACf-Gzth",
+  "base_plan_sha256": "dd4d09120f1e8c0c9c3dc1d977ce34c73e5ac97a58d2df6d56fdc2f13f6fae3f",
+  "base_plan": {
+    "state": "AUDITED_NOT_IMPORTED",
+    "audit_date": "2026-10-19",
+    "active_candidate_action": "KEEP_UNCHANGED",
+    "new_snapshot": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+    "sources": [
+      {
+        "drive_file_id": "1tVX24iYCthJSYyMsKLdoVBJrgWtUmG-k",
+        "archive": "vibiomir_retain_shard_00001_with_resume_00000.tar",
+        "inner_tar": "vibiomir_shard_00000.tar",
+        "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+        "frontier": "data/crawl_shards/shard_00000.parquet",
+        "frontier_sha256": "2cf6be6537b6e4c73b25c421503a9e5b7247dddbd10abe8749ae0ac1dbcefcec",
+        "extract_success_url_count_before_pipeline": 11620,
+        "mode": "NEW_SNAPSHOT_SOURCE",
+        "job_id": "new-00000",
+        "archive_bytes": 5262612480
+      },
+      {
+        "drive_file_id": "1IwebnPLyQhXTphcRtfI7Pg1aZEiXdBEZ",
+        "archive": "vibiomir_retain_shard_00002_with_resume_00001.tar",
+        "inner_tar": "vibiomir_shard_00001.tar",
+        "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+        "frontier": "data/crawl_shards/shard_00001.parquet",
+        "frontier_sha256": "7b5669ff5fe407205075957696fe846471c2c16cd3a91509406db6caf884c3f0",
+        "extract_success_url_count_before_pipeline": 69498,
+        "mode": "NEW_SNAPSHOT_SOURCE",
+        "job_id": "new-00001",
+        "archive_bytes": 7523225600
+      },
+      {
+        "drive_file_id": "1IwebnPLyQhXTphcRtfI7Pg1aZEiXdBEZ",
+        "archive": "vibiomir_retain_shard_00002_with_resume_00001.tar",
+        "inner_tar": "vibiomir_shard_00002.tar",
+        "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+        "frontier": "data/crawl_shards/shard_00002.parquet",
+        "frontier_sha256": "36b93a5a17933403be8de662dd8a985eeb7287025201e056b61970b05f8b7a52",
+        "extract_success_url_count_before_pipeline": 58976,
+        "mode": "NEW_SNAPSHOT_SOURCE",
+        "job_id": "new-00002",
+        "archive_bytes": 7523225600
+      },
+      {
+        "drive_file_id": "1Z8_0BlP-WwVYkfARLDR7vUtRCa7Xh-69",
+        "archive": "vibiomir_retain_shard_00004_with_resume_00003.tar",
+        "inner_tar": "vibiomir_shard_00003.tar",
+        "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+        "frontier": "data/crawl_shards/shard_00003.parquet",
+        "frontier_sha256": "cfc373b543d0253978a5fcd27c5f845ce64fbcd8ef349a137ee838ec51d3c2b9",
+        "extract_success_url_count_before_pipeline": 69237,
+        "mode": "NEW_SNAPSHOT_SOURCE",
+        "job_id": "new-00003",
+        "archive_bytes": 7277260800
+      },
+      {
+        "drive_file_id": "1Z8_0BlP-WwVYkfARLDR7vUtRCa7Xh-69",
+        "archive": "vibiomir_retain_shard_00004_with_resume_00003.tar",
+        "inner_tar": "vibiomir_shard_00004.tar",
+        "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+        "frontier": "data/crawl_shards/shard_00004.parquet",
+        "frontier_sha256": "18a8db71eefd5b63874e229d42c6411dadd5efbdf810ed01bdc4e977295c2f32",
+        "extract_success_url_count_before_pipeline": 56845,
+        "mode": "NEW_SNAPSHOT_SOURCE",
+        "job_id": "new-00004",
+        "archive_bytes": 7277260800
+      },
+      {
+        "drive_file_id": "11Yl5P1lFYaCZbcydc5vsUPK2LyJ5fkyC",
+        "archive": "vibiomir_retain_shard_00005.tar",
+        "inner_tar": null,
+        "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+        "frontier": "data/crawl_shards/shard_00005.parquet",
+        "frontier_sha256": "c102e6c47d672ff031d8eeb227d5491a0f49409bed8b1a24443bed2ea94aa1aa",
+        "extract_success_url_count_before_pipeline": 55323,
+        "mode": "NEW_SNAPSHOT_SOURCE",
+        "job_id": "new-00005",
+        "archive_bytes": 3269468160
+      }
+    ],
+    "rules": [
+      "Open nested TAR members explicitly; do not import outer containers as flat archives",
+      "Use exactly one cumulative version of each canonical frontier; preserve original archives",
+      "Bind new shards to their new links snapshot; never relabel them as old-snapshot inputs",
+      "Deduplicate against existing valid documents by exact URL/ID; preserve failed/pending URL ledger entries",
+      "Keep ongoing submission candidate frozen; stage additions without switching active pointers",
+      "EXTRACT_SUCCESS goes through normal quality/chunk gates; only new text hashes need embedding",
+      "Only import sources from the new BTC snapshot; exclude all legacy-snapshot archive jobs"
+    ],
+    "schema_version": 1,
+    "campaign": "btc-new-71be0e12-20261019-v1",
+    "tokenizer_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "chunking": {
+      "child_tokens": 180,
+      "overlap_tokens": 40,
+      "parent_tokens": 512,
+      "snap_sentences": true,
+      "prefer_sections": true,
+      "dense_max_tokens": 512
+    },
+    "baseline": {
+      "drive_file_id": "1JBnjci3WUfBlQ0VxKtGeGHTbmhGpydRp",
+      "sha256": "e34ea4e336ea37e42ffb338a3a97986c816b932fdc221c1843d5d3424782ab0c",
+      "candidate_manifest_sha256": "4de4b5c77b867e6017b0f93b56e6d32e1e0c9442ab05d4bdb8e14673e4f7bcda",
+      "documents": 1252445
+    },
+    "snapshots": {
+      "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6": {
+        "revision": "71be0e1239a19dfd7a717e2bc13e3bec21bd0334",
+        "filename": "links_corpus_vi_en_zh.parquet",
+        "sha256": "87e44a792d7a99fb0fde5dff7f09f1a38a0a1fdf02ddd1ac93a005736e00b0a7"
+      }
+    },
+    "required_snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+    "scope": "NEW_BTC_DATASET_ONLY"
+  },
+  "additional_sources": [
+    {
+      "drive_file_id": "18cg2bXqfX-6f867we7tdcUEseG52HbZY",
+      "archive": "vibiomir_retain__shard_00006.tar",
+      "archive_bytes": 3489576960,
+      "inner_tar": null,
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00006.parquet",
+      "frontier_sha256": "06823daba41b1be5b6129f961f4a082e14e12e50a4a42e1d6d7335a5f1165296",
+      "extract_success_url_count_before_pipeline": 63806,
+      "job_id": "new-00006",
+      "mode": "NEW_SNAPSHOT_SOURCE"
+    },
+    {
+      "drive_file_id": "1uA45mDiRXs2Qlb-b0jPqHU9GavA7hHKh",
+      "archive": "vibiomir_retain_shard_00007.tar",
+      "archive_bytes": 3993866240,
+      "inner_tar": null,
+      "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+      "frontier": "data/crawl_shards/shard_00007.parquet",
+      "frontier_sha256": "e9642c5ab759b21ea320793409c8675809af4d8d171562a6ffe9acfcde444800",
+      "extract_success_url_count_before_pipeline": 69940,
+      "job_id": "new-00007",
+      "mode": "NEW_SNAPSHOT_SOURCE"
+    }
+  ],
+  "retained": {
+    "job_id": "retained-71be0e12",
+    "mode": "NEW_SNAPSHOT_SOURCE",
+    "format": "RETAINED_PORTABLE_V1",
+    "archive": "vibiomir_retained_71be0e12.tar",
+    "drive_file_id": "1Hf6cb7Des8AhYkyWXE3d3PvnDT-BMMQ-",
+    "archive_bytes": 12581928960,
+    "snapshot_id": "5586f423916005c11ffa8afb96895017d672af51d68aee8a88d28dd2e0dc39c6",
+    "original_snapshot_id": "b915d5d5d640d497d103fa37a5a047c1d093772ab17b09638634de4bbc80e5d7",
+    "official_links_sha256": "87e44a792d7a99fb0fde5dff7f09f1a38a0a1fdf02ddd1ac93a005736e00b0a7",
+    "members": {
+      "mapping": {
+        "path": "data/doc_url_map.parquet",
+        "offset": 12562358272,
+        "bytes": 19545473,
+        "sha256": "1dc06041fded26cfe2dfa0c64e39875840a8b3a8051ac58080608497fadaee01"
+      },
+      "raw_catalog": {
+        "path": "data/raw_catalog.parquet",
+        "offset": 11313683456,
+        "bytes": 125719140,
+        "sha256": "90e5ae894488dd7e47a76dd4664bcaa8156df72245f18c078db1b66ac0f4f9e9"
+      },
+      "documents": {
+        "path": "data/documents.parquet",
+        "offset": 11439404544,
+        "bytes": 1122951853,
+        "sha256": "b031ec37043f1de3e6f24a70e508fd3e569fb8dff319a59c69489a3bd8adabc3"
+      },
+      "dataset": {
+        "path": "new_dataset_manifest.json",
+        "offset": 12581909504,
+        "bytes": 1093,
+        "sha256": "912ac3c910985b5f3f003f3d90ea317b13c9c568da7baf424d87488b1cfe7d31"
+      }
+    }
+  },
+  "required_physical_archive_names": [
+    "vibiomir_retain_shard_00001_with_resume_00000.tar",
+    "vibiomir_retain_shard_00002_with_resume_00001.tar",
+    "vibiomir_retain_shard_00004_with_resume_00003.tar",
+    "vibiomir_retain_shard_00005.tar",
+    "vibiomir_retain__shard_00006.tar",
+    "vibiomir_retain_shard_00007.tar",
+    "vibiomir_retained_71be0e12.tar"
+  ],
+  "duplicate_versions_to_skip": [
+    "vibiomir_retain_shard_00000.tar",
+    "vibiomir_retain_shard_00003.tar",
+    "inner vibiomir_shard_00001.tar in vibiomir_retain_shard_00001_with_resume_00000.tar"
+  ],
+  "audited_coverage": {
+    "frontier_urls": 800000,
+    "frontier_native_ids": 800999,
+    "retained_urls": 316097,
+    "retained_native_ids": 316693,
+    "union_native_ids": 1117692,
+    "official_native_ids": 1220598,
+    "note": "Input membership coverage, not successful extraction or completed pipeline coverage"
+  }
+}

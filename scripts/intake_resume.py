@@ -76,10 +76,14 @@ def bounded_intake_sql(memory_mb=None):
 
 
 class IntakeResume:
-    def __init__(self, plan, *, root, work_dir, tokenizer_spec, chunk_config, shard_size=2048):
+    def __init__(self, plan, *, root, work_dir, tokenizer_spec, chunk_config, shard_size=2048,
+                 prior_mappings=()):
         self.plan, self.root, self.work = plan, Path(root), Path(work_dir)
         self.spec, self.config, self.shard_size = tokenizer_spec, chunk_config, shard_size
         self.plan_sha = digest_json(plan)
+        self.prior_mappings = [(Path(path), checksum) for path, checksum in prior_mappings]
+        if [checksum for _, checksum in self.prior_mappings] != plan.get("prior_mapping_sha256", []):
+            raise ValueError("Prior intake mappings differ from the pinned continuation plan.")
         if any((p/"active_data_candidate.json").exists() for p in (self.root, *self.root.parents)):
             raise ValueError("Intake must stay outside the active submission data root.")
         if any(not re.fullmatch(r"[a-zA-Z0-9_-]+", s["job_id"]) for s in plan["sources"]):
@@ -174,7 +178,7 @@ class IntakeResume:
         if (config["signature"] != digest_json({k: v for k, v in config.items() if k != "signature"})
                 or config["signature"] != build["signature"]
                 or config["source_input_signature"] != digest_json(files)
-                or config["external_snapshot_id"] != source["snapshot_id"]
+                or config["external_snapshot_id"] != source.get("original_snapshot_id", source["snapshot_id"])
                 or config["official_links_sha256"] != self.plan["snapshots"][source["snapshot_id"]]["sha256"]
                 or config["tokenizer"] != self.spec or config["chunks"] != asdict(self.config)
                 or config["code_sha256"] != self.contract["code_sha256"]
@@ -193,7 +197,8 @@ class IntakeResume:
         return build
 
     @bounded_intake_sql()
-    def run(self, *, load_reader, load_links, load_baseline, load_tokenizer):
+    def run(self, *, load_reader, load_links, load_baseline, load_tokenizer, load_metadata=None,
+            select_metadata=None, source_completed=None):
         self.refresh()
         for saved in self.completed:
             print(f"SKIP_COMPLETED_SOURCE {saved['source']['job_id']} | receipt only; payload checked on use", flush=True)
@@ -202,7 +207,7 @@ class IntakeResume:
             atomic_json(self.root/"intake_status.json", result)
             return result
         # Paths/checksums suffice until a NEW selection really needs a mapping.
-        existing = [(None, self.plan["baseline"]["sha256"])] + [
+        existing = [(None, self.plan["baseline"]["sha256"])] + self.prior_mappings + [
             (self.root/"sources"/s["source"]["job_id"]/"added_ids.parquet", s["added_ids_sha256"])
             for s in self.completed]
         for source in self.plan["sources"][len(self.completed):]:
@@ -211,13 +216,15 @@ class IntakeResume:
             print(f"CONTINUE_SOURCE {job} | {len(self.completed)}/{len(self.plan['sources'])} sources complete", flush=True)
             cached = self._selection(source, target, existing)
             if cached is None:
-                metadata = intake_core.stage_metadata(load_reader(), source, target/"metadata")
+                metadata = (load_metadata(source, target/"metadata") if load_metadata is not None
+                            else intake_core.stage_metadata(load_reader(), source, target/"metadata"))
                 local_maps = [load_baseline() if path is None else intake_core._local_mapping(path, checksum, self.work)
                               for path, checksum in existing]
                 for path, (_, checksum) in zip(local_maps, existing):
                     verify_file(path, checksum)
-                selection = intake_core.select_delta(target/"metadata", metadata, load_links(source["snapshot_id"]),
-                    local_maps, target/"selection", self.work)
+                links = load_links(source["snapshot_id"])
+                selection = (select_metadata(metadata, links, local_maps, target/"selection") if select_metadata is not None
+                    else intake_core.select_delta(target/"metadata", metadata, links, local_maps, target/"selection", self.work))
             else:
                 selection, metadata = cached
             build = None
@@ -242,6 +249,9 @@ class IntakeResume:
                         raise ValueError("Intake build is not complete and valid.")
                 atomic_json(build_dir/"intake_provenance.json", {"source": source,
                     "original_metadata": metadata["files"], "plan_sha256": self.plan_sha,
+                    "membership_snapshot_id": source["snapshot_id"],
+                    "original_snapshot_id": source.get("original_snapshot_id", source["snapshot_id"]),
+                    "portable_origin": metadata.get("portable_origin"),
                     "raw_locator": "Drive file ID -> optional inner_tar -> suffix after # in document.raw_file",
                     "raw_verification": "METADATA_ONLY_RAW_PAYLOAD_NOT_REPLAYED"})
             entry = selection["files"]["selection"]
@@ -267,4 +277,6 @@ class IntakeResume:
             result = self.status()
             atomic_json(self.root/"intake_status.json", result)
             print(f"SOURCE_CHECKPOINT_SAVED {job} | {counts}", flush=True)
+            if source_completed is not None:
+                source_completed()
         return result
