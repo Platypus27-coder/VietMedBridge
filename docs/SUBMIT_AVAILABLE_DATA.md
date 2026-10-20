@@ -223,6 +223,15 @@ không reset runtime hoặc chạy lại CPU preparation. Chạy
 cache hiện có. Script từ chối chạy đồng thời với cell xử lý. Artifact bền và ZIP lưu trên
 Drive; cache SSD nói trên nằm ở VM Colab, không phải ổ cứng máy tính người dùng.
 
+Overlay `scripts/submission_cache_priority.py` dành cho VM đã nạp adapter trên: trong mỗi
+lượt gather, đọc các block còn trên SSD trước rồi mới tải block thiếu. Điều này tránh tải
+prefix mới làm LRU loại suffix cũ trước khi consumer kịp đọc, khi cache nhỏ hơn corpus.
+Consumer vẫn nhận đúng chỉ số ban đầu; SHA, vector, seed và thứ tự kết quả giữ nguyên.
+Log `Vector cache plan` tách số file resident, số file thiếu và dung lượng resident.
+Overlay không tăng dung lượng VM hoặc bảo đảm giữ toàn bộ corpus giữa mọi stage.
+Chỉ nạp sau khi cell xử lý trả quyền điều khiển, giữ nguyên runtime; không thay adapter,
+không dựng lại CPU preparation hoặc encode corpus.
+
 ## Kiểm tra trước khi xuất ZIP
 
 Workflow xác minh checksum nguồn, schema, ID/URL của snapshot nguồn, span và representation,
