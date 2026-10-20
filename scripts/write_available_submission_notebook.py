@@ -23,6 +23,10 @@ def notebook():
     và chạy CPU trước. Khi có `CPU_PREPARATION_COMPLETE`, tắt lại tùy chọn này,
     đổi sang T4 GPU và Run all cùng notebook.
     Đổi runtime mất biến/ổ tạm; các checkpoint đã publish trên Drive vẫn được giữ và tự nhận lại.
+    Bảng tra receipt được lưu nén lên Drive qua API tại các mốc 256/512/1024/...,
+    khi inventory hoàn tất và khi đóng stage có dữ liệu mới. Chờ log `SAVED_ON_DRIVE`
+    để xác nhận đã lưu bền; `local checkpoint committed` chỉ xác nhận ổ tạm.
+    Tài khoản mới khôi phục bảng tra theo ID folder dùng chung rồi chỉ đọc receipt mới.
     Khi đã có freeze receipt, resume bỏ qua vòng chọn/chép toàn bộ source part.
     Spool local còn thì dùng lại; runtime mới chỉ khôi phục document/child cần để dựng spool,
     chưa tải parent/section/ledger ở bước Index inputs. Log ghi riêng part reused/new.
@@ -165,6 +169,8 @@ def notebook():
             "numpy>=1.26,<3","faiss-cpu==1.12.0","pyvi==0.1.1","jieba==0.42.1",
             "scikit-learn==1.7.2","sklearn-crfsuite==0.5.0"])
     sys.path.insert(0,str(CHECKOUT / "src"))
+    if importlib.util.find_spec("googleapiclient") is None:
+        command([sys.executable,"-m","pip","install","google-api-python-client>=2,<3"])
     import vietmedbridge
     if Path(vietmedbridge.__file__).resolve() != (CHECKOUT / "src/vietmedbridge/__init__.py").resolve():
         raise RuntimeError("Kernel đang giữ package của checkout khác. Restart session rồi Run all.")
@@ -258,7 +264,40 @@ def notebook():
         "language_info":{"name":"python"}})
 
 
+def save_lookup_cell():
+    """An old runtime can save its existing lookup without rerunning the workflow."""
+    guard = dedent('''
+    # Run only after the current processing cell has returned, before changing accounts.
+    import threading
+    import importlib.util
+    import subprocess
+    import sys
+    if any(t.name == "submission-progress" and t.is_alive() for t in threading.enumerate()):
+        raise RuntimeError("Cell xử lý vẫn đang chạy. Chỉ lưu bảng tra sau khi cell đó kết thúc; không chạy đồng thời.")
+    if any(name not in globals() for name in ("DATA_ROOT", "WORK_DIR", "CHECKOUT", "PREPARATION")):
+        raise RuntimeError("Cần runtime cũ còn bảng tra local và biến của notebook submit; không khởi động pipeline mới.")
+    _vmb_previous_receipts = globals().get("DRIVE_RECEIPTS")
+    if importlib.util.find_spec("googleapiclient") is None:
+        subprocess.run([sys.executable,"-m","pip","install","google-api-python-client>=2,<3"],check=True)
+    ''').strip()
+    action = dedent('''
+    if _vmb_previous_receipts is None:
+        DRIVE_RECEIPTS = authenticate_drive_receipts(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+    else:
+        DRIVE_RECEIPTS = DriveReceiptSource(_vmb_previous_receipts.session_factory,
+            _vmb_previous_receipts.requested_root, _vmb_previous_receipts.data_root,
+            data_folder_id=_vmb_previous_receipts.folder_id)
+        DRIVE_RECEIPTS.verify_candidate(PREPARATION["candidate_manifest_sha256"])
+    save_existing_drive_receipt_lookup(DRIVE_RECEIPTS, CHECKOUT, WORK_DIR)
+    print("Đã xác nhận lưu bảng tra lên Drive. Không quét receipt, không tính embedding hoặc dựng catalog.",flush=True)
+    ''').strip()
+    return guard + '\n\n' + GPU_PROGRESS_TOOLS + '\n\n' + action + '\n'
+
+
 if __name__ == "__main__":
     target = Path(__file__).resolve().parents[1] / "notebooks/04_colab_submit_available_data.ipynb"
     nb.write(notebook(),target)
     print(target)
+    save_target = Path(__file__).resolve().parent / "save_submission_lookup_cell.py"
+    save_target.write_text(save_lookup_cell(), encoding="utf-8")
+    print(save_target)

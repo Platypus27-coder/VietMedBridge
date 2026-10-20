@@ -105,10 +105,25 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Receipt inventory hiện mặc định dùng Drive API GET/list, có phân trang đầy đủ và kiểm size/MD5
   cùng digest JSON/producer. Bước này chạy trước lượt kiểm mapping và nạp weights, commit vào
   đúng SQLite local đã có; không đọc/ghi receipt hoặc diagnostics qua Drive mount trong inventory.
-  Colab yêu cầu xác thực tài khoản có quyền đọc thư mục data dùng chung; không cần gửi token.
-  Bản nén bảng tra đã có có thể khôi phục qua API. API mode giữ cập nhật mới ở local SQLite;
-  không tự publish snapshot qua mount khi inventory hoàn tất. Runtime mới dùng lại snapshot cũ
-  nếu có rồi đọc receipt mới bằng API. Đọc/ghi vector và các bước native sau inventory vẫn dùng mount.
+  Colab yêu cầu xác thực tài khoản có quyền đọc data và ghi checkpoint vào thư mục dùng chung;
+  không cần gửi token. API chỉ ghi bản nén bảng tra và con trỏ trong `retrieval/content_lookups`,
+  không ghi receipt vector hoặc thay đổi nguồn. Bản nén được upload theo cơ chế resumable của
+  [Drive API](https://developers.google.com/workspace/drive/api/guides/manage-uploads), kiểm size/MD5
+  của payload trước khi publish con trỏ. Snapshot khóa ID folder dùng chung và model producer,
+  nên tài khoản khác/alias MyDrive khác có thể khôi phục. Vẫn giữ tương thích bản nén schema cũ.
+  Trong inventory, tự lưu tại các mốc 256/512/1024/... receipt; lưu tiếp khi inventory hoàn tất
+  và khi đóng stage có dữ liệu mới. Lỗi upload không hủy vector hoặc bảng tra local; log `deferred`
+  nghĩa là chưa có xác nhận lưu bền. Chỉ `SAVED_ON_DRIVE` xác nhận snapshot đã publish.
+  Mất VM trước mốc lưu thành công vẫn có thể phải đọc lại phần receipt sau snapshot gần nhất.
+  Runtime mới tải một bản nén, kiểm checksum/producer, rồi chỉ GET các receipt mới trong danh sách
+  API đầy đủ. Bảng tra không chứng nhận payload vector hoặc embedding coverage đã hoàn tất.
+  Đọc/ghi vector và các bước native sau inventory vẫn dùng mount.
+  Phiên đang chạy code cũ không tự nhận bản sửa này. Sau khi cell xử lý trả quyền điều khiển,
+  có thể chạy riêng [save_submission_lookup_cell.py](../scripts/save_submission_lookup_cell.py)
+  trong cùng kernel để lưu bảng tra đã commit, trước khi chuyển account/runtime. Helper từ chối
+  chạy đồng thời với stage đang hoạt động; không gọi inventory, nạp weights hoặc encode lại.
+  Cần giữ runtime cũ đến khi có `SAVED_ON_DRIVE`. Nếu runtime đã mất trước khi có snapshot,
+  không thể khôi phục bảng tra local đã mất; vẫn dùng các vector gốc và đọc metadata để dựng lại.
   Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
   khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
   Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng
