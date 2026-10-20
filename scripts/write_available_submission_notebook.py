@@ -23,6 +23,8 @@ def notebook():
     và chạy CPU trước. Khi có `CPU_PREPARATION_COMPLETE`, tắt lại tùy chọn này,
     đổi sang T4 GPU và Run all cùng notebook.
     Đổi runtime mất biến/ổ tạm; các checkpoint đã publish trên Drive vẫn được giữ và tự nhận lại.
+    `/content/vmb_submit_work` là cache tạm trên máy chủ Colab. Dữ liệu gốc, checkpoint và ZIP
+    lưu bền trên Drive; notebook không tự tải ZIP hoặc dữ liệu về máy tính người dùng.
     Bảng tra receipt được lưu nén lên Drive qua API tại các mốc 256/512/1024/...,
     khi inventory hoàn tất và khi đóng stage có dữ liệu mới. Chờ log `SAVED_ON_DRIVE`
     để xác nhận đã lưu bền; `local checkpoint committed` chỉ xác nhận ổ tạm.
@@ -225,7 +227,7 @@ def notebook():
         print(json.dumps(BASELINE["ready"],ensure_ascii=False,indent=2),flush=True)
         if BASELINE["ready"]["state"] != "READY_FOR_MANUAL_UPLOAD":
             raise RuntimeError("Baseline chưa đủ query/index: Run all cùng cấu hình để resume. Chưa nạp Qwen reranker.")
-        print("ĐÃ CÓ ZIP ĐẦU TIÊN trên Drive. Cell cuối có thể tải bản này trong lúc chuẩn bị bản mạnh hơn.",flush=True)
+        print("ĐÃ CÓ ZIP ĐẦU TIÊN trên Drive. Cell cuối hiển thị vị trí bản này trên Drive.",flush=True)
     else:
         print("GPU phase skipped on CPU.")
     ''')), code('#@title 4. Bản nâng cấp: dịch + expansion + document dense + Qwen rerank + ZIP (GPU)\n'
@@ -245,8 +247,7 @@ def notebook():
     else:
         print("GPU phase skipped on CPU.")
     ''')), code('''
-    #@title 5. Tải ZIP mới nhất đã kiểm tra (chạy cell này riêng cũng được)
-    from google.colab import files
+    #@title 5. Xem vị trí ZIP đã kiểm tra trên Drive (không tải về máy)
     latest = DATA_ROOT / "retrieval/latest_submission.json"
     if latest.is_file():
         submission = read_json(latest)
@@ -254,8 +255,8 @@ def notebook():
             raise ValueError("ZIP thuộc candidate khác; chưa tải nhầm kết quả cũ.")
         verify_file(submission["zip_path"],submission["zip_sha256"])
         print(json.dumps(submission,ensure_ascii=False,indent=2),flush=True)
-        print("Upload submission.zip lên cổng BTC. URL cũ vẫn được giữ; chưa có official score cho lượt này.",flush=True)
-        files.download(submission["zip_path"])
+        print("ZIP lưu trên Drive:", submission["zip_path"], flush=True)
+        print("Notebook chỉ hiển thị vị trí file; không tự tải về máy tính.",flush=True)
     else:
         print("Chưa có ZIP hoàn tất. CPU preparation không phải submission; tiếp tục pha GPU.",flush=True)
     ''')]

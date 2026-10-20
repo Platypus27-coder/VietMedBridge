@@ -34,14 +34,17 @@ chưa được chứng nhận phù hợp danh sách ID của dataset BTC mới. 
    weighted RRF, Qwen3-Reranker-8B document/child MaxP, source parent 512/640 và dedup.
    Qwen3-Embedding-8B child dense chỉ dùng khi cache đủ cho **toàn bộ candidate đang chạy**.
    Cache Qwen chưa đủ vẫn giữ; notebook này không dành thời gian encode tiếp toàn bộ Qwen corpus trước lần nộp.
-6. Cell cuối tải `submission.zip` mới nhất đã kiểm tra. Nếu cell 4 còn chạy hoặc bị ngắt, ZIP baseline vẫn nằm trên Drive.
-   Có thể dừng cell 4 rồi chạy riêng cell cuối để lấy ZIP baseline đã hoàn tất.
+6. Cell cuối xác minh và hiển thị vị trí `submission.zip` mới nhất trên Drive, không tự tải về máy tính.
+   Nếu cell 4 còn chạy hoặc bị ngắt, ZIP baseline đã hoàn tất vẫn nằm trên Drive.
 
 Model được nạp lần lượt; mỗi model dưới 15B theo chính sách đã xác nhận. Lượt này dùng weights pretrained,
 không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa đầy đủ cũng không được báo thành nhánh đã hoàn tất.
 
 ## Checkpoint và nơi lưu
 
+- `/content/vmb_submit_work` là ổ tạm của máy chủ Colab, không phải ổ C:/D: trên máy Sếp.
+  Dữ liệu gốc, vector, checkpoint và ZIP đã publish lưu bền trên Drive. Colab dùng bản cache
+  tạm để tính toán; notebook không tự tải dữ liệu hoặc ZIP về máy tính người dùng.
 - Nguồn vẫn ở `data/processed/<source-build>`. Không extract/chunk lại nguồn.
 - Candidate ghép ở `data/processed/available-<snapshot>-<signature>`: có receipt cho từng source part,
   freeze receipt ổn định và checkpoint từng part model input trên Drive.
