@@ -139,8 +139,10 @@ def notebook():
         SQL một luồng, tối đa 2 GiB; giữ tối đa một build ở scratch, giải phóng bản staging
         sau khi receipt trên Drive hoàn tất. Không tải corpus về máy cá nhân.
 
-        Retry: build hoàn tất chỉ đọc JSON. Build dở dùng frozen candidate và các input part
-        đã lưu; runtime mới vẫn cần staging nguồn của build đang dở. Payload SHA được kiểm khi dùng.
+        Retry: build hoàn tất chỉ đọc JSON. Build dở dùng frozen candidate, cursor/input part
+        đã lưu và checkpoint SQLite trên Drive; runtime mới khôi phục một payload SQL,
+        không quét lại Parquet nguồn nếu checkpoint SQL đã được lưu. Nếu input part đã đủ,
+        chỉ seal manifest, không nạp lại nguồn hoặc tokenizer. Payload SHA được kiểm khi dùng.
         Không chạy hai phiên notebook này cùng lúc.
 
         Đích: `data_staging/btc-new-71be0e12-20261019-v1/freeze_batch_v1/freeze_batch.json`.

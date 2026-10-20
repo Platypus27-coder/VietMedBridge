@@ -16,8 +16,13 @@ sau khi receipt đầy đủ trên Drive, bản staging local được dọn. Kh
 
 Index inputs dùng producer's InputResume/SQLite spool, part 4.096 text. Mỗi part
 được lưu Drive. Nguồn đã freeze/input xong nhận lại bằng JSON đã seal, không quét
-payload. Nguồn mới freeze xong nhưng input dở dùng lại candidate đó; runtime mới
-vẫn cần staging documents/children của riêng build dở để tạo phần input còn thiếu.
+payload. Nguồn mới freeze xong nhưng input dở dùng lại candidate đó. SQLite spool
+được commit và lưu lên Drive **trước part input đầu tiên**. Runtime mới khôi phục
+một file SQL checkpoint có kiểm SHA; không quét lại Parquet nguồn đã stage.
+Trong cùng VM, source loader chỉ đọc part chưa commit trong spool. Nếu input part
+đã đủ nhưng manifest chưa seal, không nạp lại nguồn hoặc tokenizer. Checkpoint cũ
+chưa có SQL backup có thể cần stage riêng build dở một lần; không đọc lại payload
+của build đã `complete.json`.
 Không chạy hai phiên notebook này cùng lúc.
 
 Đích tổng:
@@ -27,6 +32,8 @@ VietMedBridge/data_staging/btc-new-71be0e12-20261019-v1/freeze_batch_v1/
   contract.json
   builds/<build-run>/frozen.json
   builds/<build-run>/complete.json
+  builds/<build-run>/input_spool.json
+  builds/<build-run>/input_spool/representatives.sqlite
   freeze_batch.json
 ```
 

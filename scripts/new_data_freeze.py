@@ -250,6 +250,79 @@ class NewDataFreeze:
                 print(f"Freeze staging {item['build_run']}: {index}/{len(entries)} payloads | bounded to one build", flush=True)
         return local
 
+    def _input_local(self, item):
+        """A frozen build needs metadata only until InputSpool requests a part."""
+        source = inside(self.project, item["build_dir"])
+        local = inside(self.work, "staged/" + item["snapshot_sha256"])
+        atomic_json(local / "build.json", read_json(source / "build.json"))
+        atomic_json(local / "config.json", read_json(source / "config.json"))
+        return local
+
+    def _restore_input_spool(self, item, candidate, state_dir):
+        """Restore one committed SQLite checkpoint, not the processed Parquets."""
+        inputs = inside(self.project, item["build_dir"]) / "index_inputs"
+        if (inputs / "units.json").is_file():
+            return
+        cursor = inputs / "resume.json"
+        if cursor.is_file():
+            saved = checked(read_json(cursor))
+            if saved.get("cursor") == candidate["health"]["chunks"]["distinct_representations"]:
+                return  # Native consumer can seal the completed part manifest directly.
+        path = state_dir / "input_spool.json"
+        if not path.is_file():
+            return  # Older checkpoint: native staging commits the spool once.
+        saved = checked(read_json(path))
+        policy = read_json(inputs / "config.json")
+        if (saved["contract_sha256"] != self.binding
+                or saved["candidate_manifest_sha256"] != candidate["candidate_manifest_sha256"]
+                or saved["input_signature"] != digest_json(policy)):
+            raise ValueError("Input SQL checkpoint binding changed.")
+        directory = inside(self.work, saved["directory"])
+        if not directory.is_relative_to(self.work / "index_spools"):
+            raise ValueError("Input SQL checkpoint directory escapes the spool root.")
+        destination = directory / "representatives.sqlite"
+        if not destination.is_file():
+            print(f"RESTORE_INPUT_SQL {item['build_run']} | one saved payload; no corpus restaging", flush=True)
+            copy_verified(inside(state_dir, saved["path"]), destination, saved["sha256"])
+
+    @contextmanager
+    def _durable_input_spool(self, item, candidate, state_dir):
+        """Seal the full/tail spool before native code emits its first input part."""
+        from vietmedbridge import index_inputs
+        native = index_inputs.InputSpool
+        owner = self
+        checkpoint = state_dir / "input_spool.json"
+
+        class DurableSpool(native):
+            def stage(spool):
+                count = super().stage()
+                saved = checked(read_json(checkpoint)) if checkpoint.is_file() else None
+                directory = spool.directory.resolve().relative_to(owner.work).as_posix()
+                if saved is not None:
+                    if (saved["contract_sha256"] != owner.binding
+                            or saved["candidate_manifest_sha256"] != candidate["candidate_manifest_sha256"]
+                            or saved["directory"] != directory or saved["representatives"] != count):
+                        raise ValueError("Completed input SQL checkpoint changed.")
+                else:
+                    spool.con.commit()  # DELETE journal; this connection is the only writer.
+                    policy = read_json(inside(owner.project, item["build_dir"]) / "index_inputs/config.json")
+                    relative = "input_spool/representatives.sqlite"
+                    print(f"SAVE_INPUT_SQL {item['build_run']} | {count:,} representatives to Drive", flush=True)
+                    checksum = publish_file(spool.path, inside(state_dir, relative))
+                    seal(checkpoint, {"contract_sha256": owner.binding,
+                        "candidate_manifest_sha256": candidate["candidate_manifest_sha256"],
+                        "input_signature": digest_json(policy), "directory": directory,
+                        "path": relative, "sha256": checksum, "representatives": count,
+                        "minimum_id": spool.minimum_id})
+                    print(f"INPUT_SQL_SAVED {item['build_run']} | future VM restores this checkpoint", flush=True)
+                return count
+
+        index_inputs.InputSpool = DurableSpool
+        try:
+            yield
+        finally:
+            index_inputs.InputSpool = native
+
     def run(self, *, load_tokenizer, load_links, load_golden, memory_mb=1024):
         from vietmedbridge.health import health_report, freeze_candidate
         from vietmedbridge.index_inputs import prepare_index_inputs
@@ -265,10 +338,23 @@ class NewDataFreeze:
             if frozen:
                 candidate = self._candidate(item, frozen)
             self.phase = f"{index}/10 {item['build_run']}: local staging"
-            local = self._stage(item, inputs_only=frozen is not None)
-            tokenizer, spec = load_tokenizer(item)
-            if spec != item["tokenizer"]:
-                raise ValueError("Loaded tokenizer differs from the producer.")
+            local = self._input_local(item) if frozen else self._stage(item)
+            def get_tokenizer():
+                tokenizer, spec = load_tokenizer(item)
+                if spec != item["tokenizer"]:
+                    raise ValueError("Loaded tokenizer differs from the producer.")
+                return tokenizer, spec
+            if frozen is None:
+                tokenizer, spec = get_tokenizer()
+            else:
+                # Native input resume does not need a tokenizer if all text
+                # parts are already saved. Materialize only for missing text.
+                class LazyTokenizer:
+                    def __call__(self, *args, **kwargs):
+                        return get_tokenizer()[0](*args, **kwargs)
+                    def __getattr__(self, name):
+                        return getattr(get_tokenizer()[0], name)
+                tokenizer = LazyTokenizer()
             if frozen is None:
                 links = load_links(item)
                 golden = load_golden(item, tokenizer, spec)
@@ -289,8 +375,13 @@ class NewDataFreeze:
             atomic_json(local / frozen["candidate_name"], candidate)
             print(f"FREEZE_INPUTS {index}/10 {item['build_run']} | resume missing input parts", flush=True)
             self.phase = f"{index}/10 {item['build_run']}: input parts"
-            inputs = prepare_index_inputs(local, frozen["candidate_name"], tokenizer,
-                work_dir=self.work, checkpoint_root=source / "index_inputs", resume_policy="verify_on_use")
+            self._restore_input_spool(item, candidate, state_dir)
+            def load_source_part(entry):
+                copy_verified(inside(source, entry["path"]), inside(local, entry["path"]), entry["sha256"])
+            with self._durable_input_spool(item, candidate, state_dir):
+                inputs = prepare_index_inputs(local, frozen["candidate_name"], tokenizer,
+                    work_dir=self.work, checkpoint_root=source / "index_inputs",
+                    resume_policy="verify_on_use", source_loader=load_source_part)
             record = {k: v for k, v in frozen.items() if k != "manifest_sha256"}
             record.update(state="COMPLETE", build_run=item["build_run"], build_dir=item["build_dir"],
                 index_inputs_manifest_sha256=inputs["manifest_sha256"], unique_dense_inputs=inputs["input_count"],

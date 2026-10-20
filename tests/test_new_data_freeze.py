@@ -85,6 +85,7 @@ def test_real_ten_build_freeze_then_cold_resume_does_no_payload_or_model_work(ca
     report = freezer.run(**loaders(links))
     assert report["state"] == "NEW_DATA_INPUTS_READY" and report["completed_builds"] == 10
     assert report["documents"] == 20 and report["embedding_complete"] is False
+    assert len(list(freezer.root.glob("builds/*/input_spool.json"))) == 10
     assert active.read_bytes() == active_before
     for rel, checksum in original_payloads.items():
         assert sha256_file(project / rel) == checksum
@@ -113,13 +114,46 @@ def test_resume_after_candidate_commit_reuses_candidate_and_input_parts(campaign
     def fail(*a, **k):
         pytest.fail("Frozen candidate was validated/frozen again")
     monkeypatch.setattr("vietmedbridge.health.health_report", fail)
+    shutil.rmtree(work)  # A new VM; completed input parts need no source/SQL restore.
     kwargs = loaders(links)
-    kwargs.update(load_links=fail, load_golden=fail)
+    kwargs.update(load_tokenizer=fail, load_links=fail, load_golden=fail)
     resumed = NewDataFreeze(project, work)
     new = resumed.run(**kwargs)
     assert new["documents"] == report["documents"]
     assert (folder / "frozen.json").read_bytes() == frozen_before
     assert {p.name: sha256_file(p) for p in inputs.glob("*.parquet")} == part_before
+
+
+def test_cold_sql_checkpoint_restores_committed_source_rows_without_parquet_reads(campaign):
+    from vietmedbridge.input_spool import InputSpool
+    project, work, links = campaign
+    freezer = NewDataFreeze(project, work)
+    freezer.run(**loaders(links))
+    item = freezer.builds[0]
+    state = freezer.root / "builds" / item["build_run"]
+    frozen = checked(read_json(state / "frozen.json"))
+    candidate = freezer._candidate(item, frozen)
+    inputs = project / item["build_dir"] / "index_inputs"
+    (inputs / "units.json").unlink()
+    # Model an interruption just after the SQL snapshot, before any input part.
+    cursor = read_json(inputs / "resume.json")
+    cursor.pop("manifest_sha256")
+    cursor.update(parts=[], cursor=0, last_id="", spool_base_id=None, spool_base_rows=0)
+    seal(inputs / "resume.json", cursor)
+    shutil.rmtree(work)
+    reopened = NewDataFreeze(project, work)
+    local = reopened._input_local(item)  # Contains JSON only, no source Parquet.
+    reopened._restore_input_spool(item, candidate, state)
+    saved = checked(read_json(state / "input_spool.json"))
+    def fail(*a, **k):
+        pytest.fail("Restored SQL checkpoint re-read a processed source payload")
+    spool = InputSpool(local, candidate, work / saved["directory"], saved["input_signature"], source_loader=fail)
+    try:
+        assert spool.stage() == saved["representatives"]
+        assert spool.rows_after("", 1)
+        assert not list(local.rglob("*.parquet"))
+    finally:
+        spool.close()
 
 
 @pytest.mark.parametrize("fault", ["missing_source", "counts", "config", "producer"])
