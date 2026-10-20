@@ -5,7 +5,8 @@ import nbformat as nb
 
 RESUME_ONLY_TOOLS = (Path(__file__).resolve().parent / "submission_resume_only.py").read_text(encoding="utf-8")
 MOUNT_TOOLS = (Path(__file__).resolve().parent / "colab_drive_mount.py").read_text(encoding="utf-8")
-GPU_PROGRESS_TOOLS = MOUNT_TOOLS + '\n' + (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
+DRIVE_RECEIPTS_TOOLS = (Path(__file__).resolve().parent / "drive_receipts_api.py").read_text(encoding="utf-8")
+GPU_PROGRESS_TOOLS = MOUNT_TOOLS + '\n' + DRIVE_RECEIPTS_TOOLS + '\n' + (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
 
 def code(value):
     return nb.v4.new_code_cell(dedent(value).strip()+"\n")
@@ -211,7 +212,9 @@ def notebook():
     BASELINE = None
     if GPU_SESSION:
         DATA_ROOT = ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
-        with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="baseline"):
+        DRIVE_RECEIPTS = authenticate_drive_receipts(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+        with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="baseline", receipt_api=DRIVE_RECEIPTS) as receipt_progress:
+            prepare_drive_receipt_lookup(DRIVE_RECEIPTS, CHECKOUT, WORK_DIR, progress=receipt_progress.report)
             BASELINE = run_current_baseline(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(BASELINE["ready"],ensure_ascii=False,indent=2),flush=True)
         if BASELINE["ready"]["state"] != "READY_FOR_MANUAL_UPLOAD":
@@ -225,7 +228,9 @@ def notebook():
     STRONG = None
     if GPU_SESSION:
         DATA_ROOT = ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
-        with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="strong"):
+        DRIVE_RECEIPTS = authenticate_drive_receipts(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+        with submission_gpu_progress(DATA_ROOT, WORK_DIR, label="strong", receipt_api=DRIVE_RECEIPTS) as receipt_progress:
+            prepare_drive_receipt_lookup(DRIVE_RECEIPTS, CHECKOUT, WORK_DIR, progress=receipt_progress.report)
             STRONG = run_current_submission(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
         print(json.dumps(STRONG["ready"],ensure_ascii=False,indent=2),flush=True)
         print("Diagnostics:",STRONG["diagnostics_path"],flush=True)

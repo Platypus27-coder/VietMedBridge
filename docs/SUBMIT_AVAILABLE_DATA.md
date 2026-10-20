@@ -102,6 +102,13 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   dưới `/content/vmb_drive_unmounted_<id>` sau khi bảng mount của kernel xác nhận không còn
   mount tại đó hoặc bên trong. Sau đó mount lại đúng `/content/drive` và xác minh candidate cũ.
   Không xóa hoặc tự nhập lại file trong thư mục được giữ; lỗi quyền/auth vẫn được báo riêng.
+  Receipt inventory hiện mặc định dùng Drive API GET/list, có phân trang đầy đủ và kiểm size/MD5
+  cùng digest JSON/producer. Bước này chạy trước lượt kiểm mapping và nạp weights, commit vào
+  đúng SQLite local đã có; không đọc/ghi receipt hoặc diagnostics qua Drive mount trong inventory.
+  Colab yêu cầu xác thực tài khoản có quyền đọc thư mục data dùng chung; không cần gửi token.
+  Bản nén bảng tra đã có có thể khôi phục qua API. API mode giữ cập nhật mới ở local SQLite;
+  không tự publish snapshot qua mount khi inventory hoàn tất. Runtime mới dùng lại snapshot cũ
+  nếu có rồi đọc receipt mới bằng API. Đọc/ghi vector và các bước native sau inventory vẫn dùng mount.
   Cùng runtime, BGE dùng lại `WORK_DIR/official_scope/<build>/index_inputs` đã stage trên CPU
   khi manifest còn khớp và đủ file; checksum payload vẫn kiểm trước khi dùng. Thiếu bản local thì đọc Drive.
   Sau khi catalog của đúng candidate đã có manifest COMPLETE trên Drive, bước GPU giải phóng

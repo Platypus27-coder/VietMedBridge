@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import gzip
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import sys
@@ -19,6 +19,8 @@ from vietmedbridge.scale_vectors import bound
 # imports in local tests load the same helper from scripts, outside producer src.
 if 'safe_colab_remount' not in globals():
     from scripts.colab_drive_mount import safe_colab_remount
+if 'authenticate_drive_receipts' not in globals():
+    from scripts.drive_receipts_api import authenticate_drive_receipts
 
 
 class ResumableContentBlocks(NativeContentBlocks):
@@ -27,12 +29,17 @@ class ResumableContentBlocks(NativeContentBlocks):
     The native content key, encoder identity and vector payload validation stay
     unchanged. A compressed lookup is an optimization, never a coverage receipt.
     """
-    def __init__(self, data_root, encoder, work_dir, *, progress=print):
-        self.root, self.encoder = Path(data_root).resolve(), encoder
+    def __init__(self, data_root, encoder, work_dir, *, progress=print, receipt_api=None):
+        self.receipt_api = receipt_api
+        if receipt_api is not None and Path(data_root).absolute() not in (receipt_api.requested_root, receipt_api.data_root):
+            raise ValueError('Receipt API root differs from the embedding data root.')
+        self.root = receipt_api.data_root if receipt_api is not None else Path(data_root).resolve()
+        self.encoder = encoder
         self.identity = {'encoder': encoder.identity, 'dimension': encoder.dimension,
             'format': 'content-float32-l2-v1'}
         self.directory = self.root / 'model_cache' / digest_json(self.identity)[:24]
-        self.directory.mkdir(parents=True, exist_ok=True)
+        if receipt_api is None:
+            self.directory.mkdir(parents=True, exist_ok=True)
         self.progress = progress
         self.binding = {'schema_version': 1, 'data_root': str(self.root), 'identity': self.identity}
         self.lookup = Path(work_dir) / 'receipt_lookups' / digest_json(self.binding)[:16]
@@ -60,13 +67,16 @@ class ResumableContentBlocks(NativeContentBlocks):
             self.con.commit()
             known = {row[0] for row in self.con.execute('SELECT name FROM receipts')}
             self.progress(f'BGE receipt inventory: retained {len(known):,} validated receipts; listing new names')
-            markers = sorted(self.directory.glob('*.done.json'))
+            markers = (receipt_api.receipts(self.identity) if receipt_api is not None
+                else sorted(self.directory.glob('*.done.json')))
             pending = [path for path in markers if path.name not in known]
             self.progress(f'BGE receipt inventory: {len(markers)-len(pending):,}/{len(markers):,} reused'
-                f' | {len(pending):,} unread | 2 readers | commit each receipt')
+                f' | {len(pending):,} unread | {"API" if receipt_api is not None else "mount"} transport | commit each receipt')
             self._read_pending(pending, len(markers)-len(pending), len(markers))
             self.progress(f'BGE receipt inventory ready: {len(markers):,} receipts | native vector SHA checked on use')
-            if pending or not (self.remote / 'current.json').is_file():
+            if receipt_api is not None:
+                self.progress('BGE API receipt lookup committed on local disk; no mount I/O for inventory')
+            elif pending or not (self.remote / 'current.json').is_file():
                 self._snapshot()
         except BaseException:
             self.close()
@@ -75,15 +85,17 @@ class ResumableContentBlocks(NativeContentBlocks):
     def _read_pending(self, pending, reused, total):
         # Keep at most two reads in flight: pool.map queued the whole directory
         # and discarded its temporary SQLite lookup after any mount failure.
-        pool = ThreadPoolExecutor(max_workers=2)
+        readers = 4 if self.receipt_api is not None else 2
+        pool = ThreadPoolExecutor(max_workers=readers)
         iterator, futures = iter(pending), []
         count, last_log = 0, time.monotonic()
         def refill():
-            while len(futures) < 2:
+            while len(futures) < readers:
                 path = next(iterator, None)
                 if path is None:
                     break
-                futures.append((path, pool.submit(lambda p: checked(read_json(p)), path)))
+                futures.append((path, pool.submit(lambda p: checked(
+                    p.read_json() if self.receipt_api is not None else read_json(p)), path)))
         try:
             refill()
             while futures:
@@ -115,7 +127,19 @@ class ResumableContentBlocks(NativeContentBlocks):
         try:
             # Keys and their receipt commit together; interrupted reads never
             # advance the inventory or erase an earlier committed prefix.
-            super().register(block)
+            if self.receipt_api is None:
+                super().register(block)
+            else:
+                if block['identity'] != self.identity or len(block['keys']) != block['rows']:
+                    raise ValueError('Content vector producer/key mismatch.')
+                relative = PurePosixPath(block['path'])
+                if relative.is_absolute() or '..' in relative.parts or '\\' in block['path'] or not relative.parts:
+                    raise ValueError('API content reference escapes its data root.')
+                # No filesystem resolution through FUSE during API inventory.
+                # Native vector readers still resolve the actual path and check
+                # its SHA256/shape before consuming the vector payload.
+                self.con.executemany('INSERT OR IGNORE INTO vectors VALUES (?,?,?,?)',
+                    [(key,block['path'],block['sha256'],i) for i,key in enumerate(block['keys'])])
             self.con.execute('INSERT OR IGNORE INTO receipts VALUES (?,?)', [marker, block['manifest_sha256']])
             self.con.commit()
         except BaseException:
@@ -124,15 +148,29 @@ class ResumableContentBlocks(NativeContentBlocks):
 
     def _restore(self):
         marker = self.remote / 'current.json'
-        if not marker.is_file():
-            return
-        saved = checked(read_json(marker))
+        if self.receipt_api is None:
+            if not marker.is_file():
+                return
+            saved = checked(read_json(marker))
+        else:
+            value = self.receipt_api.relative_json(marker.relative_to(self.root).as_posix())
+            if value is None:
+                return
+            saved = checked(value)
         if saved.get('binding') != self.binding:
             raise ValueError('Published receipt lookup producer/root changed.')
-        source = bound(self.remote, saved['path'])
+        relative = PurePosixPath(saved['path'])
+        if relative.is_absolute() or len(relative.parts) != 1 or '\\' in saved['path']:
+            raise ValueError('Published receipt snapshot path escapes its directory.')
         self.progress('BGE receipt inventory: restore one compressed lookup; no old receipt JSON scan')
         local = self.local / 'lookup.sqlite.gz'
-        shutil.copyfile(source, local)
+        if self.receipt_api is None:
+            shutil.copyfile(bound(self.remote, saved['path']), local)
+        else:
+            source = self.receipt_api.relative((self.remote / saved['path']).relative_to(self.root).as_posix())
+            if source is None:
+                raise ValueError('Published API receipt lookup payload is missing.')
+            self.receipt_api.download(source, local, expected_sha256=saved['sha256'])
         verify_file(local, saved['sha256'])
         stage = self.lookup / 'restore.sqlite'
         try:
@@ -273,13 +311,35 @@ def ensure_submission_mount(data_root, expected_candidate_sha256):
         + ', '.join(map(str, aliases)) + '. No data or checkpoint was created.')
 
 
+def prepare_drive_receipt_lookup(receipt_api, checkout, work_dir, *, progress=print):
+    """CPU metadata only, before mapping scans or any neural model allocation."""
+    from types import SimpleNamespace
+    config = read_json(Path(checkout) / 'configs/retrieval_full.json')
+    relative = Path(resources_relative(receipt_api.candidate, config)) / 'bge/config.json'
+    header = receipt_api.relative_json(relative.as_posix())
+    if header is None:
+        progress('BGE API lookup: no existing BGE view; no paid receipt inventory to prepare')
+        return
+    if (header.get('input_manifest_sha256') != receipt_api.active['index_inputs_manifest_sha256']
+        or header.get('dimension') != 1024 or header.get('format') != 'content-reference-v1'
+        or any(header.get('encoder', {}).get(k) != v for k,v in config['dense'].items())):
+        raise ValueError('API BGE producer/header differs from the active frozen inputs.')
+    progress('BGE API lookup preparation: CPU metadata only; no mapping payload scan or model weights')
+    encoder = SimpleNamespace(identity=header['encoder'], dimension=header['dimension'])
+    lookup = ResumableContentBlocks(receipt_api.requested_root, encoder, work_dir,
+        progress=progress, receipt_api=receipt_api)
+    lookup.close()
+    progress('BGE API receipt lookup ready; continuing native submission checks')
+
+
 class SubmissionProgress:
-    def __init__(self, data_root, work_dir, label, *, interval=15):
+    def __init__(self, data_root, work_dir, label, *, interval=15, drive_reports=True):
         self.root, self.work, self.label = Path(data_root), Path(work_dir), label
         self.interval, self.main_id = interval, threading.get_ident()
         self.started, self.last_saved = time.monotonic(), 0
         self.phase = 'Entering submission workflow'
         self.binding = {}
+        self.drive_reports = drive_reports
         self.stop = threading.Event()
 
     def location(self):
@@ -306,7 +366,7 @@ class SubmissionProgress:
     def report(self, message):
         self.phase = message
         print(message, flush=True)
-        if time.monotonic() - self.last_saved >= 15:
+        if self.drive_reports and time.monotonic() - self.last_saved >= 15:
             try:
                 atomic_json(self.root / 'retrieval/submission_progress.json', self.snapshot())
                 self.last_saved = time.monotonic()
@@ -325,10 +385,10 @@ class SubmissionProgress:
 
 
 @contextmanager
-def submission_gpu_progress(data_root, work_dir, *, label='baseline'):
+def submission_gpu_progress(data_root, work_dir, *, label='baseline', receipt_api=None):
     """Single-writer notebook adapter; restores every patched binding on exit."""
     from vietmedbridge import colab_storage, content_embeddings, scale_baseline, submission_workflow
-    progress = SubmissionProgress(data_root, work_dir, label)
+    progress = SubmissionProgress(data_root, work_dir, label, drive_reports=receipt_api is None)
     original_maps = scale_baseline.imported_bge_manifest
     original_blocks = content_embeddings.ContentBlocks
     original_remount = colab_storage._remount
@@ -348,7 +408,8 @@ def submission_gpu_progress(data_root, work_dir, *, label='baseline'):
         return observed
 
     scale_baseline.imported_bge_manifest = lambda *a, **k: read_bge_maps_parallel(*a, **k, progress=progress.report)
-    content_embeddings.ContentBlocks = lambda *a, **k: ResumableContentBlocks(*a, **k, progress=progress.report)
+    content_embeddings.ContentBlocks = lambda *a, **k: ResumableContentBlocks(*a, **k,
+        progress=progress.report, receipt_api=receipt_api)
     colab_storage._remount = safe_colab_remount
     for name, function in originals.items():
         setattr(submission_workflow, name, wrap(name, function))
@@ -372,7 +433,8 @@ def submission_gpu_progress(data_root, work_dir, *, label='baseline'):
             atomic_json(Path(work_dir) / 'submission_progress.json', status)
         except OSError:
             pass
-        try:
-            atomic_json(Path(data_root) / 'retrieval/submission_progress.json', status)
-        except OSError:
-            pass
+        if receipt_api is None or state == 'CALL_FINISHED':
+            try:
+                atomic_json(Path(data_root) / 'retrieval/submission_progress.json', status)
+            except OSError:
+                pass
