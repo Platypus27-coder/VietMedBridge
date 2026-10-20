@@ -105,7 +105,7 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   dưới `/content/vmb_drive_unmounted_<id>` sau khi bảng mount của kernel xác nhận không còn
   mount tại đó hoặc bên trong. Sau đó mount lại đúng `/content/drive` và xác minh candidate cũ.
   Không xóa hoặc tự nhập lại file trong thư mục được giữ; lỗi quyền/auth vẫn được báo riêng.
-  Receipt inventory hiện mặc định dùng Drive API GET/list, có phân trang đầy đủ và kiểm size/MD5
+  Khi BGE chưa có manifest COMPLETE, receipt inventory dùng Drive API GET/list, có phân trang đầy đủ và kiểm size/MD5
   cùng digest JSON/producer. Bước này chạy trước lượt kiểm mapping và nạp weights, commit vào
   đúng SQLite local đã có; không đọc/ghi receipt hoặc diagnostics qua Drive mount trong inventory.
   Colab yêu cầu xác thực tài khoản có quyền đọc data và ghi checkpoint vào thư mục dùng chung;
@@ -120,7 +120,7 @@ không gọi việc thiếu nhãn train/dev là đã fine-tune. Cache Qwen chưa
   Mất VM trước mốc lưu thành công vẫn có thể phải đọc lại phần receipt sau snapshot gần nhất.
   Runtime mới tải một bản nén, kiểm checksum/producer, rồi chỉ GET các receipt mới trong danh sách
   API đầy đủ. Bảng tra không chứng nhận payload vector hoặc embedding coverage đã hoàn tất.
-  Đọc/ghi vector và các bước native sau inventory vẫn dùng mount.
+  Các bước catalog và xuất kết quả vẫn dùng mount; transport vector của cell GPU mới dùng API khi cần tải.
   Phiên đang chạy code cũ không tự nhận bản sửa này. Sau khi cell xử lý trả quyền điều khiển,
   có thể chạy riêng [save_submission_lookup_cell.py](../scripts/save_submission_lookup_cell.py)
   trong cùng kernel để lưu bảng tra đã commit, trước khi chuyển account/runtime. Helper từ chối
@@ -188,6 +188,40 @@ Không tạo report giả để bỏ qua kiểm tra.
 Các batch 07–13 đã chia chunk nhưng chưa embedding sẽ làm tăng số BGE cần tính. Giữ URL cũ
 không biến những batch đó thành đã embedding. Thời gian phụ thuộc số text thiếu thực tế, GPU và Drive;
 không có cam kết hoàn tất trong một phiên hoặc đạt 0,4–0,5 khi chưa đo relevance.
+
+## Resume I/O khi BGE đã COMPLETE
+
+Cell 3–4 nhúng adapter `scripts/submission_vector_io.py`, không sửa `src/vietmedbridge`,
+không đổi model identity, thứ tự input, source span hoặc khóa checkpoint đã trả phí.
+
+- Manifest BGE tổng đã seal đủ part và khớp frozen inputs thay thế lượt quét receipt/map
+  trước inference. Không mở hàng nghìn `*.done.json` hoặc hash các payload trên Drive chỉ
+  để xác minh lại. Manifest thiếu coverage hoặc khác producer bị từ chối.
+- Vector/map chỉ được đọc khi consumer cần. Giữ đúng tên cache cũ trong SSD tạm Colab.
+  Bản cache cũ chưa có proof được kiểm SHA **một lần trên SSD Colab**. Proof SQLite khóa
+  SHA, inode/device, size, mtime, ctime và shape; file không đổi dùng lại proof sau khi chạy
+  lại cell trong cùng VM. Không áp dụng proof local cho file Drive hoặc một VM mới.
+- Payload thiếu tải qua Drive API, tối đa bốn file đồng thời; SHA được kiểm trong lượt
+  streaming download, rồi mới atomic rename. Không hash nguồn Drive rồi copy rồi hash
+  thêm lần nữa. Metadata tải theo danh sách thư mục phân trang, tránh GET metadata riêng
+  từng vector. Log tách số file, byte thiếu, byte mới và phần dùng lại; ETA chỉ là transfer.
+- Mapping được giữ riêng khỏi vòng LRU vector. Khi có đủ map hợp lệ trên SSD, adapter
+  gói metadata thành một archive có checksum và lưu trong `retrieval/mapping_bundles`.
+  VM sau khôi phục một archive thay vì mở riêng từng map; kiểm từng member lúc giải nén,
+  từ chối link/file lạ, thiếu/trùng member và giới hạn metadata 512 MiB.
+- Mẫu vector huấn luyện ANN giữ nguyên seed, vị trí và giá trị của native FAISS. Mẫu được
+  checkpoint riêng trong `retrieval/index_samples`, khóa đầy đủ manifest và vị trí mẫu.
+  Sau log `ANN sample SAVED_ON_DRIVE`, VM mới dùng mẫu này thay vì quét corpus lại để lấy mẫu.
+  Upload optional bị lỗi sẽ log `deferred`; không coi đó là đã có checkpoint bền.
+- Dựng các shard FAISS, kiểm ANN recall, query inference và provenance/export vẫn chạy
+  bằng code native. Đọc vector để thực sự dựng index hoặc xếp hạng vẫn cần thiết;
+  adapter không biến corpus chưa có index thành một ZIP tức thì.
+
+Phiên đang chạy bản cũ phải trả quyền điều khiển trước khi nạp adapter mới. Giữ nguyên VM,
+không reset runtime hoặc chạy lại CPU preparation. Chạy
+`scripts/resume_submission_optimized_cell.py` trong cùng notebook để nhận bản sửa và dùng
+cache hiện có. Script từ chối chạy đồng thời với cell xử lý. Artifact bền và ZIP lưu trên
+Drive; cache SSD nói trên nằm ở VM Colab, không phải ổ cứng máy tính người dùng.
 
 ## Kiểm tra trước khi xuất ZIP
 

@@ -21,6 +21,9 @@ if 'safe_colab_remount' not in globals():
     from scripts.colab_drive_mount import safe_colab_remount
 if 'authenticate_drive_receipts' not in globals():
     from scripts.drive_receipts_api import authenticate_drive_receipts, LookupPublishUnavailable
+if 'SubmissionVectorParts' not in globals():
+    from scripts.submission_vector_io import (SubmissionVectorParts, VerifiedSubmissionIO,
+        read_declared_vector_manifest, index_sample)
 
 
 class ResumableContentBlocks(NativeContentBlocks):
@@ -395,6 +398,18 @@ def prepare_drive_receipt_lookup(receipt_api, checkout, work_dir, *, progress=pr
         or header.get('dimension') != 1024 or header.get('format') != 'content-reference-v1'
         or any(header.get('encoder', {}).get(k) != v for k,v in config['dense'].items())):
         raise ValueError('API BGE producer/header differs from the active frozen inputs.')
+    # A completed, sealed view already carries every map's source/checksum.
+    # Do not construct the content-key receipt inventory just to read that view.
+    build_run = receipt_api.active.get('build_run')
+    inputs = receipt_api.relative_json('processed/'+build_run+'/index_inputs/units.json') if build_run else None
+    if inputs is not None:
+        if inputs.get('manifest_sha256') != receipt_api.active['index_inputs_manifest_sha256']:
+            raise ValueError('Frozen input manifest differs from the active handoff.')
+        declared = read_declared_vector_manifest(receipt_api.requested_root,receipt_api.candidate,
+            inputs,config,api=receipt_api,progress=progress)
+        if declared is not None:
+            progress('BGE COMPLETE: skip content receipt inventory and per-map preflight; validate payload on use')
+            return
     progress('BGE API lookup preparation: CPU metadata only; no mapping payload scan or model weights')
     encoder = SimpleNamespace(identity=header['encoder'], dimension=header['dimension'])
     lookup = ResumableContentBlocks(receipt_api.requested_root, encoder, work_dir,
@@ -476,11 +491,22 @@ class SubmissionProgress:
 @contextmanager
 def submission_gpu_progress(data_root, work_dir, *, label='baseline', receipt_api=None):
     """Single-writer notebook adapter; restores every patched binding on exit."""
-    from vietmedbridge import colab_storage, content_embeddings, scale_baseline, submission_workflow
+    from vietmedbridge import (colab_storage, content_embeddings, scale_baseline, submission_workflow,
+        full_scale_runtime, cached_strong_runtime, vector_search)
     progress = SubmissionProgress(data_root, work_dir, label, drive_reports=receipt_api is None)
     original_maps = scale_baseline.imported_bge_manifest
     original_blocks = content_embeddings.ContentBlocks
     original_remount = colab_storage._remount
+    io = VerifiedSubmissionIO(work_dir,api=receipt_api,progress=progress.report)
+    vector_modules = (content_embeddings,scale_baseline,full_scale_runtime,cached_strong_runtime)
+    vector_originals = [(module,module.ContentVectorParts) for module in vector_modules]
+    content_originals = [(module,module.imported_content_manifest)
+        for module in (scale_baseline,cached_strong_runtime)]
+    original_content = scale_baseline.imported_content_manifest
+    original_build = vector_search.build_faiss_index
+    search_originals = [(module,module.search_vectors)
+        for module in (vector_search,full_scale_runtime,cached_strong_runtime)]
+    original_search = vector_search.search_vectors
     names = ('_submission_context', '_saved_submission', '_release_catalog_staging', '_ensure_primary')
     originals = {name: getattr(submission_workflow, name) for name in names}
 
@@ -496,7 +522,40 @@ def submission_gpu_progress(data_root, work_dir, *, label='baseline', receipt_ap
             return result
         return observed
 
-    scale_baseline.imported_bge_manifest = lambda *a, **k: read_bge_maps_parallel(*a, **k, progress=progress.report)
+    def content_manifest(*args, family):
+        result = read_declared_vector_manifest(*args,family=family,api=receipt_api,progress=progress.report)
+        if result is not None:
+            return result
+        if family == 'bge':
+            return read_bge_maps_parallel(*args,progress=progress.report)
+        return original_content(*args,family=family)
+
+    class SampleStore:
+        def __init__(self,store):
+            self.store = store
+        def __getattr__(self,name):
+            return getattr(self.store,name)
+        def gather(self,positions):
+            return index_sample(self.store,positions,io)
+
+    def build_index(store,*args,**kwargs):
+        progress.report('FAISS index: reuse completed shards; checkpoint exact training sample')
+        if isinstance(store,SubmissionVectorParts):
+            store = SampleStore(store)
+        return original_build(store,*args,**kwargs)
+
+    def search(*args,**kwargs):
+        progress.report('Vector search: cached corpus vectors; native ANN recall check and query checkpoints')
+        return original_search(*args,**kwargs)
+
+    for module,_ in vector_originals:
+        module.ContentVectorParts = lambda *a, **k: SubmissionVectorParts(*a,io=io,**k)
+    for module,_ in content_originals:
+        module.imported_content_manifest = content_manifest
+    for module,_ in search_originals:
+        module.search_vectors = search
+    vector_search.build_faiss_index = build_index
+    scale_baseline.imported_bge_manifest = lambda *a, **k: content_manifest(*a,**k,family='bge')
     content_embeddings.ContentBlocks = lambda *a, **k: ResumableContentBlocks(*a, **k,
         progress=progress.report, receipt_api=receipt_api)
     colab_storage._remount = safe_colab_remount
@@ -515,6 +574,13 @@ def submission_gpu_progress(data_root, work_dir, *, label='baseline', receipt_ap
         scale_baseline.imported_bge_manifest = original_maps
         content_embeddings.ContentBlocks = original_blocks
         colab_storage._remount = original_remount
+        for module,function in vector_originals:
+            module.ContentVectorParts = function
+        for module,function in content_originals:
+            module.imported_content_manifest = function
+        for module,function in search_originals:
+            module.search_vectors = function
+        vector_search.build_faiss_index = original_build
         for name, function in originals.items():
             setattr(submission_workflow, name, function)
         status = progress.snapshot(state)

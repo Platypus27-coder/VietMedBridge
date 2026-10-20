@@ -6,7 +6,8 @@ import nbformat as nb
 RESUME_ONLY_TOOLS = (Path(__file__).resolve().parent / "submission_resume_only.py").read_text(encoding="utf-8")
 MOUNT_TOOLS = (Path(__file__).resolve().parent / "colab_drive_mount.py").read_text(encoding="utf-8")
 DRIVE_RECEIPTS_TOOLS = (Path(__file__).resolve().parent / "drive_receipts_api.py").read_text(encoding="utf-8")
-GPU_PROGRESS_TOOLS = MOUNT_TOOLS + '\n' + DRIVE_RECEIPTS_TOOLS + '\n' + (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
+VECTOR_IO_TOOLS = (Path(__file__).resolve().parent / "submission_vector_io.py").read_text(encoding="utf-8")
+GPU_PROGRESS_TOOLS = MOUNT_TOOLS + '\n' + DRIVE_RECEIPTS_TOOLS + '\n' + VECTOR_IO_TOOLS + '\n' + (Path(__file__).resolve().parent / "submission_gpu_progress.py").read_text(encoding="utf-8")
 
 def code(value):
     return nb.v4.new_code_cell(dedent(value).strip()+"\n")
@@ -25,7 +26,10 @@ def notebook():
     Đổi runtime mất biến/ổ tạm; các checkpoint đã publish trên Drive vẫn được giữ và tự nhận lại.
     `/content/vmb_submit_work` là cache tạm trên máy chủ Colab. Dữ liệu gốc, checkpoint và ZIP
     lưu bền trên Drive; notebook không tự tải ZIP hoặc dữ liệu về máy tính người dùng.
-    Bảng tra receipt được lưu nén lên Drive qua API tại các mốc 256/512/1024/...,
+    BGE đã có manifest COMPLETE thì bỏ lượt quét receipt/map trước inference.
+    Dùng lại đúng cache vector của VM; file thiếu tải qua API tối đa bốn file đồng thời,
+    kiểm SHA ngay lúc tải. Mapping và mẫu ANN có checkpoint gộp riêng trên Drive.
+    Khi cần sửa view chưa hoàn tất, bảng tra receipt được lưu nén qua API tại các mốc 256/512/1024/...,
     khi inventory hoàn tất và khi đóng stage có dữ liệu mới. Chờ log `SAVED_ON_DRIVE`
     để xác nhận đã lưu bền; `local checkpoint committed` chỉ xác nhận ổ tạm.
     Tài khoản mới khôi phục bảng tra theo ID folder dùng chung rồi chỉ đọc receipt mới.
@@ -295,6 +299,47 @@ def save_lookup_cell():
     return guard + '\n\n' + GPU_PROGRESS_TOOLS + '\n\n' + action + '\n'
 
 
+def optimized_resume_cell():
+    """Upgrade an existing runtime without replacing producer code or VM caches."""
+    guard = dedent('''
+    import threading
+    import importlib.util
+    import subprocess
+    import sys
+    import json
+    if any(t.name == "submission-progress" and t.is_alive() for t in threading.enumerate()):
+        raise RuntimeError("Cell xử lý vẫn đang chạy. Dừng riêng cell đó trước; giữ nguyên runtime và cache Colab.")
+    if any(name not in globals() for name in ("DATA_ROOT", "WORK_DIR", "CHECKOUT", "PREPARATION", "COMMIT")):
+        raise RuntimeError("Chạy cell 1 và cell 2 của notebook submit để khôi phục biến; không chạy CPU preparation.")
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError("Cần runtime GPU đang dùng cho submission; không tự chuyển hoặc reset runtime.")
+    _vmb_previous_receipts = globals().get("DRIVE_RECEIPTS")
+    if importlib.util.find_spec("googleapiclient") is None:
+        subprocess.run([sys.executable,"-m","pip","install","google-api-python-client>=2,<3"],check=True)
+    print("Nạp tối ưu resume: giữ cache Colab; không thay producer code, không chạy CPU preparation.",flush=True)
+    ''').strip()
+    action = dedent('''
+    DATA_ROOT = ensure_submission_mount(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+    if _vmb_previous_receipts is None:
+        DRIVE_RECEIPTS = authenticate_drive_receipts(DATA_ROOT, PREPARATION["candidate_manifest_sha256"])
+    else:
+        DRIVE_RECEIPTS = DriveReceiptSource(_vmb_previous_receipts.session_factory,
+            _vmb_previous_receipts.requested_root, _vmb_previous_receipts.data_root,
+            data_folder_id=_vmb_previous_receipts.folder_id)
+        DRIVE_RECEIPTS.verify_candidate(PREPARATION["candidate_manifest_sha256"])
+    from vietmedbridge.submission_workflow import run_current_baseline
+    with submission_gpu_progress(DATA_ROOT,WORK_DIR,label="baseline",receipt_api=DRIVE_RECEIPTS) as receipt_progress:
+        prepare_drive_receipt_lookup(DRIVE_RECEIPTS,CHECKOUT,WORK_DIR,progress=receipt_progress.report)
+        BASELINE = run_current_baseline(DATA_ROOT,CHECKOUT,WORK_DIR,code_commit=COMMIT)
+    print(json.dumps(BASELINE["ready"],ensure_ascii=False,indent=2),flush=True)
+    if BASELINE["ready"]["state"] != "READY_FOR_MANUAL_UPLOAD":
+        raise RuntimeError("Query/index còn thiếu; checkpoint đã giữ lại. Chưa nạp thêm model Qwen.")
+    print("ZIP đã kiểm tra, lưu trên Drive:",BASELINE["ready"].get("zip_path", "xem retrieval/latest_submission.json"),flush=True)
+    ''').strip()
+    return guard + '\n\n' + GPU_PROGRESS_TOOLS + '\n\n' + action + '\n'
+
+
 if __name__ == "__main__":
     target = Path(__file__).resolve().parents[1] / "notebooks/04_colab_submit_available_data.ipynb"
     nb.write(notebook(),target)
@@ -302,3 +347,6 @@ if __name__ == "__main__":
     save_target = Path(__file__).resolve().parent / "save_submission_lookup_cell.py"
     save_target.write_text(save_lookup_cell(), encoding="utf-8")
     print(save_target)
+    resume_target = Path(__file__).resolve().parent / "resume_submission_optimized_cell.py"
+    resume_target.write_text(optimized_resume_cell(),encoding="utf-8")
+    print(resume_target)

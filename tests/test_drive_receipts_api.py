@@ -54,6 +54,20 @@ def test_api_follows_all_pages_and_refuses_incomplete_search(tmp_path):
         list(source._list('query'))
 
 
+def test_payload_directory_listing_is_shared_by_many_vector_downloads(tmp_path,monkeypatch):
+    source,_ = client_with_responses(tmp_path,[])
+    source.folders[source.folder_id,'model_cache']='cache'
+    source.folders['cache','producer']='producer'
+    calls=[]
+    def listing(query):
+        calls.append(query)
+        return iter([{'id':'a','name':'a.npy','size':'10'}, {'id':'b','name':'b.npy','size':'20'}])
+    monkeypatch.setattr(source,'_list',listing)
+    assert source.payload_metadata('model_cache/producer/a.npy')['id']=='a'
+    assert source.payload_metadata('model_cache/producer/b.npy')['id']=='b'
+    assert len(calls)==1
+
+
 def test_api_transient_http_retries_but_permission_errors_do_not_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(transport.time, 'sleep', lambda _:None)
     source, calls = client_with_responses(tmp_path, [Response(status=429), Response({'files':[]})])

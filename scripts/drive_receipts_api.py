@@ -31,6 +31,42 @@ class DriveReceiptSource:
         self.session_factory, self.sessions = session_factory, threading.local()
         self.requested_root, self.data_root = Path(data_root).absolute(), Path(canonical_root)
         self.folder_id, self.report, self.folders = data_folder_id, report, {}
+        self.payload_directories = {}
+
+    def directory_files(self, relative_directory, *, refresh=False):
+        """One paginated metadata listing, rather than one lookup per payload."""
+        relative = PurePosixPath(relative_directory)
+        if relative.is_absolute() or '..' in relative.parts or '\\' in relative_directory or not relative.parts:
+            raise ValueError('Invalid payload directory.')
+        if not refresh and relative_directory in self.payload_directories:
+            return self.payload_directories[relative_directory]
+        parent = self.folder_id
+        for part in relative.parts:
+            if (parent, part) not in self.folders:
+                value = self.child(parent, part, folder=True)
+                if value is None:
+                    return {}
+                self.folders[parent, part] = value['id']
+            parent = self.folders[parent, part]
+        result = {}
+        for value in self._list(f"'{parent}' in parents and trashed=false"):
+            if value['name'] in result:
+                raise ValueError('Duplicate payload names in Drive directory.')
+            result[value['name']] = value
+        self.payload_directories[relative_directory] = result
+        return result
+
+    def payload_metadata(self, relative_path):
+        relative = PurePosixPath(relative_path)
+        if relative.is_absolute() or '..' in relative.parts or '\\' in relative_path or len(relative.parts) < 2:
+            raise ValueError('Invalid immutable payload path.')
+        directory = relative.parent.as_posix()
+        result = self.directory_files(directory).get(relative.name)
+        if result is None:
+            result = self.directory_files(directory, refresh=True).get(relative.name)
+        if result is None or 'size' not in result:
+            raise ValueError('Expected immutable payload is missing from Drive.')
+        return result
 
     def _session(self):
         if not hasattr(self.sessions, 'session'):
@@ -146,11 +182,14 @@ class DriveReceiptSource:
         folder = self.child(cache['id'], digest_json(identity)[:24], folder=True) if cache else None
         if folder is None:
             return []
-        result, names = [], set()
+        result, names, payloads = [], set(), {}
         # Drive name-contains is prefix matching, not a suffix predicate. List
         # the complete producer folder then filter receipt names locally.
         query = f"'{folder['id']}' in parents and trashed=false"
         for value in self._list(query):
+            if value['name'] in payloads:
+                raise ValueError('Duplicate names in content cache directory.')
+            payloads[value['name']] = value
             if not value['name'].endswith('.done.json'):
                 continue
             if (not re.fullmatch(r'block-[0-9a-f]{64}\.done\.json', value['name'])
@@ -158,8 +197,42 @@ class DriveReceiptSource:
                 raise ValueError('Invalid or duplicate API receipt filename.')
             names.add(value['name'])
             result.append(RemoteReceipt(self, value))
+        self.payload_directories['model_cache/'+digest_json(identity)[:24]] = payloads
         self.report(f'Drive receipt API: complete listing, {len(result):,} receipts; no mount reads')
         return sorted(result, key=lambda value: value.name)
+
+    def publish_cache_checkpoint(self, relative_marker, payload, marker):
+        """Only mapping bundles and exact ANN training samples may be published here."""
+        from vietmedbridge.artifacts import digest_json
+        binding = marker.get('binding', {})
+        source = binding.get('source_manifest_sha256', '')
+        kind = binding.get('kind')
+        if kind == 'mapping-bundle-v1':
+            directory, prefix, suffix = 'retrieval/mapping_bundles/'+source, 'maps-', '.tar.gz'
+        elif kind == 'index-sample-v1' and re.fullmatch(r'[0-9a-f]{64}', binding.get('positions_sha256', '')):
+            directory = 'retrieval/index_samples/'+source+'/'+binding['positions_sha256']
+            prefix, suffix = 'sample-', '.npy'
+        else:
+            raise ValueError('Unsupported cache checkpoint kind.')
+        if (binding.get('data_folder_id') != self.folder_id or binding.get('schema_version') != 1
+            or not re.fullmatch(r'[0-9a-f]{64}', source)
+            or relative_marker != directory+'/current.json'
+            or not re.fullmatch(r'[0-9a-f]{64}', marker.get('sha256', ''))
+            or marker.get('path') != prefix+marker['sha256']+suffix
+            or marker.get('manifest_sha256') != digest_json({k:v for k,v in marker.items() if k != 'manifest_sha256'})):
+            raise ValueError('Cache checkpoint escapes its declared source/folder binding.')
+        sha, md5 = hashlib.sha256(), hashlib.md5()
+        with Path(payload).open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024*1024), b''):
+                sha.update(chunk); md5.update(chunk)
+        if sha.hexdigest() != marker['sha256']:
+            raise ValueError('Cache checkpoint payload changed before upload.')
+        try:
+            return self._publish_lookup_files(directory, Path(payload), marker, md5.hexdigest())
+        except ValueError:
+            raise
+        except Exception as error:
+            raise LookupPublishUnavailable(type(error).__name__) from error
 
     def publish_lookup(self, relative_marker, payload, marker):
         """Upload a checksum-addressed lookup, then its pointer. Never write vector/source files."""
@@ -227,7 +300,8 @@ class DriveReceiptSource:
                     {k:v for k,v in existing.items() if k != 'manifest_sha256'})
                 or existing.get('binding') != marker['binding']):
                 raise ValueError('Existing lookup checkpoint binding/digest changed.')
-            if existing['receipts'] > marker['receipts']:
+            count_key = 'receipts' if 'receipts' in marker else 'parts'
+            if existing[count_key] > marker[count_key]:
                 return existing  # An older local prefix must not replace a newer saved lookup.
 
         def upload(media, name, existing=None):
@@ -245,7 +319,8 @@ class DriveReceiptSource:
 
         saved = self.child(parent, marker['path'])
         if saved is None:
-            saved = upload(MediaFileUpload(str(payload), mimetype='application/gzip',
+            mime = 'application/gzip' if marker['path'].endswith('.gz') else 'application/octet-stream'
+            saved = upload(MediaFileUpload(str(payload), mimetype=mime,
                 chunksize=8*1024*1024, resumable=True), marker['path'])
         if int(saved.get('size', -1)) != payload.stat().st_size or saved.get('md5Checksum') != md5:
             raise ValueError('Uploaded lookup payload size/checksum mismatch; pointer not advanced.')

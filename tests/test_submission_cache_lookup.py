@@ -135,6 +135,9 @@ def test_newly_encoded_blocks_commit_to_lookup_and_survive_close(blocks):
 
 
 def test_native_paid_cache_remap_works_under_scoped_adapter(prepared, monkeypatch):
+    # Exercise the legacy fallback. A sealed COMPLETE manifest now skips this
+    # repair entirely; completion/on-use checks have separate coverage.
+    monkeypatch.setattr(adapter,'read_declared_vector_manifest',lambda *a,**k:None)
     original = adapter.NativeContentBlocks
     from vietmedbridge import content_embeddings
     with adapter.submission_gpu_progress(prepared.root, prepared.work):
