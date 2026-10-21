@@ -65,6 +65,8 @@ source version được kiểm; raw payload chưa được rehash nên báo cáo
 
 Lượt dùng bộ lọc raw cũ cần [cập nhật checkpoint phân loại raw](REPAIR_COLLECTION_RAW_PATHS.md).
 Xem `counts_provisional` và `raw_path_classification` trước khi chốt số liệu.
+Nếu thiếu metadata đã cache, notebook chỉ khôi phục member bị thiếu bằng range,
+SHA256 và phiên bản archive gốc; không quét/tải cả TAR hay replay nguồn đã sửa.
 
 Các trạng thái được đếm theo ID BTC; số URL fetch duy nhất được báo riêng:
 

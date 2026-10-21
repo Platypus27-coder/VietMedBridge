@@ -96,8 +96,8 @@ def notebook():
         try:
             REPORT=flow.run(reader,files,RETAINED)
             if not REPORT['archive_errors'] and REPORT['raw_path_classification']['pending_leaves']:
-                print('Cập nhật bộ lọc raw cũ từ metadata đã lưu; không mở lại TAR.',flush=True)
-                REPORT=flow.repair_raw_paths()
+                print('Sửa phân loại từ metadata đã lưu; chỉ khôi phục byte range metadata bị thiếu nếu cần.',flush=True)
+                REPORT=flow.repair_raw_paths(reader=reader)
             print(json.dumps(REPORT,ensure_ascii=False,indent=2),flush=True)
             print('Kết quả:',flow.root,flush=True)
             print('btc_membership.csv: mỗi ID BTC có trạng thái và provenance.',flush=True)
@@ -141,8 +141,10 @@ def notebook():
 
         Native metadata chấp nhận `data/raw/...` và `raw/...`; retained portable
         giữ contract `raw/...`. Checkpoint của bộ lọc cũ được sửa một lần từ
-        metadata đã lưu (gồm metadata của các lượt import trước); không mở TAR,
-        không encode lại. File metadata thiếu được báo riêng, không tự tải lại.
+        metadata đã lưu (gồm metadata của các lượt import trước), không encode lại.
+        Nếu thiếu file metadata, chỉ đọc đúng byte range đã khóa checksum từ
+        archive gốc; không liệt kê TAR lại hay tải raw HTML. Mỗi file được lưu
+        riêng trên Drive để phiên tiếp tục không tải lại file đã hoàn tất.
         Bản ghi SUCCESS_RAW có hash/path/snapshot sai được xếp RAW_METADATA_REVIEW,
         không gọi nhầm là lỗi crawl. Xem `counts_provisional` trước khi chốt số liệu.
 

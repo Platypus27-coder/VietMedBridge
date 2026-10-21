@@ -96,7 +96,10 @@ def drive_delay(response, fallback):
 class CollectionDriveRange(DriveRange):
     """Retry the identical Range only for explicit transient provider failures."""
     def _get_block(self,start):
-        end=min(self.size,start+self.block_size)-1
+        limit=getattr(self,'range_end',self.size)
+        if not 0<=start<limit<=self.size:
+            raise ValueError('Drive range exceeds the selected metadata member.')
+        end=min(limit,start+self.block_size)-1
         requested=f'bytes={start}-{end}'
         # Google may send legacy error.errors and google.rpc.ErrorInfo together.
         # Both spellings must be recognized; permission/quota codes stay denied.
@@ -598,12 +601,50 @@ class CollectAll:
         print('REPAIR_METADATA_INDEX_READY:',len(visited),'saved metadata receipts; no corpus scan',flush=True)
         return paths
 
-    def repair_raw_paths(self):
-        """Replay successful records from saved metadata, without opening any TAR.
+    def _restore_repair_members(self, reader, identifier, receipt, missing, range_reads):
+        """Restore only absent, checksum-pinned member ranges; never scan a TAR."""
+        remote=receipt['archive']
+        if identity(reader.metadata(remote['id']))!=identity(remote):
+            raise ValueError('Original archive version changed; missing metadata was not requested.')
+        references={}
+        with tempfile.TemporaryDirectory(prefix='repair-missing-',dir=self.work) as temporary:
+            with reader.open(remote['id'],remote) as stream:
+                for absent in missing:
+                    kind=absent['kind']
+                    item=receipt['leaf']['members'][kind]
+                    checksum=receipt['metadata_sha256'][kind]
+                    if (type(item['offset']) is not int or type(item['bytes']) is not int
+                            or item['offset']<0 or not 0<item['bytes']<=2*1024**3
+                            or item['offset']+item['bytes']>int(remote['size'])
+                            or item.get('sha256') not in (None,checksum)):
+                        raise ValueError('Saved member range/hash does not match the original source receipt.')
+                    print('RESTORE_MISSING_METADATA_RANGE:',receipt['leaf']['name'],'|',kind,'|',
+                          round(item['bytes']/1024**2,1),'MiB | no TAR scan or raw payload copy',flush=True)
+                    range_reads.append({'leaf_id':identifier,'kind':kind,'offset':item['offset'],
+                                        'bytes':item['bytes'],'sha256':checksum})
+                    local=Path(temporary)/kind
+                    if isinstance(stream,CollectionDriveRange):
+                        stream.range_end=item['offset']+item['bytes']
+                    stage_member(stream,{**item,'sha256':checksum},local)
+                    if identity(reader.metadata(remote['id']))!=identity(remote):
+                        raise ValueError('Archive version changed during metadata transfer; member not published.')
+                    cache=self.root/'metadata_cache'/identifier/kind
+                    payload=cache/'metadata.bin'
+                    if publish_file(local,payload)!=checksum:
+                        raise ValueError('Restored metadata publication checksum mismatch.')
+                    atomic_json(cache/'receipt.json',seal({'binding':digest_json(item),
+                        'bytes':item['bytes'],'sha256':checksum}))
+                    references[kind]=(payload,checksum)
+                    print('METADATA_CHECKPOINT_SAVED_ON_DRIVE:',kind,'| exact original member restored',flush=True)
+        return references
+
+    def repair_raw_paths(self, *, reader=None):
+        """Repair saved records, optionally restoring missing metadata member ranges.
 
         Original receipts/candidate parts are retained. Each repaired leaf gets
         its own durable SQL receipt and immutable recovery part; a new VM skips
-        committed repairs. Missing saved metadata is reported, never fetched.
+        committed repairs. By default missing metadata is reported, never fetched.
+        An explicit reader permits only missing, pinned metadata member ranges.
         """
         previous=checked(read_json(self.root/'collection_report.json'))
         files=previous.get('archive_inventory') or [json.loads(r[0])['remote'] for r in self.con.execute(
@@ -617,6 +658,7 @@ class CollectAll:
             return previous
         index=self._repair_metadata_index() if pending else {}
         errors=[]
+        range_reads=[]
         for number,(identifier,receipt) in enumerate(pending,1):
             print(f'RAW_PATH_REPAIR {number}/{len(pending)} | {receipt["leaf"]["name"]}',flush=True)
             references={}
@@ -632,18 +674,21 @@ class CollectAll:
                         break
                 else:
                     missing.append({'kind':kind,'sha256':checksum,'bytes':item['bytes']})
-            if missing:
-                errors.append({'leaf':receipt['leaf']['name'],'leaf_id':identifier,'error':'SAVED_METADATA_MISSING',
-                    'missing':missing,'tar_download_attempted':False})
-                print('RAW_REPAIR_NEEDS_METADATA:',receipt['leaf']['name'],'| missing',
-                      ','.join(r['kind'] for r in missing),'| no TAR reopened',flush=True)
-                continue
             try:
+                if missing and reader is not None:
+                    references.update(self._restore_repair_members(reader,identifier,receipt,missing,range_reads))
+                    missing=[]
+                if missing:
+                    errors.append({'leaf':receipt['leaf']['name'],'leaf_id':identifier,'error':'SAVED_METADATA_MISSING',
+                        'missing':missing,'tar_download_attempted':False})
+                    print('RAW_REPAIR_NEEDS_METADATA:',receipt['leaf']['name'],'| missing',
+                          ','.join(r['kind'] for r in missing),'| no TAR reopened',flush=True)
+                    continue
                 self.leaf(None,receipt['archive'],receipt['leaf'],repair=True,metadata_paths=references)
             except Exception as error:
                 self.con.rollback()
                 errors.append({'leaf':receipt['leaf']['name'],'leaf_id':identifier,'error':str(error)[:500],
-                               'tar_download_attempted':False})
+                               'tar_download_attempted':any(r['leaf_id']==identifier for r in range_reads)})
         # A receipt may have committed locally before a transient snapshot write
         # failed. Publish the final SQL snapshot before declaring completion.
         self.snapshot()
@@ -651,7 +696,7 @@ class CollectAll:
         repair={'state':'RAW_PATH_REPAIR_COMPLETE' if not remaining else 'RAW_PATH_REPAIR_INCOMPLETE',
             'policy':RAW_PATH_POLICY,'errors':[e for e in errors if e['leaf_id'] in remaining],
             'recovered_warnings':[e for e in errors if e['leaf_id'] not in remaining],
-            'tar_accessed':False,'updated_at':utc_now()}
+            'tar_accessed':bool(range_reads),'metadata_range_reads':range_reads,'updated_at':utc_now()}
         atomic_json(self.root/'raw_path_repair'/'repair_report.json',seal(repair))
         return self.report(files,[],raw_repair=repair)
 

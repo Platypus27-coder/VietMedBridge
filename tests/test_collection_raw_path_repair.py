@@ -262,3 +262,120 @@ def test_transient_snapshot_failure_is_republished_before_completion(tmp_path,ex
     assert not cold.pending_raw_repairs()
     assert cold.repair_raw_paths()==report
     cold.close()
+
+
+class ExactRangeReader(LocalReader):
+    def __init__(self,files):
+        super().__init__(files)
+        self.reads=[]
+        self.corrupt_at=None
+
+    def open(self,file_id,metadata):
+        self.opens+=1
+        source=self.files[file_id].open('rb')
+        owner=self
+        class Stream:
+            def __enter__(self): return self
+            def __exit__(self,*args): source.close()
+            def seek(self,offset): return source.seek(offset)
+            def read(self,size):
+                offset=source.tell()
+                data=source.read(size)
+                owner.reads.append((offset,len(data)))
+                if offset==owner.corrupt_at and data:
+                    data=bytes([data[0]^1])+data[1:]
+                return data
+        return Stream()
+
+
+def remove_two_members(flow):
+    identifier,receipt=next((r[0],json.loads(r[1])) for r in flow.con.execute(
+        "SELECT id,receipt FROM completed WHERE kind='leaf'"))
+    for kind in ('crawl','extracted'):
+        (flow.root/'metadata_cache'/identifier/kind/'metadata.bin').unlink()
+    return identifier,receipt
+
+
+def forbid_source_scan(monkeypatch):
+    def fail(*args,**kwargs):
+        pytest.fail('Missing metadata repair must use pinned byte ranges, never inventory/TAR scans')
+    for name in ('metadata_leaves','inventory'):
+        monkeypatch.setattr(collect,name,fail)
+
+
+def test_explicit_reader_restores_only_two_missing_ranges_then_cold_resume_is_offline(tmp_path,external,monkeypatch):
+    flow,links,old,remotes,before=legacy_checkpoint(tmp_path,external,monkeypatch)
+    identifier,receipt=remove_two_members(flow)
+    original_receipts=list(flow.con.execute("SELECT id,receipt FROM completed WHERE kind='leaf'"))
+    reader=ExactRangeReader(old.files)
+    forbid_source_scan(monkeypatch)
+    report=flow.repair_raw_paths(reader=reader)
+    assert report['raw_path_repair']['state']=='RAW_PATH_REPAIR_COMPLETE'
+    assert report['raw_path_repair']['tar_accessed']
+    assert sorted(reader.reads)==sorted((receipt['leaf']['members'][k]['offset'],
+        receipt['leaf']['members'][k]['bytes']) for k in ('crawl','extracted'))
+    assert [r['kind'] for r in report['raw_path_repair']['metadata_range_reads']]==['crawl','extracted']
+    for kind in ('crawl','extracted'):
+        root=flow.root/'metadata_cache'/identifier/kind
+        assert sha256_file(root/'metadata.bin')==receipt['metadata_sha256'][kind]
+        assert collect.checked(read_json(root/'receipt.json'))['binding']==collect.digest_json(receipt['leaf']['members'][kind])
+    assert list(flow.con.execute("SELECT id,receipt FROM completed WHERE kind='leaf'"))==original_receipts
+    assert read_json(flow.project/'data/active_data_candidate.json')=={'keep':'submission'}
+    project=flow.project
+    flow.close()
+    cold=CollectAll(project,tmp_path/'after-range-repair',official_sha=sha256_file(links))
+    monkeypatch.setattr(reader,'open',lambda *a:pytest.fail('Finished source reopened'))
+    assert cold.repair_raw_paths(reader=reader)==report
+    cold.close()
+
+
+def test_range_failure_keeps_first_member_and_cold_resume_requests_only_second(tmp_path,external,monkeypatch):
+    flow,links,old,remotes,before=legacy_checkpoint(tmp_path,external,monkeypatch)
+    identifier,receipt=remove_two_members(flow)
+    reader=ExactRangeReader(old.files)
+    stage=collect.stage_member
+    def interrupted(stream,item,target):
+        if item['path']==receipt['leaf']['members']['extracted']['path']:
+            raise OSError('Temporary range transfer failure')
+        return stage(stream,item,target)
+    forbid_source_scan(monkeypatch)
+    with monkeypatch.context() as scope:
+        scope.setattr(collect,'stage_member',interrupted)
+        report=flow.repair_raw_paths(reader=reader)
+    assert report['counts_provisional'] and report['raw_path_classification']['pending_leaves']==1
+    assert sha256_file(flow.root/'metadata_cache'/identifier/'crawl/metadata.bin')==receipt['metadata_sha256']['crawl']
+    project=flow.project
+    flow.close()
+    reader.reads=[]
+    cold=CollectAll(project,tmp_path/'after-range-failure',official_sha=sha256_file(links))
+    report=cold.repair_raw_paths(reader=reader)
+    assert report['raw_path_repair']['state']=='RAW_PATH_REPAIR_COMPLETE'
+    member=receipt['leaf']['members']['extracted']
+    assert reader.reads==[(member['offset'],member['bytes'])]
+    cold.close()
+
+
+def test_changed_original_archive_is_rejected_before_missing_member_read(tmp_path,external,monkeypatch):
+    flow,links,old,remotes,before=legacy_checkpoint(tmp_path,external,monkeypatch)
+    identifier,receipt=remove_two_members(flow)
+    reader=ExactRangeReader(old.files)
+    metadata=reader.metadata
+    monkeypatch.setattr(reader,'metadata',lambda key:{**metadata(key),'modifiedTime':'changed'})
+    report=flow.repair_raw_paths(reader=reader)
+    assert report['counts_provisional'] and reader.opens==0 and not reader.reads
+    assert 'version changed' in report['raw_path_repair']['errors'][0]['error']
+    assert report['raw_path_repair']['tar_accessed'] is False
+    flow.close()
+
+
+def test_corrupt_range_cannot_publish_saved_metadata_or_complete_repair(tmp_path,external,monkeypatch):
+    flow,links,old,remotes,before=legacy_checkpoint(tmp_path,external,monkeypatch)
+    identifier,receipt=remove_two_members(flow)
+    reader=ExactRangeReader(old.files)
+    reader.corrupt_at=receipt['leaf']['members']['crawl']['offset']
+    report=flow.repair_raw_paths(reader=reader)
+    assert report['counts_provisional']
+    assert 'checksum' in report['raw_path_repair']['errors'][0]['error']
+    assert not (flow.root/'metadata_cache'/identifier/'crawl/metadata.bin').is_file()
+    assert flow.con.execute("SELECT count(*) FROM completed WHERE kind='raw_repair'").fetchone()[0]==0
+    flow.close()

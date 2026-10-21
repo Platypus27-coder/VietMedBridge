@@ -47,6 +47,17 @@ def success():
     return Reply(206,headers={'Content-Range':'bytes 3-6/10'},payload=b'defg')
 
 
+def test_restored_member_range_never_prefetches_into_next_tar_member(monkeypatch):
+    reader,calls,sleeps=range_client(monkeypatch,[Reply(206,
+        headers={'Content-Range':'bytes 3-4/10'},payload=b'de')])
+    reader.range_end=5
+    assert reader.read(2)==b'de'
+    assert calls[0][1]['headers']['Range']=='bytes=3-4'
+    with pytest.raises(ValueError,match='selected metadata member'):
+        reader.read(1)
+    assert len(calls)==1
+
+
 @pytest.mark.parametrize('reason',['rateLimitExceeded','userRateLimitExceeded',
     'RATE_LIMIT_EXCEEDED','USER_RATE_LIMIT_EXCEEDED'])
 def test_rate_403_retries_identical_range_without_restarting_download(monkeypatch,capsys,reason):

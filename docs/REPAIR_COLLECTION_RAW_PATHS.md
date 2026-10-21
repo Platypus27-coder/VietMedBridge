@@ -10,11 +10,20 @@ Sau khi đủ inventory archive, gọi `flow.repair_raw_paths()` bằng module m
 Đổi một dòng điều kiện rồi chạy `flow.run()` không cập nhật được các source đã
 đánh dấu COMPLETE. Notebook mới tự gọi bước sửa sau khi hoàn tất inventory.
 
-Bước sửa chỉ đọc bản ghi crawl thành công từ metadata đã lưu trên Drive. Nó dùng
+Mặc định bước sửa chỉ đọc bản ghi crawl thành công từ metadata đã lưu trên Drive. Nó dùng
 cache thu gom và các receipt metadata của intake/processed cũ, chọn file bằng
 SHA256 khớp nguồn gốc rồi kiểm checksum khi dùng. Không mở TAR, gọi crawl, encode,
 rebuild catalog hay sửa active submission candidate. Nếu thiếu metadata đã lưu,
 báo `SAVED_METADATA_MISSING`, không tự tải lại archive.
+
+Nếu báo thiếu metadata, có thể truyền `reader` đã xác thực:
+`flow.repair_raw_paths(reader=reader)`. Chỉ các file còn thiếu của các leaf chưa
+sửa mới được đọc từ byte range gốc đã lưu. Archive phải khớp ID, kích thước,
+modifiedTime và MD5; payload phải khớp SHA256 cũ, rồi mới được lưu trên Drive.
+Không quét header TAR, đọc raw HTML hay tải cả archive. Một metadata member
+đã lưu sẽ được dùng lại dù member tiếp theo bị lỗi hoặc đổi runtime. Báo cáo
+ghi `tar_accessed` và `metadata_range_reads` đúng theo các range đã thử đọc.
+Notebook mới dùng chế độ này để không bỏ dở chỉ vì một bản metadata chưa cache.
 
 Mỗi leaf được sửa có receipt SQL và part recovery riêng theo policy
 `native-data-raw-and-portable-raw-v2`; không ghi đè part hay receipt cũ. Hash của
