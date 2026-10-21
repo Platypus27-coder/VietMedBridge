@@ -5,6 +5,8 @@ snapshot/hash provenance is preserved; current BTC membership is a separate join
 This collects extraction candidates, not silently promoted chunks or embeddings.
 """
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import gzip
 import hashlib
@@ -19,14 +21,97 @@ import time
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import requests
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 from vietmedbridge.artifacts import atomic_json, digest_json, publish_file, read_json, sha256_file, verify_file, utc_now
 from vietmedbridge.content_embeddings import checked, seal
 from vietmedbridge.external_import import _hold, MEMBERS
-from vietmedbridge.isolated_intake import Window
+from vietmedbridge.isolated_intake import Window, DriveRange, DriveSource
 
 FOLDER = '1P2ke-yIDwj443R_GMegaiH9RACf-Gzth'
 OFFICIAL_SHA = '87e44a792d7a99fb0fde5dff7f09f1a38a0a1fdf02ddd1ac93a005736e00b0a7'
 CAMPAIGN = 'btc-all-ai-guru-71be0e12-v1'
+
+
+class CollectionDriveError(RuntimeError):
+    def __init__(self, status, reasons, file_id, byte_range, *, cooldown=0, pause=False):
+        self.details = {'http_status':status, 'reasons':list(reasons), 'file_id':file_id,
+                        'byte_range':byte_range, 'cooldown_seconds':cooldown, 'pause_campaign':pause}
+        super().__init__(f'Drive HTTP {status} | reason={",".join(reasons) or "UNKNOWN"} | '
+            f'file={file_id} | Range={byte_range} | cooldown={cooldown:g}s | checkpoint retained')
+
+
+def drive_reasons(response):
+    # Error bodies only, bounded; never print tokens, headers or private bodies.
+    try:
+        body=json.loads(response.raw.read(65536))
+        error=body.get('error',{}) if isinstance(body,dict) else {}
+        if not isinstance(error,dict):
+            return ()
+        entries=[*(error.get('errors') or []),*(error.get('details') or [])]
+        return tuple(sorted({r['reason'] for r in entries if isinstance(r,dict)
+            and isinstance(r.get('reason'),str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,99}',r['reason'])}))
+    except (ValueError,TypeError,AttributeError):
+        return ()
+
+
+def drive_delay(response, fallback):
+    value=response.headers.get('Retry-After','').strip()
+    if value.isdigit():
+        return max(fallback,int(value))
+    if value:
+        try:
+            until=parsedate_to_datetime(value)
+            if until.tzinfo is None:
+                until=until.replace(tzinfo=timezone.utc)
+            return max(fallback,(until-datetime.now(timezone.utc)).total_seconds())
+        except (ValueError,TypeError,OverflowError):
+            pass
+    return fallback
+
+
+class CollectionDriveRange(DriveRange):
+    """Retry the identical Range only for explicit transient provider failures."""
+    def _get_block(self,start):
+        end=min(self.size,start+self.block_size)-1
+        requested=f'bytes={start}-{end}'
+        rate_reasons={'rateLimitExceeded','userRateLimitExceeded'}
+        for attempt in range(4):
+            delay=2**attempt
+            try:
+                with self.session.get(self.url,params={'alt':'media','supportsAllDrives':'true'},
+                        headers={'Range':requested,'Accept-Encoding':'identity'},stream=True,timeout=(15,90)) as response:
+                    status=response.status_code
+                    if status>=400:
+                        reasons=drive_reasons(response)
+                        retryable=status in (429,500,502,503,504) or (status==403 and bool(reasons)
+                            and set(reasons)<=rate_reasons)
+                        delay=drive_delay(response,delay)
+                        print('DRIVE_RANGE_ERROR:',status,'| reason='+(','.join(reasons) or 'UNKNOWN'),
+                              '|',self.file_id,'|',requested,flush=True)
+                        if not retryable or attempt==3 or delay>60:
+                            pause=status==429 or (bool(reasons) and set(reasons)<=rate_reasons|{'dailyLimitExceeded'})
+                            raise CollectionDriveError(status,reasons,self.file_id,requested,cooldown=delay,pause=pause)
+                    else:
+                        expected=f'bytes {start}-{end}/{self.size}'
+                        if status!=206 or response.headers.get('Content-Range')!=expected:
+                            raise ValueError('Drive did not honor the bounded Range request; no full TAR consumed.')
+                        payload=response.raw.read(end-start+2)
+                        if len(payload)!=end-start+1:
+                            raise EOFError('Incomplete Drive range; unpublished block retained for retry.')
+                        self.block_start,self.block=start,payload
+                        return
+            except (requests.ConnectionError,requests.Timeout,requests.exceptions.ChunkedEncodingError,
+                    ProtocolError,ReadTimeoutError,EOFError):
+                if attempt==3:
+                    raise
+            print(f'DRIVE_RANGE_RETRY {attempt+1}/3 | same {requested} | wait {delay:g}s',flush=True)
+            time.sleep(delay)
+
+
+class CollectionDriveSource(DriveSource):
+    def open(self,file_id,metadata):
+        return CollectionDriveRange(self.session,file_id,metadata)
 
 
 def fetch_url(value):
@@ -165,6 +250,36 @@ def stage_member(stream, item, target):
     return digest.hexdigest()
 
 
+def cached_member(stream,item,target,cache_dir):
+    """Keep completed metadata members on Drive even if a later request fails.
+
+    An in-flight Range retries in place. An incomplete member without a receipt
+    may restart after a hard failure; complete members never reopen the TAR.
+    """
+    cache_dir=Path(cache_dir)
+    receipt=cache_dir/'receipt.json'
+    payload=cache_dir/'metadata.bin'
+    binding=digest_json(item)
+    if receipt.is_file():
+        saved=checked(read_json(receipt))
+        if saved['binding']!=binding or saved['bytes']!=item['bytes']:
+            raise ValueError('Metadata member cache belongs to another source version.')
+        shutil.copyfile(payload,target)
+        verify_file(target,saved['sha256'])
+        if Path(target).stat().st_size!=item['bytes']:
+            raise ValueError('Cached metadata member length differs from its TAR header.')
+        if item.get('sha256') and saved['sha256']!=item['sha256']:
+            raise ValueError('Cached metadata differs from source TAR checksum.')
+        print('REUSED_METADATA_FROM_DRIVE:',item['path'],'| no TAR payload read',flush=True)
+        return saved['sha256']
+    checksum=stage_member(stream,item,target)
+    if publish_file(target,payload)!=checksum:
+        raise ValueError('Metadata cache publication checksum mismatch.')
+    atomic_json(receipt,seal({'binding':binding,'bytes':item['bytes'],'sha256':checksum}))
+    print('METADATA_CHECKPOINT_SAVED_ON_DRIVE:',item['path'],flush=True)
+    return checksum
+
+
 class CollectAll:
     def __init__(self, project, work, *, official_sha=OFFICIAL_SHA):
         self.project, self.work = Path(project).resolve(), Path(work).resolve()
@@ -274,7 +389,9 @@ class CollectAll:
                 if leaf['format'] == 'retained' and kind == 'mapping':
                     continue
                 print('READ_METADATA', kind, '|', round(item['bytes']/1024**2, 1), 'MiB', flush=True)
-                staged_checksums[kind]=stage_member(stream,item,local/(kind+'.'+('json' if kind == 'dataset' else 'parquet')))
+                staged_checksums[kind]=cached_member(stream,item,
+                    local/(kind+'.'+('json' if kind == 'dataset' else 'parquet')),
+                    self.root/'metadata_cache'/identifier/kind)
             descriptor = read_json(local/'dataset.json')
             con = duckdb.connect()
             con.execute("SET memory_limit='1GB'")
@@ -426,8 +543,17 @@ class CollectAll:
                 self.commit(archive_id,'archive',{'remote':identity(remote),'leaves':len(leaves)})
             except Exception as error:
                 self.con.rollback()
-                errors.append({'file':remote['name'],'id':remote['id'],'error':str(error)[:500]})
+                record={'file':remote['name'],'id':remote['id'],'error':str(error)[:500]}
+                if isinstance(error,CollectionDriveError):
+                    record['drive_error']=error.details
+                errors.append(record)
                 print('ARCHIVE_NEEDS_INSPECTION:',remote['name'],type(error).__name__,str(error)[:200],flush=True)
+                if isinstance(error,CollectionDriveError) and error.details['pause_campaign']:
+                    print('DRIVE_COOLDOWN: campaign paused; remaining archives not requested. Resume same checkpoint later.',flush=True)
+                    errors.extend({'file':r['name'],'id':r['id'],
+                        'error':'NOT_ATTEMPTED_DRIVE_COOLDOWN','blocked_by':remote['id']}
+                        for r in files[index:] if not self.saved('archive:'+digest_json(identity(r))))
+                    break
         return self.report(files,errors)
 
     def close(self):

@@ -19,6 +19,21 @@ cập nhật và Run all trên CPU, giữ nguyên output folder. Mapping và arc
 commit được dùng lại; chỉ archive lỗi cần thử tiếp. Không xóa checkpoint. Cell 2
 reload bộ đọc mới ngay trong runtime cũ, không cần restart để thay code Python.
 
+Nếu Drive trả 403, bộ đọc ghi `reason`, file ID và byte range vào log/báo cáo.
+Chỉ 403 với reason `rateLimitExceeded`/`userRateLimitExceeded` được tự thử lại;
+429 và lỗi server tạm thời cũng thử lại có giới hạn, giữ nguyên cùng byte range.
+Quyền truy cập, quota tải, daily quota và 403 không rõ nguyên nhân không bị retry
+mù. `Retry-After` được tôn trọng; cooldown dài hoặc rate limit hết lượt retry
+dừng campaign, ghi các archive chưa thử để không tiếp tục dồn request lên Drive.
+Không đổi tài khoản, URL hoặc quyền để vượt giới hạn của nhà cung cấp.
+
+Mỗi file metadata tải xong có payload và receipt riêng dưới `metadata_cache/`
+trên Drive, trước khi bắt đầu SQL. Lỗi ở file tiếp theo không làm mất metadata
+đã tải xong. Phiên khác đọc lại payload đã lưu thay vì mở payload trong TAR.
+Một byte range lỗi tạm thời được retry tại chỗ; member chưa hoàn tất sau lỗi
+cứng chưa có receipt nên có thể tải lại member đó khi tiếp tục. Không chứng
+nhận archive hoàn tất chỉ vì đã có vài member metadata.
+
 Trước hết dùng lại alias mapping của baseline và 10 build đã freeze. Những mapping
 này trỏ đến nội dung đã xử lý, không mở lại corpus/text/vector. So khớp với URL BTC
 hiện tại bằng đúng quy tắc trim + bỏ fragment đang dùng trong importer; không đổi

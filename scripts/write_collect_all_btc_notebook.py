@@ -58,7 +58,7 @@ def notebook():
         from google.auth.transport.requests import AuthorizedSession
         credentials,_=google.auth.default()
         session=AuthorizedSession(credentials)
-        reader=DriveSource(session)
+        reader=collector.CollectionDriveSource(session)
         flow=collector.CollectAll(PROJECT,WORK)
         scope=read_json(PROJECT/parent/'full_intake_scope.json')
         # Only membership/mapping files are read; no old document text, vectors, or index.
@@ -128,6 +128,10 @@ def notebook():
         Nếu bản trước báo 26 archive lỗi, mở bản này và Run all trên CPU; mapping
         và archive đã commit được bỏ qua, chỉ các archive lỗi được thử tiếp.
         Không xóa folder checkpoint và không chạy đồng thời hai phiên.
+
+        Bộ đọc in `reason` và byte range khi Drive trả 403. Chỉ retry lỗi tốc độ
+        tạm thời; quyền truy cập/quota tải/403 không rõ nguyên nhân được báo riêng.
+        Metadata đã tải xong được checkpoint trên Drive dù file tiếp theo lỗi.
 
         Đầu ra `data_staging/btc-all-ai-guru-71be0e12-v1`:
         `collection_report.json`, `btc_membership.csv`, `missing_or_unusable.csv`,
