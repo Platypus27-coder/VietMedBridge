@@ -75,7 +75,13 @@ def identity(remote):
 
 @contextmanager
 def metadata_leaves(reader, remote, retained, work):
-    """Yield flat/nested metadata bundles; no source is skipped by its filename."""
+    """Read native leaf metadata, or enumerate every child TAR of a container.
+
+    A native source's four manifests are its authoritative URL inventory. Its
+    raw members are payloads, not additional sources, and must not be enumerated
+    after the manifests are complete. Containers have no native manifests; walk
+    their complete member list so later resume TARs are still discovered.
+    """
     with reader.open(remote['id'], identity(remote)) as stream:
         if hasattr(stream, 'block_size'):
             stream.block_size = 65536
@@ -84,10 +90,13 @@ def metadata_leaves(reader, remote, retained, work):
             if depth > 3:
                 raise ValueError('Nested archive depth exceeds the bounded scanner.')
             found, nested = {}, []
+            headers, logged = 0, time.monotonic()
             with tarfile.open(fileobj=Window(stream, start, size), mode='r:') as archive:
-                for index, member in enumerate(archive):
-                    if index >= 128:
-                        raise ValueError('Metadata not found within 128 TAR headers; archive remains unaudited.')
+                for member in archive:
+                    headers += 1
+                    if time.monotonic()-logged >= 15:
+                        print('ARCHIVE_HEADER_PROGRESS:',name,'|',headers,'headers | metadata',len(found),'/4',flush=True)
+                        logged = time.monotonic()
                     if not member.isfile():
                         continue
                     label = ('dataset' if member.name == MEMBERS['dataset'] else
@@ -95,14 +104,20 @@ def metadata_leaves(reader, remote, retained, work):
                              'extracted' if member.name == MEMBERS['extracted'] else
                              'frontier' if re.fullmatch(r'data/crawl_shards/shard_[0-9]+[.]parquet', member.name) else None)
                     if label:
+                        if nested:
+                            raise ValueError('Mixed native/container layout; do not choose an arbitrary source.')
                         if label in found or not 0 < member.size <= 2*1024**3:
                             raise ValueError('Duplicate/oversize metadata member; no arbitrary version selected.')
                         found[label] = {'path': member.name, 'offset': start+member.offset_data,
                                         'bytes': member.size, 'sha256': member.pax_headers.get('vibiomir.sha256')}
+                        if len(found) == 4:
+                            print('NATIVE_METADATA_READY:',name,'|',headers,
+                                  'headers | 4/4 manifests; raw member listing skipped',flush=True)
+                            break
                     elif member.name.endswith('.tar') and not member.name.startswith('raw/'):
+                        if found:
+                            raise ValueError('Mixed native/container layout; source requires inspection.')
                         nested.append((start+member.offset_data, member.size, name+'!'+member.name))
-                else:
-                    pass
             if found:
                 if set(found) != {'dataset','crawl','extracted','frontier'}:
                     raise ValueError('Incomplete leaf metadata; preserve this archive for inspection.')

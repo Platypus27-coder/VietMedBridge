@@ -8,6 +8,17 @@ archive `.tar` trong AI Guru, gồm thư mục con và shortcut, mọi phiên b�
 TAR lồng nhau và package retained. Không suy ra archive trùng chỉ từ số shard,
 frontier hoặc thời gian. Mỗi leaf giữ Drive file identity và offset thành viên.
 
+Native leaf dùng đủ bốn manifest dataset/frontier/crawl/extracted làm danh mục
+URL của nguồn; đọc đủ thì dừng duyệt header, không liệt kê hàng trăm nghìn member
+raw phía sau. TAR container được duyệt hết danh sách để tìm mọi TAR con, gồm bản
+resume nằm cuối. Không còn giới hạn 128 header. Layout trộn metadata native và
+TAR con trong cùng một nguồn không thuộc contract này và cần kiểm tra riêng.
+
+Nếu bản cũ báo lỗi `Metadata not found within 128 TAR headers`, mở notebook đã
+cập nhật và Run all trên CPU, giữ nguyên output folder. Mapping và archive đã
+commit được dùng lại; chỉ archive lỗi cần thử tiếp. Không xóa checkpoint. Cell 2
+reload bộ đọc mới ngay trong runtime cũ, không cần restart để thay code Python.
+
 Trước hết dùng lại alias mapping của baseline và 10 build đã freeze. Những mapping
 này trỏ đến nội dung đã xử lý, không mở lại corpus/text/vector. So khớp với URL BTC
 hiện tại bằng đúng quy tắc trim + bỏ fragment đang dùng trong importer; không đổi

@@ -49,6 +49,9 @@ def notebook():
     prepare += dedent('''
         (WORK/'collect_all_btc_sources.py').write_text(SOURCE,encoding='utf-8')
         import collect_all_btc_sources as collector
+        # Re-uploading a repaired notebook must replace the old imported reader
+        # even when the user retains the same Colab runtime and Drive checkpoint.
+        collector=importlib.reload(collector)
         from vietmedbridge.isolated_intake import DriveSource,fetch_reference
         from vietmedbridge.artifacts import read_json,verify_file,digest_json
         import google.auth
@@ -119,6 +122,12 @@ def notebook():
         Checkpoint sau mỗi leaf/archive gồm một SQL snapshot nén trên Drive. Đổi VM
         phục hồi một snapshot; archive/mapping đã commit không mở lại. Một leaf ngắt
         giữa chừng có thể đọc lại leaf đó. Không tự xóa checkpoint hoặc archive gốc.
+
+        **Đã sửa lỗi giới hạn 128 header:** native leaf đọc đủ bốn manifest thì
+        dừng liệt kê raw. Container vẫn duyệt hết mọi TAR con, gồm resume ở cuối.
+        Nếu bản trước báo 26 archive lỗi, mở bản này và Run all trên CPU; mapping
+        và archive đã commit được bỏ qua, chỉ các archive lỗi được thử tiếp.
+        Không xóa folder checkpoint và không chạy đồng thời hai phiên.
 
         Đầu ra `data_staging/btc-all-ai-guru-71be0e12-v1`:
         `collection_report.json`, `btc_membership.csv`, `missing_or_unusable.csv`,

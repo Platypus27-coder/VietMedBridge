@@ -14,6 +14,7 @@ import pytest
 from scripts.collect_all_btc_sources import CollectAll,metadata_leaves,identity
 from vietmedbridge.artifacts import atomic_json,read_json,sha256_file
 from vietmedbridge.external_import import MEMBERS
+from vietmedbridge.isolated_intake import DriveRange
 from test_external_import import external,write_parquet
 from test_isolated_intake import LocalReader,make_tar
 
@@ -172,3 +173,104 @@ def test_source_change_mid_read_cannot_commit_candidates(tmp_path,external):
     assert flow.con.execute('SELECT count(*) FROM content WHERE candidate IS NOT NULL').fetchone()[0]==0
     assert flow.con.execute("SELECT count(*) FROM completed WHERE kind='leaf'").fetchone()[0]==0
     flow.close()
+
+
+def test_native_metadata_prefix_does_not_list_hundreds_of_raw_members(tmp_path,external):
+    source=archive(tmp_path,external,'native-with-raw')
+    target=tmp_path/'native-many-raw.tar'
+    with tarfile.open(source,'r:') as original,tarfile.open(target,'w') as out:
+        for member in original:
+            out.addfile(member,original.extractfile(member))
+        first_raw=out.offset
+        for index in range(300):
+            member=tarfile.TarInfo(f'raw/{index:06}.zst');member.size=4096
+            out.addfile(member,io.BytesIO(b'x'*member.size))
+    class Guarded(io.BytesIO):
+        def read(self,size=-1):
+            assert self.tell()<first_raw,'Native manifest discovery must not enumerate raw headers'
+            return super().read(size)
+    reader=LocalReader({'raw':target})
+    reader.open=lambda *a:Guarded(target.read_bytes())
+    with metadata_leaves(reader,reader.metadata('raw'),{'drive_file_id':'unused'},tmp_path) as (_,leaves):
+        assert len(leaves)==1 and set(leaves[0]['members'])==set(MEMBERS)
+
+
+def test_metadata_after_128_headers_and_later_resume_children_are_not_omitted(tmp_path,external):
+    first=archive(tmp_path,external,'first')
+    second=archive(tmp_path,external,'second')
+    leaf=tmp_path/'late-metadata.tar'
+    with tarfile.open(first,'r:') as source,tarfile.open(leaf,'w') as out:
+        for index in range(140):
+            out.addfile(tarfile.TarInfo(f'notes/{index:05}.txt'),io.BytesIO())
+        for member in source:
+            out.addfile(member,source.extractfile(member))
+    outer=tmp_path/'many-header-container.tar'
+    with tarfile.open(outer,'w') as out:
+        out.add(leaf,arcname='resume-first.tar')
+        for index in range(140):
+            out.addfile(tarfile.TarInfo(f'notes/{index:05}.txt'),io.BytesIO())
+        out.add(second,arcname='resume-later.tar')
+    reader=LocalReader({'container':outer})
+    with metadata_leaves(reader,reader.metadata('container'),{'drive_file_id':'unused'},tmp_path) as (_,leaves):
+        assert [r['name'].split('!')[-1] for r in leaves]==['resume-first.tar','resume-later.tar']
+
+
+def test_range_transport_skips_native_raw_tail_and_handles_all_container_children(tmp_path,external):
+    import hashlib
+    leaf=archive(tmp_path,external,'range-leaf')
+    outer=tmp_path/'range-container.tar'
+    with tarfile.open(outer,'w') as out:
+        out.add(leaf,arcname='first.tar')
+        out.add(leaf,arcname='second.tar')
+    payload=outer.read_bytes()
+    ranges=[]
+    class Response:
+        status_code=206
+        def __init__(self,start,end):
+            self.raw=io.BytesIO(payload[start:end+1])
+            self.headers={'Content-Range':f'bytes {start}-{end}/{len(payload)}'}
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def raise_for_status(self):pass
+    class Session:
+        def get(self,url,**kw):
+            start,end=map(int,kw['headers']['Range'].split('=')[1].split('-'))
+            ranges.append((start,end))
+            return Response(start,end)
+    remote={'id':'range','name':outer.name,'size':str(len(payload)),
+        'modifiedTime':'fixed','md5Checksum':hashlib.md5(payload).hexdigest()}
+    class Reader:
+        def open(self,*a):return DriveRange(Session(),'range',remote)
+    with metadata_leaves(Reader(),remote,{'drive_file_id':'unused'},tmp_path) as (stream,leaves):
+        assert len(leaves)==2
+        for leaf in leaves:
+            for item in leaf['members'].values():
+                stream.seek(item['offset'])
+                assert len(stream.read(item['bytes']))==item['bytes']
+    assert ranges and max(end-start+1 for start,end in ranges)<=65536
+
+
+def test_failed_archive_retry_keeps_committed_sql_and_skips_finished_sources(tmp_path,external):
+    flow,links=fixture(tmp_path,external)
+    good=archive(tmp_path,external,'committed')
+    retry=archive(tmp_path,external,'retry',nested=True)
+    reader=LocalReader({'good':good,'retry':retry})
+    remotes=[reader.metadata(k) for k in ('good','retry')]
+    real_open=reader.open
+    def fail_retry(file_id,*a):
+        if file_id=='retry':raise ValueError('Previous reader stopped at 128 headers')
+        return real_open(file_id,*a)
+    reader.open=fail_retry
+    report=flow.run(reader,remotes,{'drive_file_id':'unused'})
+    assert len(report['archive_errors'])==1
+    project=flow.project
+    flow.close()
+    resumed=CollectAll(project,tmp_path/'new-runtime',official_sha=sha256_file(links))
+    def resume_open(file_id,*a):
+        assert file_id!='good','Completed source must remain receipt-only'
+        return real_open(file_id,*a)
+    reader.open=resume_open
+    report=resumed.run(reader,remotes,{'drive_file_id':'unused'})
+    assert report['archive_errors']==[] and report['state']=='ALL_FOLDER_SOURCES_COLLECTED'
+    assert resumed.con.execute("SELECT count(*) FROM completed WHERE kind='archive'").fetchone()[0]==2
+    resumed.close()
