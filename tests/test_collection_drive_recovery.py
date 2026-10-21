@@ -47,7 +47,8 @@ def success():
     return Reply(206,headers={'Content-Range':'bytes 3-6/10'},payload=b'defg')
 
 
-@pytest.mark.parametrize('reason',['rateLimitExceeded','userRateLimitExceeded'])
+@pytest.mark.parametrize('reason',['rateLimitExceeded','userRateLimitExceeded',
+    'RATE_LIMIT_EXCEEDED','USER_RATE_LIMIT_EXCEEDED'])
 def test_rate_403_retries_identical_range_without_restarting_download(monkeypatch,capsys,reason):
     denied=Reply(403,[reason])
     reader,calls,sleeps=range_client(monkeypatch,[denied,success()])
@@ -59,8 +60,37 @@ def test_rate_403_retries_identical_range_without_restarting_download(monkeypatc
     assert reason in logged and 'PRIVATE_BODY' not in logged
 
 
+def test_mixed_legacy_and_google_rpc_reason_retries_as_rate_limit(monkeypatch):
+    denied=Reply(403,payload=json.dumps({'error':{
+        'errors':[{'reason':'rateLimitExceeded'}],
+        'details':[{'@type':'type.googleapis.com/google.rpc.ErrorInfo','reason':'RATE_LIMIT_EXCEEDED'}]
+    }}).encode())
+    reader,calls,sleeps=range_client(monkeypatch,[denied,success()])
+    assert reader.read(4)==b'defg' and calls[0]==calls[1] and sleeps==[1]
+
+
+def test_small_alias_cell_is_repeatable_and_never_normalizes_permission_codes():
+    import ast
+    from types import ModuleType
+    source=Path('scripts/resume_collection_rate_alias_cell.py').read_text(encoding='utf-8')
+    compile(source,'resume_collection_rate_alias_cell.py','exec')
+    tree=ast.parse(source)
+    definition=next(n for n in tree.body if isinstance(n,ast.FunctionDef))
+    legacy=ModuleType('old_collection')
+    legacy.drive_reasons=collect.drive_reasons
+    namespace={'collector':legacy}
+    for _ in range(2):
+        exec(compile(ast.Module(body=[definition],type_ignores=[]),'small_alias_cell.py','exec'),namespace)
+        legacy.drive_reasons=namespace['_collection_reason_aliases']
+    assert legacy.drive_reasons(Reply(403,['RATE_LIMIT_EXCEEDED','rateLimitExceeded']))==('rateLimitExceeded',)
+    assert legacy.drive_reasons(Reply(403,['USER_RATE_LIMIT_EXCEEDED']))==('userRateLimitExceeded',)
+    assert legacy.drive_reasons(Reply(403,['RATE_LIMIT_EXCEEDED','insufficientFilePermissions']))==(
+        'insufficientFilePermissions','rateLimitExceeded')
+
+
 @pytest.mark.parametrize('reasons',[[],['insufficientFilePermissions'],['downloadQuotaExceeded'],
-    ['dailyLimitExceeded'],['appNotAuthorizedToFile'],['rateLimitExceeded','insufficientFilePermissions']])
+    ['dailyLimitExceeded'],['appNotAuthorizedToFile'],['rateLimitExceeded','insufficientFilePermissions'],
+    ['RATE_LIMIT_EXCEEDED','insufficientFilePermissions']])
 def test_unknown_permission_and_download_quota_do_not_retry(monkeypatch,reasons):
     denied=Reply(403,reasons)
     reader,calls,sleeps=range_client(monkeypatch,[denied])
@@ -73,11 +103,13 @@ def test_unknown_permission_and_download_quota_do_not_retry(monkeypatch,reasons)
     assert 'reason=' in str(caught.value)
 
 
-def test_retry_after_and_exhaustion_are_bounded(monkeypatch):
+@pytest.mark.parametrize('reasons',[['rateLimitExceeded'],['RATE_LIMIT_EXCEEDED'],
+    ['RATE_LIMIT_EXCEEDED','rateLimitExceeded']])
+def test_retry_after_and_exhaustion_are_bounded(monkeypatch,reasons):
     reader,calls,sleeps=range_client(monkeypatch,[
         Reply(403,['userRateLimitExceeded'],headers={'Retry-After':'9'}),success()])
     assert reader.read(4)==b'defg' and sleeps==[9]
-    reader,calls,sleeps=range_client(monkeypatch,[Reply(403,['rateLimitExceeded']) for _ in range(4)])
+    reader,calls,sleeps=range_client(monkeypatch,[Reply(403,reasons) for _ in range(4)])
     with pytest.raises(CollectionDriveError) as caught:
         reader.read(4)
     assert sleeps==[1,2,4] and len(calls)==4 and caught.value.details['pause_campaign']

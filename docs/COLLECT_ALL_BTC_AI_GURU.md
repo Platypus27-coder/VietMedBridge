@@ -21,6 +21,8 @@ reload bộ đọc mới ngay trong runtime cũ, không cần restart để thay
 
 Nếu Drive trả 403, bộ đọc ghi `reason`, file ID và byte range vào log/báo cáo.
 Chỉ 403 với reason `rateLimitExceeded`/`userRateLimitExceeded` được tự thử lại;
+nhận cả `RATE_LIMIT_EXCEEDED`/`USER_RATE_LIMIT_EXCEEDED` trong google.rpc.ErrorInfo.
+Google có thể gửi đồng thời tên camelCase và viết hoa trong cùng một lỗi.
 429 và lỗi server tạm thời cũng thử lại có giới hạn, giữ nguyên cùng byte range.
 Quyền truy cập, quota tải, daily quota và 403 không rõ nguyên nhân không bị retry
 mù. `Retry-After` được tôn trọng; cooldown dài hoặc rate limit hết lượt retry

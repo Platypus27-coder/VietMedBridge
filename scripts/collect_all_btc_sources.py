@@ -75,7 +75,10 @@ class CollectionDriveRange(DriveRange):
     def _get_block(self,start):
         end=min(self.size,start+self.block_size)-1
         requested=f'bytes={start}-{end}'
-        rate_reasons={'rateLimitExceeded','userRateLimitExceeded'}
+        # Google may send legacy error.errors and google.rpc.ErrorInfo together.
+        # Both spellings must be recognized; permission/quota codes stay denied.
+        rate_reasons={'rateLimitExceeded','userRateLimitExceeded',
+                      'RATE_LIMIT_EXCEEDED','USER_RATE_LIMIT_EXCEEDED'}
         for attempt in range(4):
             delay=2**attempt
             try:
