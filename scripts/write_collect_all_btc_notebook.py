@@ -95,6 +95,9 @@ def notebook():
         print('Đọc mọi bản resume; không bỏ archive theo số shard/ngày hoặc snapshot cũ.',flush=True)
         try:
             REPORT=flow.run(reader,files,RETAINED)
+            if not REPORT['archive_errors'] and REPORT['raw_path_classification']['pending_leaves']:
+                print('Cập nhật bộ lọc raw cũ từ metadata đã lưu; không mở lại TAR.',flush=True)
+                REPORT=flow.repair_raw_paths()
             print(json.dumps(REPORT,ensure_ascii=False,indent=2),flush=True)
             print('Kết quả:',flow.root,flush=True)
             print('btc_membership.csv: mỗi ID BTC có trạng thái và provenance.',flush=True)
@@ -102,6 +105,9 @@ def notebook():
             print('parts/: nội dung khôi phục từ archive; cần đi qua chunk/freeze chuẩn trước embedding.',flush=True)
             if REPORT['archive_errors']:
                 raise RuntimeError('Có archive chưa đọc được; không kết luận đủ BTC. Các source đã hoàn tất vẫn có checkpoint.')
+            if REPORT['counts_provisional']:
+                details=REPORT.get('raw_path_repair') or {}
+                raise RuntimeError('Phân loại raw chưa cập nhật xong: '+json.dumps(details.get('errors',[]),ensure_ascii=False))
         finally:
             flow.close()
     ''').strip()
@@ -132,6 +138,13 @@ def notebook():
         Bộ đọc in `reason` và byte range khi Drive trả 403. Chỉ retry lỗi tốc độ
         tạm thời; quyền truy cập/quota tải/403 không rõ nguyên nhân được báo riêng.
         Metadata đã tải xong được checkpoint trên Drive dù file tiếp theo lỗi.
+
+        Native metadata chấp nhận `data/raw/...` và `raw/...`; retained portable
+        giữ contract `raw/...`. Checkpoint của bộ lọc cũ được sửa một lần từ
+        metadata đã lưu (gồm metadata của các lượt import trước); không mở TAR,
+        không encode lại. File metadata thiếu được báo riêng, không tự tải lại.
+        Bản ghi SUCCESS_RAW có hash/path/snapshot sai được xếp RAW_METADATA_REVIEW,
+        không gọi nhầm là lỗi crawl. Xem `counts_provisional` trước khi chốt số liệu.
 
         Đầu ra `data_staging/btc-all-ai-guru-71be0e12-v1`:
         `collection_report.json`, `btc_membership.csv`, `missing_or_unusable.csv`,

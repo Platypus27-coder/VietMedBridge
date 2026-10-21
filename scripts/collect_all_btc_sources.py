@@ -7,7 +7,7 @@ This collects extraction candidates, not silently promoted chunks or embeddings.
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import gzip
 import hashlib
 import json
@@ -31,6 +31,29 @@ from vietmedbridge.isolated_intake import Window, DriveRange, DriveSource
 FOLDER = '1P2ke-yIDwj443R_GMegaiH9RACf-Gzth'
 OFFICIAL_SHA = '87e44a792d7a99fb0fde5dff7f09f1a38a0a1fdf02ddd1ac93a005736e00b0a7'
 CAMPAIGN = 'btc-all-ai-guru-71be0e12-v1'
+RAW_PATH_POLICY = 'native-data-raw-and-portable-raw-v2'
+
+
+def raw_record_problem(row, leaf_format, descriptor):
+    """Validate provenance without confusing a path/schema problem with HTTP failure."""
+    if row['status'] != 'SUCCESS_RAW':
+        return row['status'] or 'MISSING_CRAWL_RESULT'
+    if not isinstance(row['raw_sha256'],str) or not re.fullmatch('[0-9a-f]{64}',row['raw_sha256']):
+        return 'RAW_RECORD_INVALID_SHA256'
+    path=row['raw_path']
+    prefixes=('raw/','data/raw/') if leaf_format=='native' else ('raw/',)
+    if (not isinstance(path,str) or not path.startswith(prefixes) or path.endswith('/') or '\\' in path or '\x00' in path
+            or PurePosixPath(path).is_absolute() or '..' in path.split('/')):
+        return 'RAW_RECORD_INVALID_LOCATOR'
+    if not row['crawl_snapshot']:
+        return 'RAW_RECORD_MISSING_SNAPSHOT'
+    if leaf_format=='native' and row['crawl_snapshot'] != descriptor.get('snapshot_id'):
+        return 'ARCHIVE_SNAPSHOT_BINDING_MISMATCH'
+    return None
+
+
+def repair_leaf_id(base_id):
+    return digest_json({'original_leaf':base_id,'raw_path_policy':RAW_PATH_POLICY})
 
 
 class CollectionDriveError(RuntimeError):
@@ -319,6 +342,10 @@ class CollectAll:
                 existing TEXT,candidate TEXT,reason TEXT);
             CREATE TABLE IF NOT EXISTS completed(id TEXT PRIMARY KEY,kind TEXT,receipt TEXT);
         ''')
+        columns={r[1] for r in self.con.execute('PRAGMA table_info(content)')}
+        if 'raw_status' not in columns:
+            self.con.execute('ALTER TABLE content ADD COLUMN raw_status INTEGER DEFAULT 0')
+            self.con.execute('UPDATE content SET raw_status=raw')
         self.con.commit()
 
     def saved(self, identifier):
@@ -379,8 +406,9 @@ class CollectAll:
             self.con.rollback()
             raise
 
-    def leaf(self, stream, remote, leaf, *, version_check=None):
-        identifier = digest_json({'remote': identity(remote), 'leaf': leaf})
+    def leaf(self, stream, remote, leaf, *, version_check=None, repair=False, metadata_paths=None):
+        base_id = digest_json({'remote': identity(remote), 'leaf': leaf})
+        identifier = repair_leaf_id(base_id) if repair else base_id
         if self.saved(identifier):
             print('SKIP_COMPLETED_ARCHIVE_LEAF:', leaf['name'], '| receipt only', flush=True)
             return
@@ -392,9 +420,18 @@ class CollectAll:
                 if leaf['format'] == 'retained' and kind == 'mapping':
                     continue
                 print('READ_METADATA', kind, '|', round(item['bytes']/1024**2, 1), 'MiB', flush=True)
-                staged_checksums[kind]=cached_member(stream,item,
-                    local/(kind+'.'+('json' if kind == 'dataset' else 'parquet')),
-                    self.root/'metadata_cache'/identifier/kind)
+                destination=local/(kind+'.'+('json' if kind == 'dataset' else 'parquet'))
+                if metadata_paths is not None:
+                    reference,checksum=metadata_paths[kind]
+                    shutil.copyfile(reference,destination)
+                    verify_file(destination,checksum)
+                    if destination.stat().st_size!=item['bytes']:
+                        raise ValueError('Saved metadata length differs from its source receipt.')
+                    staged_checksums[kind]=checksum
+                    print('REPAIR_METADATA_FROM_DRIVE:',kind,'| no TAR access',flush=True)
+                else:
+                    staged_checksums[kind]=cached_member(stream,item,destination,
+                        self.root/'metadata_cache'/base_id/kind)
             descriptor = read_json(local/'dataset.json')
             con = duckdb.connect()
             con.execute("SET memory_limit='1GB'")
@@ -413,6 +450,10 @@ class CollectAll:
                         e.raw_sha256 AS extract_raw_sha,e.extract_status,e.text,e.title,e.char_count,
                         to_json(c) AS crawl_json,to_json(e) AS extracted_json
                         FROM frontier f LEFT JOIN crawl c USING(crawl_url_id) LEFT JOIN extracted e USING(crawl_url_id)'''
+                    if repair:
+                        # Previously failed HTTP records are already in the SQL checkpoint.
+                        # Only successful raw records can be affected by the locator bug.
+                        query += " WHERE c.status='SUCCESS_RAW'"
                 else:
                     con.read_parquet(str(local/'raw_catalog.parquet')).create_view('raw')
                     con.read_parquet(str(local/'documents.parquet')).create_view('docs')
@@ -435,23 +476,21 @@ class CollectAll:
                         candidates = []
                         for row in batch.to_pylist():
                             url = row['fetch_url']
-                            state = self.con.execute('SELECT existing,candidate FROM content WHERE fetch=?', [url]).fetchone()
+                            state = self.con.execute('SELECT existing,candidate,raw FROM content WHERE fetch=?', [url]).fetchone()
                             if state is None:
                                 continue
                             matched += 1
                             original = row['crawl_snapshot']
-                            raw_ok = (row['status'] == 'SUCCESS_RAW' and isinstance(row['raw_sha256'],str)
-                                and re.fullmatch('[0-9a-f]{64}', row['raw_sha256']) and row['raw_path']
-                                and row['raw_path'].startswith('raw/') and not '..' in Path(row['raw_path']).parts and original)
+                            raw_problem=raw_record_problem(row,leaf['format'],descriptor)
+                            raw_ok=raw_problem is None
                             raw_count += bool(raw_ok)
-                            self.con.execute('UPDATE content SET seen=1,raw=max(raw,?) WHERE fetch=?', [int(bool(raw_ok)),url])
+                            self.con.execute('UPDATE content SET seen=1,raw=max(raw,?),raw_status=max(raw_status,?) WHERE fetch=?',
+                                [int(raw_ok),int(row['status']=='SUCCESS_RAW'),url])
                             if state[0] is not None or state[1] is not None:
                                 continue
                             reason = None
                             if not raw_ok:
-                                reason = row['status'] or 'MISSING_CRAWL_RESULT'
-                            elif leaf['format'] == 'native' and original != descriptor.get('snapshot_id'):
-                                reason = 'ARCHIVE_SNAPSHOT_BINDING_MISMATCH'
+                                reason = raw_problem
                             elif row['extract_raw_sha'] != row['raw_sha256'] or row['extract_snapshot'] != original:
                                 reason = 'MISSING_OR_UNBOUND_EXTRACTION'
                             elif row['extract_status'] == 'EXTRACT_SUCCESS' and len(row['text'] or '') != row['char_count']:
@@ -466,7 +505,8 @@ class CollectAll:
                                     reason = 'RETAINED_QUALITY_REVIEW'
                             if reason:
                                 held[reason] = held.get(reason,0)+1
-                                self.con.execute('UPDATE content SET reason=? WHERE fetch=? AND candidate IS NULL', [reason,url])
+                                if raw_ok or not state[2]:
+                                    self.con.execute('UPDATE content SET reason=? WHERE fetch=? AND candidate IS NULL', [reason,url])
                                 continue
                             reference = {'path': 'parts/'+identifier+'.parquet', 'row':count,'receipt_id':identifier,
                                          'source_file_id':remote['id'], 'leaf':leaf['name'], 'original_snapshot_id':original}
@@ -484,9 +524,11 @@ class CollectAll:
                 if version_check is not None:
                     version_check()
                 checksum = publish_file(output,target)
-                self.commit(identifier,'leaf',{'archive':identity(remote),'leaf':leaf,'candidates':count,
+                self.commit(identifier,'raw_repair' if repair else 'leaf',{'archive':identity(remote),'leaf':leaf,'candidates':count,
                     'matched_rows':matched,'raw_rows':raw_count,'held':held,'path':target.relative_to(self.root).as_posix(),
-                    'sha256':checksum,'metadata_sha256':staged_checksums,'original_snapshot_provenance_preserved':True})
+                    'sha256':checksum,'metadata_sha256':staged_checksums,'original_snapshot_provenance_preserved':True,
+                    'raw_path_policy':RAW_PATH_POLICY,'supersedes':base_id if repair else None,
+                    'row_scope':'successful_crawl_records_only' if repair else 'full_source_frontier'})
                 print('COLLECT_LEAF_SAVED:', count, 'new candidate URLs |', leaf['name'], flush=True)
             except BaseException:
                 self.con.rollback()
@@ -494,9 +536,128 @@ class CollectAll:
             finally:
                 con.close()
 
-    def report(self, files, errors):
+    def pending_raw_repairs(self):
+        result=[]
+        for identifier,raw in self.con.execute("SELECT id,receipt FROM completed WHERE kind='leaf' ORDER BY id"):
+            receipt=json.loads(raw)
+            if (receipt['leaf']['format']=='native' and receipt.get('raw_path_policy')!=RAW_PATH_POLICY
+                    and not self.saved(repair_leaf_id(identifier))):
+                result.append((identifier,receipt))
+        return result
+
+    def _repair_metadata_index(self, *, refresh=False):
+        """Read only bounded metadata receipt patterns, never corpus/index payloads."""
+        leaves=[(r[0],json.loads(r[1])) for r in self.con.execute(
+            "SELECT id,receipt FROM completed WHERE kind='leaf' ORDER BY id")]
+        binding=digest_json([(identifier,r['metadata_sha256']) for identifier,r in leaves])
+        marker=self.root/'raw_path_repair'/'metadata_index.json'
+        if marker.is_file() and not refresh:
+            saved=checked(read_json(marker))
+            if saved['binding']==binding:
+                print('REUSED_REPAIR_METADATA_INDEX | receipt JSON only',flush=True)
+                return saved['paths']
+        paths={}
+        print('REPAIR_METADATA_INDEX: saved receipt JSON only; no corpus/index/TAR scan',flush=True)
+        def add(checksum,path):
+            if not isinstance(checksum,str) or not re.fullmatch('[0-9a-f]{64}',checksum):
+                return
+            path=Path(path).resolve()
+            if not path.is_relative_to(self.project):
+                raise ValueError('Metadata reference escapes the project.')
+            relative=path.relative_to(self.project).as_posix()
+            values=paths.setdefault(checksum,[])
+            if relative not in values:
+                values.append(relative)
+        for identifier,receipt in leaves:
+            for kind,checksum in receipt['metadata_sha256'].items():
+                add(checksum,self.root/'metadata_cache'/identifier/kind/'metadata.bin')
+        patterns=(
+            'data/processed/*/external_source/source.json',
+            'data_staging/btc-new-71be0e12-*/sources/*/metadata/metadata.json',
+            'data_staging/btc-new-71be0e12-*/*/sources/*/metadata/metadata.json',
+            'data_staging/btc-new-71be0e12-*/parallel_cpu4/jobs/*/sources/*/metadata/metadata.json',
+        )
+        visited=set()
+        logged=time.monotonic()
+        for pattern in patterns:
+            for manifest in self.project.glob(pattern):
+                manifest=manifest.resolve()
+                if not manifest.is_relative_to(self.project):
+                    raise ValueError('Metadata receipt escapes the project.')
+                if manifest in visited:
+                    continue
+                visited.add(manifest)
+                saved=read_json(manifest)
+                for item in saved.get('files',{}).values():
+                    if isinstance(item,dict) and (item.get('path') or item.get('name')):
+                        add(item.get('sha256'),manifest.parent/(item.get('path') or item['name']))
+                if time.monotonic()-logged>=15:
+                    print('REPAIR_METADATA_INDEX:',len(visited),'metadata receipts inspected',flush=True)
+                    logged=time.monotonic()
+        atomic_json(marker,seal({'binding':binding,'paths':paths}))
+        print('REPAIR_METADATA_INDEX_READY:',len(visited),'saved metadata receipts; no corpus scan',flush=True)
+        return paths
+
+    def repair_raw_paths(self):
+        """Replay successful records from saved metadata, without opening any TAR.
+
+        Original receipts/candidate parts are retained. Each repaired leaf gets
+        its own durable SQL receipt and immutable recovery part; a new VM skips
+        committed repairs. Missing saved metadata is reported, never fetched.
+        """
+        previous=checked(read_json(self.root/'collection_report.json'))
+        files=previous.get('archive_inventory') or [json.loads(r[0])['remote'] for r in self.con.execute(
+            "SELECT receipt FROM completed WHERE kind='archive' ORDER BY id")]
+        if (previous['archive_errors'] or len(files)!=previous['archive_files']
+                or any(not self.saved('archive:'+digest_json(identity(r))) for r in files)):
+            raise ValueError('Complete the source inventory before repairing raw classification.')
+        pending=self.pending_raw_repairs()
+        if not pending and previous.get('raw_path_classification',{}).get('state')=='CURRENT':
+            print('RAW_PATH_REPAIR_ALREADY_COMPLETE | report only; no payload reads',flush=True)
+            return previous
+        index=self._repair_metadata_index() if pending else {}
+        errors=[]
+        for number,(identifier,receipt) in enumerate(pending,1):
+            print(f'RAW_PATH_REPAIR {number}/{len(pending)} | {receipt["leaf"]["name"]}',flush=True)
+            references={}
+            missing=[]
+            for kind,item in receipt['leaf']['members'].items():
+                checksum=receipt['metadata_sha256'][kind]
+                for relative in index.get(checksum,[]):
+                    path=(self.project/relative).resolve()
+                    if not path.is_relative_to(self.project):
+                        raise ValueError('Saved metadata index escapes the project.')
+                    if path.is_file():
+                        references[kind]=(path,checksum)
+                        break
+                else:
+                    missing.append({'kind':kind,'sha256':checksum,'bytes':item['bytes']})
+            if missing:
+                errors.append({'leaf':receipt['leaf']['name'],'leaf_id':identifier,'error':'SAVED_METADATA_MISSING',
+                    'missing':missing,'tar_download_attempted':False})
+                print('RAW_REPAIR_NEEDS_METADATA:',receipt['leaf']['name'],'| missing',
+                      ','.join(r['kind'] for r in missing),'| no TAR reopened',flush=True)
+                continue
+            try:
+                self.leaf(None,receipt['archive'],receipt['leaf'],repair=True,metadata_paths=references)
+            except Exception as error:
+                self.con.rollback()
+                errors.append({'leaf':receipt['leaf']['name'],'leaf_id':identifier,'error':str(error)[:500],
+                               'tar_download_attempted':False})
+        # A receipt may have committed locally before a transient snapshot write
+        # failed. Publish the final SQL snapshot before declaring completion.
+        self.snapshot()
+        remaining={identifier for identifier,_ in self.pending_raw_repairs()}
+        repair={'state':'RAW_PATH_REPAIR_COMPLETE' if not remaining else 'RAW_PATH_REPAIR_INCOMPLETE',
+            'policy':RAW_PATH_POLICY,'errors':[e for e in errors if e['leaf_id'] in remaining],
+            'recovered_warnings':[e for e in errors if e['leaf_id'] not in remaining],
+            'tar_accessed':False,'updated_at':utc_now()}
+        atomic_json(self.root/'raw_path_repair'/'repair_report.json',seal(repair))
+        return self.report(files,[],raw_repair=repair)
+
+    def report(self, files, errors, *, raw_repair=None):
         # Count official IDs and distinct fetch URLs separately. Failed records never count as usable text.
-        state = "CASE WHEN c.existing IS NOT NULL THEN 'REUSED_VALIDATED_CONTENT' WHEN c.candidate IS NOT NULL THEN 'RECOVERED_EXTRACTION_PENDING_CHUNK' WHEN c.seen=0 THEN 'NOT_FOUND_IN_ARCHIVES' WHEN c.raw=1 THEN 'RAW_AVAILABLE_NEEDS_EXTRACTION' ELSE 'CRAWL_NOT_SUCCESSFUL' END"
+        state = "CASE WHEN c.existing IS NOT NULL THEN 'REUSED_VALIDATED_CONTENT' WHEN c.candidate IS NOT NULL THEN 'RECOVERED_EXTRACTION_PENDING_CHUNK' WHEN c.seen=0 THEN 'NOT_FOUND_IN_ARCHIVES' WHEN c.raw=1 THEN 'RAW_AVAILABLE_NEEDS_EXTRACTION' WHEN c.raw_status=1 THEN 'RAW_METADATA_REVIEW' ELSE 'CRAWL_NOT_SUCCESSFUL' END"
         query = f'SELECT o.id,o.url,o.fetch,{state} AS state,c.existing,c.candidate,c.reason FROM official o JOIN content c ON o.fetch=c.fetch'
         counts = dict(self.con.execute(f'SELECT state,count(*) FROM ({query}) GROUP BY state'))
         total = self.con.execute('SELECT count(*) FROM official').fetchone()[0]
@@ -513,14 +674,26 @@ class CollectAll:
                 while rows := cursor.fetchmany(8192):
                     writer.writerows(rows)
             files_out[name]={'path':name,'sha256':publish_file(path,self.root/name)}
+        pending_repairs=len(self.pending_raw_repairs())
+        recovery_parts=[]
+        for identifier,kind,raw_receipt in self.con.execute(
+                "SELECT id,kind,receipt FROM completed WHERE kind IN ('leaf','raw_repair')"):
+            receipt=json.loads(raw_receipt)
+            superseded=(kind=='leaf' and receipt['leaf']['format']=='native'
+                        and self.saved(repair_leaf_id(identifier)) is not None)
+            recovery_parts.append({**receipt,'classification_effective':not superseded,
+                'superseded_classification_by':repair_leaf_id(identifier) if superseded else None})
         result = seal({'state':'ALL_FOLDER_SOURCES_COLLECTED' if not errors else 'FOLDER_COLLECTION_INCOMPLETE',
             'official_ids':total,'official_unique_fetch_urls':unique,'counts_by_official_id':counts,
             'official_ids_seen_in_archive_metadata':seen,'official_ids_with_successful_raw_record':raw,
             'all_official_ids_represented_in_archives':not errors and seen==total,
-            'all_official_raw_records_successful':not errors and raw==total,
-            'archive_files':len(files),'archive_errors':errors,'files':files_out,
-            'recovery_parts':[json.loads(r[0]) for r in self.con.execute("SELECT receipt FROM completed WHERE kind='leaf'")],
-            'all_official_content_available':not errors and sum(counts.get(k,0) for k in ('REUSED_VALIDATED_CONTENT','RECOVERED_EXTRACTION_PENDING_CHUNK'))==total,
+            'all_official_raw_records_successful':not errors and not pending_repairs and raw==total,
+            'archive_files':len(files),'archive_inventory':files,'archive_errors':errors,'files':files_out,
+            'recovery_parts':recovery_parts,
+            'all_official_content_available':not errors and not pending_repairs and sum(counts.get(k,0) for k in ('REUSED_VALIDATED_CONTENT','RECOVERED_EXTRACTION_PENDING_CHUNK'))==total,
+            'raw_path_classification':{'policy':RAW_PATH_POLICY,'state':'REPAIR_REQUIRED' if pending_repairs else 'CURRENT',
+                                       'pending_leaves':pending_repairs},
+            'counts_provisional':bool(pending_repairs),'raw_path_repair':raw_repair,
             'recovered_text_requires_standard_chunk_pipeline':True,'raw_payloads_rehashed':False,
             'submission_candidate_changed':False,'updated_at':utc_now()})
         atomic_json(self.root/'collection_report.json',result)

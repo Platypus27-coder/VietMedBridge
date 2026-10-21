@@ -63,12 +63,17 @@ source version được kiểm; raw payload chưa được rehash nên báo cáo
 - `parts/*.parquet`: text/extraction recovery, giữ provenance và checksum receipt.
 - `checkpoint.json` và `sql-*.gz`: checkpoint để tiếp tục qua tài khoản/runtime khác.
 
+Lượt dùng bộ lọc raw cũ cần [cập nhật checkpoint phân loại raw](REPAIR_COLLECTION_RAW_PATHS.md).
+Xem `counts_provisional` và `raw_path_classification` trước khi chốt số liệu.
+
 Các trạng thái được đếm theo ID BTC; số URL fetch duy nhất được báo riêng:
 
 - `REUSED_VALIDATED_CONTENT`: có nội dung đã xử lý, dùng mapping/reference hiện có.
 - `RECOVERED_EXTRACTION_PENDING_CHUNK`: đã thu được text, còn phải chunk/freeze chuẩn.
 - `RAW_AVAILABLE_NEEDS_EXTRACTION`: có bản ghi raw thành công, chưa có text vượt gate.
 - `CRAWL_NOT_SUCCESSFUL`: có bản ghi nguồn nhưng chưa có raw thành công.
+- `RAW_METADATA_REVIEW`: có trạng thái SUCCESS_RAW nhưng hash, locator hoặc
+  snapshot không hợp lệ; không coi đây là lỗi HTTP/crawl.
 - `NOT_FOUND_IN_ARCHIVES`: chưa tìm thấy URL trong mọi nguồn đọc được.
 
 `ALL_FOLDER_SOURCES_COLLECTED` chỉ nói đã duyệt hết folder. Xem riêng
