@@ -41,3 +41,18 @@ về đĩa, không giải nén raw thành hàng nghìn file. Scratch chỉ ở m
 Số 97.758 là ID BTC có metadata raw thành công, không phải số bài chắc chắn cứu
 được. Số lần held trong nhiều bản archive cũng không phải số URL khác nhau.
 Không hứa tăng coverage hoặc điểm trước khi chạy thực tế và đánh giá retrieval.
+
+## Kiểm tra lúc raw recovery còn chạy
+
+`status.json` chỉ được ghi tại ranh giới stage, có thể cũ hơn SQL checkpoint.
+Không dùng số file trong `recovered/` làm số URL đã phục hồi.
+Trong **phiên Colab CPU thứ hai**, dán toàn bộ
+`scripts/check_maximize_progress_cell.py` vào một cell rồi chạy. Phiên writer
+hiện tại tiếp tục bình thường. Cell không cần cài package, tokenizer hoặc model.
+
+Cell đọc đúng một SQL snapshot bất biến theo `checkpoint.json`, kiểm hash và
+binding của snapshot đó trên scratch Colab, truy vấn read-only theo ID BTC,
+rồi lưu báo cáo nhỏ `coverage_progress.json` trên Drive. Không mở TAR, Parquet,
+corpus hoặc vector; không ghi vào SQL/status/candidate của writer. Thời điểm
+`checkpoint_updated_at` là mốc số liệu, có thể lùi hơn luồng live đang chạy.
+`TEXT_READY` chưa qua chunk/freeze; báo cáo này không khẳng định đã embedding.
