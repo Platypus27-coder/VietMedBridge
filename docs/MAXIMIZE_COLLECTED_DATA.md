@@ -56,3 +56,22 @@ rồi lưu báo cáo nhỏ `coverage_progress.json` trên Drive. Không mở TAR
 corpus hoặc vector; không ghi vào SQL/status/candidate của writer. Thời điểm
 `checkpoint_updated_at` là mốc số liệu, có thể lùi hơn luồng live đang chạy.
 `TEXT_READY` chưa qua chunk/freeze; báo cáo này không khẳng định đã embedding.
+
+## Chuyển bước khi Drive chặn đọc raw hoặc cần chốt sớm
+
+Khi phiên raw recovery đã dừng, mở
+`notebooks/02_colab_finalize_recovered_text.ipynb` trên **Colab CPU → Run all**.
+Trong runtime maximize hiện có cũng có thể dán cell
+`scripts/finalize_ready_text_cell.py` để giữ tokenizer/package cache.
+Không chạy cùng một writer khác và không chạy lại cell raw recovery.
+
+Cell chốt membership của phần raw đã có text thành một phase
+`raw-ready-<hash>` riêng, chunk/freeze/index-input theo policy cũ và thêm vào
+`delta_candidates.json`. Không mở raw TAR, không đổi active submission, không
+tạo receipt `raw-pass` giả. Source/cursor raw cũ giữ nguyên. Phần chưa đủ chất
+lượng hoặc chưa có text vẫn hiện trong `remaining_for_crawl.csv` và status.
+
+Nếu ngắt giữa batch, cùng cell tiếp tục batch chưa freeze. Batch đã freeze bất
+biến; raw cứu thêm sau này tạo batch mới, không thêm vào candidate cũ. Các URL
+đã chunk được ghi nhận để raw resume không trích xuất lại hoặc xuất trùng batch.
+Đầu ra này là input GPU đã freeze, chưa phải corpus vectors hoặc submission.

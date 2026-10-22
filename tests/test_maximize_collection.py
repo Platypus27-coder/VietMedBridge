@@ -221,3 +221,66 @@ def test_unindexed_local_candidate_copy_must_still_match_receipt(tmp_path,extern
     cached.parent.mkdir(); cached.write_bytes(b'corrupt unpublished cache')
     with pytest.raises(ValueError,match='changed artifact'): flow._candidate(reference)
     flow.close(); collection.close()
+
+
+def test_ready_cutoff_freezes_committed_text_while_raw_remains_incomplete(tmp_path,external,monkeypatch):
+    collection,flow,reader,links,body=collected(tmp_path,external)
+    flow.chunk_ready(CharacterTokenizer(),phase='metadata-text-v1')
+    original=flow.snapshot
+    def stop_after_saved_text():
+        original()
+        if flow.con.execute("SELECT count(*) FROM raw_results WHERE result='EXTRACTED'").fetchone()[0]:
+            raise KeyboardInterrupt('Rate limit after durable payload/cursor')
+    with monkeypatch.context() as patch:
+        patch.setattr(flow,'snapshot',stop_after_saved_text)
+        with pytest.raises(KeyboardInterrupt): flow.recover_raw(reader,checkpoint_headers=1)
+    assert not flow.saved('raw-pass')
+    cursor=flow.con.execute("SELECT id,receipt FROM completed WHERE kind='cursor'").fetchall()
+    active=(collection.project/'data/active_data_candidate.json').read_bytes()
+    opens=reader.opens
+    with monkeypatch.context() as patch:
+        patch.setattr(reader,'open',lambda *a,**k:pytest.fail('Cutoff reopened raw TAR'))
+        phase=flow.stage_ready_batch()
+        assert flow.stage_ready_batch()==phase
+        target,build=flow.chunk_ready(CharacterTokenizer(),phase=phase)
+        golden={'passed':True,'code_sha256':code_fingerprint(),'tokenizer':SPEC,'chunking':asdict(CONFIG)}
+        record=flow.freeze_delta(phase,links,CharacterTokenizer(),golden,audit_size=2)
+        assert record['documents']==1 and not record['source_campaign_raw_pass_complete']
+        assert record['selection']['official_ids']==1
+        assert validate_snapshot(target,build,official_links=links,work_dir=flow.work)['passed']
+        assert flow.stage_ready_batch() is None
+    assert reader.opens==opens
+    assert not flow.saved('raw-pass')
+    assert flow.con.execute("SELECT id,receipt FROM completed WHERE kind='cursor'").fetchall()==cursor
+    assert (collection.project/'data/active_data_candidate.json').read_bytes()==active
+    # The original raw pass can finish later, without duplicating the exported text.
+    monkeypatch.setattr(maximum,'extract_source',lambda *a,**k:pytest.fail('Already exported text re-extracted'))
+    flow.recover_raw(reader)
+    assert flow.saved('raw-pass') and flow.chunk_ready(CharacterTokenizer(),phase='raw-text-v1') is None
+    flow.close(); collection.close()
+
+
+def test_ready_cutoff_detects_membership_tampering(tmp_path,external):
+    collection,flow,reader,links,body=collected(tmp_path,external)
+    flow.recover_raw(reader)
+    phase=flow.stage_ready_batch()
+    flow.con.execute('DELETE FROM ready_members WHERE phase=?',[phase])
+    with pytest.raises(ValueError,match='membership differs'):
+        flow.chunk_ready(CharacterTokenizer(),phase=phase)
+    flow.close(); collection.close()
+
+
+def test_full_raw_phase_still_requires_completed_raw_pass(tmp_path,external):
+    collection,flow,reader,links,body=collected(tmp_path,external)
+    with pytest.raises(ValueError,match='Finish/resume raw'):
+        flow.freeze_delta('raw-text-v1',links,CharacterTokenizer(),{})
+    flow.close(); collection.close()
+
+
+def test_finalize_notebook_never_starts_raw_recovery():
+    from scripts.write_maximize_collection_notebook import finalize_notebook
+    book=finalize_notebook()
+    assert 'FLOW.recover_raw(' not in book.cells[-1].source
+    assert 'stage_ready_batch()' in book.cells[-1].source
+    for cell in book.cells:
+        if cell.cell_type=='code': compile(cell.source,'<finalize-notebook>','exec')

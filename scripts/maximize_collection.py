@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import tarfile
@@ -122,6 +123,7 @@ class MaximizeCollection:
                 quality_review INTEGER,PRIMARY KEY(leaf_id,fetch));
             CREATE TABLE IF NOT EXISTS raw_results(sha TEXT,source_url TEXT,quality_review INTEGER,result TEXT,
                 PRIMARY KEY(sha,source_url,quality_review));
+            CREATE TABLE IF NOT EXISTS ready_members(phase TEXT,fetch TEXT,PRIMARY KEY(phase,fetch));
         ''')
         row=self.con.execute('SELECT value FROM contract').fetchone()
         if row and row[0]!=digest_json(self.binding):
@@ -202,11 +204,55 @@ class MaximizeCollection:
         if row is None: raise ValueError('Candidate row exceeds its receipt.')
         return json.loads(row[0])
 
+    def _ready_membership(self,phase=None):
+        condition=("fetch IN (SELECT fetch FROM ready_members WHERE phase=?)" if phase else
+                   "state='TEXT_READY' AND json_extract(candidate,'$.recovery_root')='maximize'")
+        parameters=[phase] if phase else []
+        digest=hashlib.sha256(); urls=ids=0
+        for fetch,candidate in self.con.execute('SELECT fetch,candidate FROM todo WHERE '+condition+' ORDER BY fetch',parameters):
+            aliases=self.con.execute('SELECT id,url FROM aliases WHERE fetch=? ORDER BY id',[fetch]).fetchall()
+            digest.update((digest_json([fetch,candidate,aliases])+'\n').encode())
+            urls+=1; ids+=len(aliases)
+        return {'membership_sha256':digest.hexdigest(),'fetch_urls':urls,'official_ids':ids}
+
+    def stage_ready_batch(self):
+        """Seal only committed recovered text; leave the unfinished raw pass resumable."""
+        pending=self.con.execute("""SELECT id,receipt FROM completed s WHERE kind='raw_ready_scope'
+            AND NOT EXISTS (SELECT 1 FROM completed f WHERE f.id='freeze:'||json_extract(s.receipt,'$.phase'))
+            ORDER BY rowid LIMIT 1""").fetchone()
+        if pending:
+            scope=json.loads(pending[1])
+            self._phase_origin(scope['phase'])
+            print('READY_BATCH_RESUME:',scope['phase'],'|',scope['official_ids'],'official IDs',flush=True)
+            return scope['phase']
+        membership=self._ready_membership()
+        if not membership['fetch_urls']:
+            print('READY_BATCH: no new committed raw text; existing frozen deltas retained',flush=True)
+            return None
+        phase='raw-ready-'+digest_json({'binding':self.binding,**membership})[:16]
+        self.con.execute("""INSERT INTO ready_members SELECT ?,fetch FROM todo WHERE state='TEXT_READY'
+            AND json_extract(candidate,'$.recovery_root')='maximize'""",[phase])
+        scope={'phase':phase,**membership,'raw_pass_complete_at_cutoff':self.saved('raw-pass') is not None,
+               'state':'COMMITTED_TEXT_CUTOFF','updated_at':utc_now()}
+        self.commit('ready-scope:'+phase,'raw_ready_scope',scope)
+        print('READY_BATCH_SEALED:',phase,'|',scope['official_ids'],'official IDs | unfinished raw retained',flush=True)
+        return phase
+
+    def _phase_origin(self,phase):
+        if phase=='metadata-text-v1':
+            return "coalesce(json_extract(candidate,'$.recovery_root'),'')!='maximize'"
+        if phase=='raw-text-v1':
+            return "json_extract(candidate,'$.recovery_root')='maximize'"
+        if not re.fullmatch(r'raw-ready-[0-9a-f]{16}',phase):
+            raise ValueError('Use a frozen metadata/raw phase or a sealed ready-text batch.')
+        scope=self.saved('ready-scope:'+phase)
+        if scope is None or any(scope.get(k)!=v for k,v in self._ready_membership(phase).items()):
+            raise ValueError('Ready batch membership differs from its committed cutoff.')
+        return "json_extract(candidate,'$.recovery_root')='maximize' AND fetch IN (SELECT fetch FROM ready_members WHERE phase='"+phase+"')"
+
     def chunk_ready(self,tokenizer,*,phase):
         """Normal source spans/BGE token policy; one durable delta shard per 128 URLs."""
-        if phase not in ('metadata-text-v1','raw-text-v1'):
-            raise ValueError('Use separate immutable phases for collected text and raw recovery.')
-        origin="json_extract(candidate,'$.recovery_root')='maximize'" if phase=='raw-text-v1' else "coalesce(json_extract(candidate,'$.recovery_root'),'')!='maximize'"
+        origin=self._phase_origin(phase)
         target=self.root/'processed'/phase
         target.mkdir(parents=True,exist_ok=True)
         config={'schema_version':SCHEMA_VERSION,'code_sha256':code_fingerprint(),
@@ -512,13 +558,16 @@ class MaximizeCollection:
             return saved
         if phase=='raw-text-v1' and not self.saved('raw-pass'):
             raise ValueError('Finish/resume raw recovery before freezing its delta.')
-        origin="json_extract(candidate,'$.recovery_root')='maximize'" if phase=='raw-text-v1' else "coalesce(json_extract(candidate,'$.recovery_root'),'')!='maximize'"
+        origin=self._phase_origin(phase)
         if self.con.execute("SELECT count(*) FROM todo WHERE state='TEXT_READY' AND "+origin).fetchone()[0]:
             raise ValueError('Complete pending delta chunks before freezing.')
         target=self.root/'processed'/phase
         if not (target/'build.json').is_file(): return None
         build=read_json(target/'build.json')
         if not build['counts'].get('documents'): return None
+        scope=self.saved('ready-scope:'+phase)
+        if scope and build['counts']['input_records']!=scope['official_ids']:
+            raise ValueError('Ready batch chunk outcomes do not account for every selected official ID.')
         health=health_report(target,official_links=links,work_dir=self.work,audit_size=audit_size)
         candidate=freeze_candidate(target,health,golden_report=golden)
         name='candidate-'+candidate['candidate_manifest_sha256'][:16]+'.json'
@@ -528,6 +577,8 @@ class MaximizeCollection:
             'snapshot_sha256':candidate['snapshot_sha256'],'index_inputs_manifest_sha256':inputs['manifest_sha256'],
             'documents':build['counts']['documents'],'unique_dense_inputs':inputs['input_count'],
             'state':'DELTA_READY_FOR_EMBEDDING','submission_candidate_changed':False,'updated_at':utc_now()}
+        if scope:
+            saved.update(selection=scope,source_campaign_raw_pass_complete=self.saved('raw-pass') is not None)
         self.commit(key,'freeze',saved)
         self._publish_delta_manifest()
         return saved

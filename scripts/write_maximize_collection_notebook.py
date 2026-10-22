@@ -7,6 +7,60 @@ import nbformat as nb
 ROOT=Path(__file__).resolve().parents[1]
 
 
+def finalize_ready_cell():
+    source=(ROOT/'scripts/maximize_collection.py').read_text(encoding='utf-8')
+    return ('#@title Chốt text đã cứu ngay — CPU; không đọc thêm raw TAR\n'
+            +'MAXIMIZE_SOURCE='+repr(source)+'\n'+dedent('''
+        import importlib
+        import json
+        from pathlib import Path
+        if not Path('/var/colab/hostname').is_file():
+            raise RuntimeError('Chạy cell này trong notebook maximize trên Colab CPU.')
+        if not all(name in globals() for name in ('PROJECT','WORK','SPEC','CONFIG','resources','collector')):
+            raise RuntimeError('Chạy cell 1–2 của notebook finalize trước; không chạy lại cell raw recovery.')
+        for name in ('FLOW','COLLECTION'):
+            if globals().get(name) is not None:
+                globals()[name].close()
+        (WORK/'maximize_collection.py').write_text(MAXIMIZE_SOURCE,encoding='utf-8')
+        importlib.invalidate_caches()
+        import maximize_collection as maximizer
+        maximizer=importlib.reload(maximizer)
+        COLLECTION=collector.CollectAll(PROJECT,WORK/'collection')
+        FLOW=maximizer.MaximizeCollection(COLLECTION,WORK/'delta',tokenizer_spec=SPEC,chunk_config=CONFIG)
+        try:
+            PHASE=FLOW.stage_ready_batch()
+            if PHASE:
+                r=resources()
+                FLOW.chunk_ready(r['tokenizer'],phase=PHASE)
+                RESULT=FLOW.freeze_delta(PHASE,r['links'],r['tokenizer'],r['golden'])
+                print(json.dumps(RESULT,ensure_ascii=False,indent=2),flush=True)
+            else:
+                FLOW._publish_delta_manifest()
+            STATUS=FLOW.export_remaining()
+            print(json.dumps(STATUS,ensure_ascii=False,indent=2),flush=True)
+            print('READY_HANDOFF:',FLOW.root/'delta_candidates.json',flush=True)
+            print('Đã chốt phần có text. Raw chưa đọc giữ nguyên cursor; chưa phải đủ toàn bộ BTC và chưa embedding.',flush=True)
+        finally:
+            FLOW.close()
+            COLLECTION.close()
+    ''').strip())
+
+
+def finalize_notebook():
+    book=notebook()
+    book.cells=[nb.v4.new_markdown_cell('''# Chốt phần text đã cứu để chuyển sang embedding
+
+**Colab CPU → Run all**, sau khi phiên raw recovery đã dừng/báo lỗi.
+Không chạy cùng một writer maximize khác. Không cần sửa cấu hình.
+Chỉ khôi phục checkpoint SQL nếu runtime mới, rồi chunk/freeze/index-input
+phần raw đã có text. Không đọc thêm raw TAR, không gọi lại website.
+Raw chưa xử lý giữ nguyên cursor; không đánh dấu raw-pass hoàn tất.
+Kết quả `delta_candidates.json` sẵn sàng cho bước xuất input GPU;
+đây chưa phải embedding hay submission.'''),book.cells[1],book.cells[2],
+        nb.v4.new_code_cell(finalize_ready_cell())]
+    return book
+
+
 def notebook():
     collect=(ROOT/'scripts/collect_all_btc_sources.py').read_text(encoding='utf-8')
     maximize=(ROOT/'scripts/maximize_collection.py').read_text(encoding='utf-8')
@@ -164,3 +218,5 @@ def notebook():
 
 if __name__=='__main__':
     nb.write(notebook(),ROOT/'notebooks/02_colab_maximize_collected_data.ipynb')
+    nb.write(finalize_notebook(),ROOT/'notebooks/02_colab_finalize_recovered_text.ipynb')
+    (ROOT/'scripts/finalize_ready_text_cell.py').write_text(finalize_ready_cell()+'\n',encoding='utf-8')
