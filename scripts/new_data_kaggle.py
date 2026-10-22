@@ -53,9 +53,9 @@ def copied(source, target, checksum):
 
 
 class NewDataKaggle:
-    def __init__(self, project, work, identities, *, accounts=2, gpu_count=2):
+    def __init__(self, project, work, identities, *, accounts=2, gpu_count=2, batch_loader=None):
         self.assignment = kaggle_assignment(accounts=accounts, account_id=0, gpu_count=gpu_count)
-        self.view = NewDataEmbeddings(project, work, identities)
+        self.view = NewDataEmbeddings(project, work, identities, batch_loader=batch_loader)
         self.work = Path(work)
         self.team = {'accounts': accounts, 'gpu_count': gpu_count}
         self.root = self.view.output / f'kaggle-{accounts}x{gpu_count}'
@@ -265,6 +265,7 @@ class NewDataKaggle:
         scripts = Path(__file__).resolve().parent
         workers = {n: sha256_file(scripts/n) for n in SOURCE_FILES}
         job = seal({'schema': 'new-data-kaggle-v1', 'selection_binding': self.binding, 'batch': self.view.batch['manifest_sha256'],
+            'source_batch_dir': self.view.root.relative_to(self.view.project).as_posix(),
             'team': self.team, 'code_commit': code_commit, 'repo_url': 'https://github.com/Platypus27-coder/VietMedBridge.git',
             'models': self.view.identities, 'config': config, 'runtime': runtime, 'model_code': model_code,
             'worker_sources': workers, 'tasks': tasks, 'remaining_tasks_before_round': remaining,
@@ -385,7 +386,7 @@ def validate_job(directory, checkout=None):
     return job
 
 
-def download_outputs(api, handle, work, *, project=None):
+def download_outputs(api, handle, work, *, project=None, import_roots=()):
     """Page through the new-data manifest first, before downloading vectors."""
     from vietmedbridge.kaggle_outputs import _download_pages, output_handles
     output_handles(handle)
@@ -405,7 +406,9 @@ def download_outputs(api, handle, work, *, project=None):
     relative = manifests[0].relative_to(probe)
     if project is not None:
         from_parent = Path(project)/'data_staging'/'btc-new-71be0e12-20261019-v1'/'freeze_batch_v1'/'embeddings_v1'
-        for receipt in from_parent.glob('kaggle-*/imports/'+manifest['manifest_sha256']+'.json'):
+        roots=[from_parent,*[bound(project,p) for p in import_roots]]
+        receipts=[p for root in roots for p in root.glob('kaggle-*/imports/'+manifest['manifest_sha256']+'.json')]
+        for receipt in receipts:
             prior = checked(read_json(receipt))
             if prior.get('result') != manifest['manifest_sha256'] or prior.get('job') != manifest['job']:
                 raise ValueError('Previously imported output receipt changed.')

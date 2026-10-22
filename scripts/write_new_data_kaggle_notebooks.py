@@ -183,6 +183,82 @@ def transfer():
     ''', [setup, prepare, run])
 
 
+def recovery_transfer():
+    value = transfer()
+    value.cells[0].source = dedent('''
+        # 04 — Xuất phần text vừa cứu sang Kaggle (Colab CPU)
+
+        **Colab CPU → Run all.** Secret `KAGGLE_JSON` của người xuất, bật Notebook access.
+        Nhận tất cả candidate đã freeze trong maximize `delta_candidates.json`.
+        Không đọc TAR, không chạy lại 02/03, không nạp model weights.
+
+        Xuất chỉ text còn thiếu vector của BGE-M3 và Qwen3-Embedding-8B.
+        Hai tài khoản dùng CÙNG dataset được in ở `NEW_DATASET_READY` và hai bản
+        `04_new_data_account_0.ipynb`, `04_new_data_account_1.ipynb` trên Kaggle.
+        Import notebook → Add Input → Internet ON → T4 x2 → Save & Run All.
+
+        Sau GPU: điền `KAGGLE_NOTEBOOK_OUTPUT="owner/notebook,owner2/notebook2"`
+        rồi Run all để nhập checkpoint. Gói này chỉ chứa các batch text đã cứu;
+        không khẳng định coverage embedding toàn bộ kho đã đủ. Raw chưa đọc và
+        active submission không bị thay đổi. Scratch chỉ nằm trong máy Colab.
+    ''').strip()
+    setup = value.cells[1].source
+    setup = setup.replace('chuẩn bị gói Kaggle cho batch 10 nguồn mới', 'xuất text đã cứu; không đọc raw TAR')
+    setup = setup.replace("relative = 'data_staging/btc-new-71be0e12-20261019-v1'",
+                          "relative = 'data_staging/btc-maximize-71be0e12-v1'")
+    setup = setup.replace("PROJECT/relative/'freeze_batch_v1/freeze_batch.json'", "PROJECT/relative/'delta_candidates.json'")
+    setup = setup.replace("lock = json.loads((PROJECT/relative/'intake_code_lock.json').read_text())",
+                          "lock = {'repo_url':'https://github.com/Platypus27-coder/VietMedBridge.git','commit':'bbf09ec01d542a5b06a4c2beec245571abeb3515'}")
+    setup = setup.replace('/content/VietMedBridge-new-kaggle', '/content/VietMedBridge-recovery-kaggle')
+    setup = setup.replace('/content/vmb_new_kaggle_cpu', '/content/vmb_recovery_kaggle_cpu')
+    value.cells[1].source = setup
+    prepare = value.cells[2].source
+    prepare = prepare.replace('import new_data_kaggle as pipeline',
+        "for name in SOURCES:\n    sys.modules.pop(Path(name).stem, None)\nimport new_data_kaggle as pipeline")
+    prepare = prepare.replace("print('Batch: 10 frozen builds; task còn thiếu được chọn riêng cho từng model.', flush=True)", '')
+    prepare += '\nRECOVERY_SOURCE=' + repr((ROOT/'scripts/recovery_kaggle_batch.py').read_text(encoding='utf-8')) + '\n'
+    prepare += dedent('''
+        (WORK_DIR/'recovery_kaggle_batch.py').write_text(RECOVERY_SOURCE,encoding='utf-8')
+        sys.modules.pop('recovery_kaggle_batch',None)
+        from recovery_kaggle_batch import load_recovery_batch
+        BATCH_ROOT,BATCH,_=load_recovery_batch(PROJECT)
+        BATCH_DIR=BATCH_ROOT.relative_to(PROJECT).as_posix()
+        def recovery_flow(work,*,accounts=2,gpu_count=2,batch_dir=None):
+            return pipeline.NewDataKaggle(PROJECT,work,identities,accounts=accounts,gpu_count=gpu_count,
+                batch_loader=lambda project:load_recovery_batch(project,batch_dir or BATCH_DIR))
+        print('RECOVERY_BATCH:',BATCH['documents'],'documents |',BATCH['input_rows_before_cross_batch_dedup'],
+            'input rows before cross-batch text dedup |',len(BATCH['builds']),'frozen builds',flush=True)
+    ''')
+    value.cells[2].source = prepare
+    value.cells[3].source = cell('''
+        #@title 3. Xuất recovery dataset / nhập Outputs về Drive
+        if KAGGLE_NOTEBOOK_OUTPUT.strip():
+            from kaggle.api.kaggle_api_extended import KaggleApi
+            from vietmedbridge.kaggle_outputs import output_handles
+            api=KaggleApi()
+            api.authenticate()
+            roots=[p.relative_to(PROJECT).as_posix() for p in (PROJECT/relative/'embedding_batches').glob('*/embeddings_v1')]
+            for handle in output_handles(KAGGLE_NOTEBOOK_OUTPUT):
+                output=pipeline.download_outputs(api,handle,WORK_DIR,project=PROJECT,import_roots=roots)
+                saved=pipeline.checked(pipeline.read_json(output/'job.json'))
+                if 'source_batch_dir' not in saved:
+                    raise ValueError('Outputs này chưa khóa recovery batch; dùng đúng notebook/gói vừa xuất.')
+                flow=recovery_flow(WORK_DIR/'cpu',accounts=saved['team']['accounts'],
+                    gpu_count=saved['team']['gpu_count'],batch_dir=saved['source_batch_dir'])
+                print(json.dumps(flow.install(output,receipt_api=api_source),ensure_ascii=False,indent=2),flush=True)
+                KAGGLE_ACCOUNTS=saved['team']['accounts']
+        flow=recovery_flow(WORK_DIR/'cpu',accounts=KAGGLE_ACCOUNTS)
+        target,job=flow.export(CHECKOUT,config=config,runtime=runtime,code_commit=lock['commit'],receipt_api=api_source)
+        if target is None:
+            print(json.dumps(job,ensure_ascii=False,indent=2),flush=True)
+        else:
+            pipeline.upload_job(flow,target,job,owner)
+            print('Hai acc dùng CÙNG dataset này: 04_new_data_account_0 và 04_new_data_account_1.',flush=True)
+        print('Recovery vectors only. Phần raw chưa đọc và luồng submit giữ nguyên.',flush=True)
+    ''').source
+    return value
+
+
 def gpu(account_id=0):
     setup = cell('''
         # Kaggle only. This cell prints before any install or download.
@@ -281,6 +357,7 @@ def gpu(account_id=0):
 def main():
     vendors()
     nb.write(transfer(), ROOT/'notebooks/04_colab_export_new_data_kaggle.ipynb')
+    nb.write(recovery_transfer(), ROOT/'notebooks/04_colab_export_recovered_data_kaggle.ipynb')
     for account in range(2):
         nb.write(gpu(account), ROOT/f'notebooks/kaggle/04_new_data_account_{account}.ipynb')
 

@@ -111,11 +111,11 @@ class LazyEncoder:
 
 
 class NewDataEmbeddings:
-    def __init__(self, project, work_dir, identities, *, team_size=1, worker_id=0):
+    def __init__(self, project, work_dir, identities, *, team_size=1, worker_id=0, batch_loader=None):
         if type(team_size) is not int or team_size < 1 or type(worker_id) is not int or not 0 <= worker_id < team_size:
             raise ValueError("Invalid GPU team/worker assignment.")
         self.project, self.work = Path(project).resolve(), Path(work_dir).resolve()
-        self.root, self.batch, self.sources = load_new_batch(self.project)
+        self.root, self.batch, self.sources = (batch_loader or load_new_batch)(self.project)
         self.data = self.project / "data"
         self.output = self.root / "embeddings_v1"
         self.identities, self.team_size, self.worker_id = identities, team_size, worker_id

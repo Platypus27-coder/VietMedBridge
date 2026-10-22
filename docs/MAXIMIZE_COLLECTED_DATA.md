@@ -75,3 +75,28 @@ Nếu ngắt giữa batch, cùng cell tiếp tục batch chưa freeze. Batch đ�
 biến; raw cứu thêm sau này tạo batch mới, không thêm vào candidate cũ. Các URL
 đã chunk được ghi nhận để raw resume không trích xuất lại hoặc xuất trùng batch.
 Đầu ra này là input GPU đã freeze, chưa phải corpus vectors hoặc submission.
+
+## Xuất các recovery batch đã freeze sang Kaggle
+
+Mở `notebooks/04_colab_export_recovered_data_kaggle.ipynb` trên **Colab CPU →
+Run all**, giữ `KAGGLE_ACCOUNTS=2`, `KAGGLE_NOTEBOOK_OUTPUT=""`. Colab Secret
+`KAGGLE_JSON` của tài khoản xuất cần được bật Notebook access.
+
+Notebook nhận tất cả batch trong `delta_candidates.json`, kiểm binding của
+candidate và manifest input, chốt bản sao manifest bất biến theo checksum.
+Chỉ input text chưa chọn xong mới được đọc; vector cache được tra bằng metadata
+SQL. Chỉ text còn thiếu của từng model được đưa vào dataset. Không đọc TAR hoặc
+chạy lại chunk/freeze, không nạp weights trên CPU, không đổi active submission.
+Số input rows cộng các batch chưa trừ trùng; cùng text hash thuộc cùng GPU và
+được dùng lại trong worker. Input manifest và vector namespace/model giữ nguyên.
+
+Khi hiện `NEW_DATASET_READY`, hai tài khoản Add Input cùng dataset riêng tư đó,
+dùng `notebooks/kaggle/04_new_data_account_0.ipynb` và
+`notebooks/kaggle/04_new_data_account_1.ipynb`, Internet ON, T4 x2, Save & Run All.
+Outputs được nhập bằng notebook Colab xuất ở trên. Điền hai handle notebook vào
+`KAGGLE_NOTEBOOK_OUTPUT`, Run all; importer khóa đúng recovery batch từ job cũ
+kể cả sau này campaign có batch mới. Kết quả vào `data/model_cache` và mapping
+trong `embedding_batches/<hash>/embeddings_v1`, tách biệt batch 10 nguồn.
+
+Đây là embedding các recovery delta đã freeze; không chứng minh đã có nội dung
+cho toàn bộ URL BTC hoặc đủ Qwen/BGE cho mọi candidate khác.
