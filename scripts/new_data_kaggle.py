@@ -303,7 +303,7 @@ class NewDataKaggle:
                 'coverage': coverage, 'payload_verification': 'SHA256_ON_USE', 'updated_at': utc_now()}))
         return coverage
 
-    def install(self, output, *, receipt_api=None, blocks_factory=ResumableContentBlocks):
+    def install(self, output, *, receipt_api=None, blocks_factory=ResumableContentBlocks, cached_keys=None):
         output = Path(output)
         job = checked(read_json(output/'job.json'))
         saved_job = checked(read_json(self.root/'exports'/('job-'+job['manifest_sha256']+'.json')))
@@ -334,6 +334,24 @@ class NewDataKaggle:
         # Validate all output files before publishing any coverage receipt.
         blocks_by_family = {f: [] for f in FAMILIES}
         available = {f: set() for f in FAMILIES}
+        # A full-input execution plan may deliberately omit vectors already on
+        # Drive. Never trust that claim from the GPU result: verify its keys in
+        # the exact paid producer's CPU lookup before allowing task coverage.
+        for family, values in (cached_keys or {}).items():
+            keys = set(values) & expected_keys.get(family, set())
+            if family not in FAMILIES:
+                raise ValueError('Unexpected cached vector family.')
+            if not keys:
+                continue
+            expected = self.view.identities[family]
+            cache = blocks_factory(self.view.data, SimpleNamespace(identity=expected['encoder'], dimension=expected['dimension']),
+                                   self.work/family, receipt_api=receipt_api, progress=print)
+            try:
+                if set(lookup(cache, list(keys))) != keys:
+                    raise ValueError('Execution plan cached vectors are not available in the verified Drive producer.')
+                available[family].update(keys)
+            finally:
+                cache.close()
         for block in result['blocks']:
             checked(block)
             family = next((f for f in FAMILIES if block['identity'] == {
@@ -404,15 +422,19 @@ def validate_job(directory, checkout=None):
     return job
 
 
-def download_outputs(api, handle, work, *, project=None, import_roots=()):
+def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_failed=False):
     """Page through the new-data manifest first, before downloading vectors."""
     from vietmedbridge.kaggle_outputs import _download_pages, output_handles
     output_handles(handle)
     status = api.kernels_status(handle)
     status = status.get('status') if isinstance(status, dict) else status.status
     status = getattr(status, 'name', str(status)).upper()
-    if status != 'COMPLETE':
+    failed = status in {'ERROR', 'FAILED', 'CANCELLED', 'CANCELED'}
+    if status != 'COMPLETE' and not (allow_failed and failed):
         raise RuntimeError(f'{handle}: status={status}; wait for the saved version to finish.')
+    if failed:
+        print(f'KAGGLE_SESSION_{status}: inspecting saved checkpoint Outputs only; '
+              'GPU work is not restarted and completion is not assumed.', flush=True)
     base = Path(work)/'downloads'/digest_json(handle)[:16]
     probe = base/('probe-'+str(time.time_ns()))
     probe.mkdir(parents=True, exist_ok=True)
@@ -443,7 +465,7 @@ def download_outputs(api, handle, work, *, project=None, import_roots=()):
     return target.parent
 
 
-def upload_job(flow, target, job, owner):
+def upload_job(flow, target, job, owner, *, activation_filename='active_round.json', dataset_prefix=None):
     """A unique private dataset, with an upload pointer retained on Drive."""
     import kagglehub
     if not re.fullmatch('[A-Za-z0-9_-]+', owner):
@@ -455,7 +477,9 @@ def upload_job(flow, target, job, owner):
             raise ValueError('Upload pointer belongs to another job.')
         handle = saved['dataset_handle']
     else:
-        prefix = '/vmb-full-' if job.get('coverage_scope', {}).get('official_ids') else '/vmb-new-'
+        prefix = dataset_prefix or ('/vmb-full-' if job.get('coverage_scope', {}).get('official_ids') else '/vmb-new-')
+        if not re.fullmatch(r'/[a-z0-9-]+-', prefix):
+            raise ValueError('Invalid dataset prefix.')
         handle = owner+prefix+job['manifest_sha256'][:12]+'-'+str(time.time_ns())
         atomic_json(pointer, {'job': job['manifest_sha256'], 'dataset_handle': handle, 'state': 'UPLOAD_PLANNED'})
         saved = read_json(pointer)
@@ -475,7 +499,9 @@ def upload_job(flow, target, job, owner):
     if read_json(remote) != job:
         raise ValueError('Uploaded Kaggle job header differs; do not start GPU workers.')
     atomic_json(pointer, {'job': job['manifest_sha256'], 'dataset_handle': handle, 'state': 'VERIFIED'})
-    atomic_json(flow.root/'active_round.json', seal({'binding': flow.binding, 'job': job['manifest_sha256'], 'dataset_handle': handle}))
+    if Path(activation_filename).name != activation_filename or not activation_filename.endswith('.json'):
+        raise ValueError('Invalid dataset activation filename.')
+    atomic_json(flow.root/activation_filename, seal({'binding': flow.binding, 'job': job['manifest_sha256'], 'dataset_handle': handle}))
     print('NEW_DATASET_READY:', 'https://www.kaggle.com/datasets/'+handle, flush=True)
     print('Team:', job['team'], '| scheduled missing-text tasks:', len(job['tasks']), flush=True)
     return handle

@@ -335,7 +335,7 @@ def full_transfer():
     return value
 
 
-def gpu(account_id=0):
+def gpu(account_id=0, *, expected_scope=None):
     setup = cell('''
         # Kaggle only. This cell prints before any install or download.
         import hashlib
@@ -350,10 +350,9 @@ def gpu(account_id=0):
         SESSION_STARTED = time.monotonic()
         KAGGLE_ACCOUNT_ID = __ACCOUNT__
         SESSION_HOURS = 10.0
-        print('NEW DATA Kaggle bootstrap | account', KAGGLE_ACCOUNT_ID, '| checking T4 x2', flush=True)
+        print('Kaggle input preflight | account', KAGGLE_ACCOUNT_ID, '| metadata only; no model weights', flush=True)
         if Path('/var/colab/hostname').is_file() or not Path('/kaggle/input').is_dir():
             raise RuntimeError('Notebook GPU này chạy trên Kaggle. Colab CPU dùng 04_colab_export_new_data_kaggle.')
-        subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], check=True)
         jobs = {}
         for path in Path('/kaggle/input').rglob('job.json'):
             value = json.loads(path.read_text())
@@ -401,6 +400,16 @@ def gpu(account_id=0):
         subprocess.run([sys.executable,'-u','-c',probe], env=env, check=True)
         print('READY | batch',JOB['batch'],'| team',JOB['team'],'| account',KAGGLE_ACCOUNT_ID,flush=True)
     '''.replace('__ACCOUNT__', str(account_id)))
+    # A CPU-only first cell works against existing immutable uploaded datasets.
+    # Native worker/model files are still loaded from the sealed job itself.
+    marker = "CHECKOUT = Path('/kaggle/temp/VietMedBridge-new-data')"
+    preflight, bootstrap = setup.source.split(marker, 1)
+    preflight += '\n'+(ROOT/'scripts/kaggle_input_preflight.py').read_text(encoding='utf-8')
+    preflight += '\nPREFLIGHT = inspect_job_inputs(JOB_DIR, JOB, expected_scope='+repr(expected_scope)+')\n'
+    setup = cell(preflight)
+    bootstrap = cell("# GPU setup: run only after reviewing the input inventory.\n"
+        +"subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], check=True)\n"
+        +marker+bootstrap)
     run = cell('''
         # Each T4 runs an independent fresh Python worker; output stays in /kaggle/working.
         elapsed = (time.monotonic()-SESSION_STARTED)/3600
@@ -427,16 +436,49 @@ def gpu(account_id=0):
         là hết việc của lượt này. Nhập Outputs về Drive để xuất lượt còn thiếu.
         Chỉ checkpoint của version đã lưu thành công mới chuyển qua runtime khác được.
         Không dùng dataset hay Outputs của luồng Qwen 700k cũ ở notebook này.
-    ''', [setup, run], gpu=True)
+    ''', [setup, bootstrap, run], gpu=True)
+
+
+def full_gpu(account_id=0):
+    # Observed FULL_SCOPE_READY manifest. All continuation rounds of this scope
+    # share it; a 700k/3,080-only/ten-source dataset is rejected before weights.
+    value = gpu(account_id, expected_scope='0310f6d51a13bdff63cb9d9dfe337d9aee8898df9f34857c84a2708d9f941721')
+    value.cells[0].source = dedent(f'''
+        # 04 — Full-data embedding: Kaggle account {account_id}
+
+        Add Input cùng dataset `vmb-full-…` đã được Colab xác minh.
+        Account ID đã đặt sẵn: {account_id}. Hai tài khoản dùng cùng một dataset.
+
+        **Kiểm tra trước:** có thể dùng Kaggle CPU, chỉ chạy cell 1.
+        Cell này đọc job metadata và kiểm tên file task trên Kaggle; không mở Drive,
+        không quét lại corpus/vector cũ, không cài hay nạp model weights.
+        Cần thấy INPUT_INVENTORY_COMPLETE với 802.028 ID và 13 nguồn.
+        Báo cáo có số task/text rows theo model và tài khoản; text rows có thể trùng
+        giữa nguồn/model, không phải số URL hoặc số text khác nhau.
+
+        Khi quyết định chạy nguyên text đã freeze: chọn T4 x2, Internet ON,
+        Save Version / Save & Run All. Kiểm kê file không sửa hoặc chứng nhận
+        chất lượng ngữ nghĩa của text; các lỗi nội dung đã biết vẫn giữ nguyên.
+
+        Dataset là một lượt giới hạn dung lượng output, chỉ chứa text thiếu.
+        ROUND_COMPLETE không có nghĩa toàn scope hoàn tất. Chờ version lưu Outputs
+        thành công rồi nhập về Drive bằng 04_colab_export_full_data_kaggle.ipynb.
+    ''').strip()
+    return value
 
 
 def main():
     vendors()
     nb.write(transfer(), ROOT/'notebooks/04_colab_export_new_data_kaggle.ipynb')
     nb.write(recovery_transfer(), ROOT/'notebooks/04_colab_export_recovered_data_kaggle.ipynb')
-    nb.write(full_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
+    try:
+        from .write_full_queue_notebooks import full_queue_transfer, full_queue_gpu
+    except ImportError:
+        from write_full_queue_notebooks import full_queue_transfer, full_queue_gpu
+    nb.write(full_queue_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     for account in range(2):
         nb.write(gpu(account), ROOT/f'notebooks/kaggle/04_new_data_account_{account}.ipynb')
+        nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_full_data_account_{account}.ipynb')
 
 
 if __name__ == '__main__':

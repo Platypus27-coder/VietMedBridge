@@ -217,6 +217,54 @@ def test_generated_notebooks_compile_and_keep_cpu_gpu_entrypoints_separate():
     assert "KAGGLE_ACCOUNTS = 2" in cpu.cells[1].source
 
 
+def test_input_inventory_uses_names_and_metadata_without_reopening_task_payloads(project, tmp_path, monkeypatch):
+    from scripts.kaggle_input_preflight import inspect_job_inputs
+    flow, target, job = exported(project, tmp_path, accounts=2)
+    original = Path.read_bytes
+    def no_task_reads(path):
+        if path.suffix == '.parquet':
+            pytest.fail('Startup inventory reopened task text payloads')
+        return original(path)
+    monkeypatch.setattr(Path, 'read_bytes', no_task_reads)
+    result = inspect_job_inputs(target, job, report=lambda *a: None)
+    assert result['state'] == 'INPUT_INVENTORY_COMPLETE'
+    assert result['tasks'] == len(job['tasks'])
+    assert sum(v['tasks'] for v in result['by_account'].values()) == len(job['tasks'])
+    assert set(result['by_model']) == {'bge', 'qwen'}
+    assert result['semantic_quality'] == 'NOT_CERTIFIED_BY_FILE_INVENTORY'
+
+
+def test_missing_uploaded_task_fails_before_model_bootstrap(project, tmp_path):
+    from scripts.kaggle_input_preflight import inspect_job_inputs
+    flow, target, job = exported(project, tmp_path)
+    (target/job['tasks'][0]['asset']).unlink()
+    with pytest.raises(FileNotFoundError, match='missing 1 task files'):
+        inspect_job_inputs(target, job, report=lambda *a: None)
+
+
+def test_full_notebooks_reject_the_wrong_dataset_and_first_cell_needs_no_gpu(project, tmp_path):
+    from scripts.kaggle_input_preflight import inspect_job_inputs
+    from scripts.write_new_data_kaggle_notebooks import full_gpu
+    flow, target, job = exported(project, tmp_path)
+    for account in (0, 1):
+        notebook = full_gpu(account)
+        for c in notebook.cells:
+            if c.cell_type == 'code': compile(c.source, '<full-gpu>', 'exec')
+        assert 'inspect_job_inputs(JOB_DIR, JOB' in notebook.cells[1].source
+        assert 'nvidia-smi' not in notebook.cells[1].source
+        assert 'pip' not in notebook.cells[1].source
+        assert 'nvidia-smi' in notebook.cells[2].source
+    with pytest.raises(ValueError, match='not the verified'):
+        inspect_job_inputs(target, job, expected_scope='a'*64, report=lambda *a: None)
+    scope = {'official_ids': 802028, 'source_builds': 13, 'scope_manifest_sha256': 'a'*64}
+    full_job = seal({**{k: v for k, v in job.items() if k != 'manifest_sha256'},
+                     'coverage_scope': scope, 'frozen_sources': [{'build_run': str(i)} for i in range(13)]})
+    assert inspect_job_inputs(target, full_job, expected_scope='a'*64,
+                              report=lambda *a: None)['scope'] == scope
+    with pytest.raises(ValueError, match='not the verified'):
+        inspect_job_inputs(target, full_job, expected_scope='b'*64, report=lambda *a: None)
+
+
 def test_uploaded_round_waits_for_other_account_without_opening_payloads(project, tmp_path, monkeypatch):
     flow, target, job = exported(project, tmp_path, accounts=2)
     atomic_json(flow.root/'active_round.json', seal({'binding': flow.binding,

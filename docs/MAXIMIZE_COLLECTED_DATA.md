@@ -1,5 +1,34 @@
 # Tận dụng tiếp nguồn AI Guru đã thu gom
 
+## Bản sửa 23/10: giảm ghi Drive và chốt theo từng lượt
+
+Notebook hiện tại in `MAXIMIZE 20261023-small-journal-r1` khi bắt đầu. Dùng bản
+mới này khi tiếp tục nhánh raw; dừng writer maximize cũ trước. Luồng export/GPU
+802k chạy riêng. Không chạy lại collect/intake hoặc xóa checkpoint để bắt đầu lại.
+
+Đã xác định overhead: 994 SQL snapshot trong 1.000 file mới nhất của campaign
+chiếm gần59,4GiB, mỗi file khoảng60–62MiB. Code cũ sao lưu toàn bộ SQL sau mỗi
+1.024TAR header hoặc32text mới. Bản này chỉ ghi thay đổi raw result, text reference
+và cursor thành journal JSON nhỏ. Gộp SQL đầy đủ sau64journal hoặc ranh giới
+source/stage. Old snapshots được giữ nguyên; không xóa dữ liệu để làm nhẹ.
+
+Runtime mới khôi phục một baseSQL đã kiểm SHA rồi replay tối đa64journal đã seal.
+Nếu bản local ghi trước khi head upload thành công, phần chưa chứng nhận bị bỏ
+khi restore; không giả nhận tiến độ. Nếu mất kết nối sau khi gộp SQL nhưng trước
+khi reset head, marker trong SQL chứng minh journal đã được gộp. Stage freeze vẫn
+xuất SQL checkpoint hoàn chỉnh cho các consumer hiện có. File text/raw đã xử lý
+không cần parse lại khi replay metadata.
+
+Cell4 phục hồi raw theo ngân sách30phút, lưu cursor rồi chốt mọi text mới đã có
+thành `raw-ready-<hash>` để đưa qua GPU riêng. Không đợi cả raw-pass xong.
+Thời gian ghi/chunk/freeze và một lần đọc Drive đang dở có thể kéo dài hơn ngân
+sách đọc; đây không phải cam kết cứu đủ96.982ID trong30phút. Parser, SHA/length,
+source span, tokenizer, gate challenge/quality và model producer giữ nguyên.
+
+`checkpoint.json` luôn chỉ SQL hoàn chỉnh; `raw_journal/head.json` giữ phần mới
+chưa gộp. Report chỉ đọc SQL cũ có thể trễ so với journal. Khi cần xuất/chốt text,
+dùng notebook/finalize mới có hỗ trợ journal, không dùng bản cũ để ghi đè progress.
+
 Mở `notebooks/02_colab_maximize_collected_data.ipynb`, chọn **Colab CPU → Run all**.
 Chỉ một phiên ghi vào campaign này. Không cần đổi worker/account/GPU, không gọi
 website, không cần Kaggle/HF token. Người dùng tự chạy notebook.
@@ -101,40 +130,93 @@ trong `embedding_batches/<hash>/embeddings_v1`, tách biệt batch 10 nguồn.
 Đây là embedding các recovery delta đã freeze; không chứng minh đã có nội dung
 cho toàn bộ URL BTC hoặc đủ Qwen/BGE cho mọi candidate khác.
 
-## Luồng đầy đủ — toàn bộ dữ liệu hợp lệ đã xử lý
+## Luồng đầy đủ — xuất toàn bộ text, kế hoạch GPU riêng
 
-Dùng **`notebooks/04_colab_export_full_data_kaggle.ipynb` trên Colab CPU →
-Run all**. Giữ `KAGGLE_ACCOUNTS=2`, Outputs trống để xuất. Đây là notebook
-chính cho yêu cầu full data; hai notebook xuất từng batch ở trên chỉ là công cụ
-theo phạm vi riêng. Người dùng tự chạy notebook; không chạy hai CPU writer cùng
-scope một lúc. Secret Kaggle và hai GPU notebook dùng như trên.
+Mở bản mới của `notebooks/04_colab_export_full_data_kaggle.ipynb` trên Colab
+CPU, giữ KAGGLE_ACCOUNTS=2 và KAGGLE_NOTEBOOK_OUTPUT trống, Run all. Notebook
+nhận baseline, 10 nguồn intake và mọi recovery candidate đã freeze, gồm cả
+legacy content được yêu cầu giữ. Không crawl/extract/chunk/index lại. Bộ model,
+runtime, text hash và namespace vector giữ nguyên; BGE COMPLETE được kế thừa.
 
-Nguồn gồm baseline đã freeze, đủ 10 nguồn intake đã freeze, và mọi recovery
-candidate trong `delta_candidates.json`. Giữ cả legacy content đã được yêu cầu
-tận dụng, không lọc bỏ tài liệu cũ hoặc cộng số document rows thành số ID BTC.
-Manifest nguồn và input gốc được dùng lại; không crawl/extract/chunk/freeze hay
-xây lại catalog. BGE baseline COMPLETE được kế thừa qua một manifest đã seal,
-không mở 1.797 map/input payload chỉ để kiểm kê. Qwen đã có trong content cache
-và các model/view COMPLETE khác cũng được dùng lại đúng producer/model identity.
+FULL_SCOPE_READY phải có ít nhất 802.028 ID BTC / 13 nguồn đã chốt. Đó là số ID
+có text trong phạm vi hiện tại, chưa phải toàn bộ BTC. Số document rows hoặc
+model-input rows không được cộng thành số URL khác nhau. Kiểm tra cấu trúc/hash
+không chứng nhận chất lượng ngữ nghĩa; text LOW và lỗi trích xuất đã biết giữ
+nguyên trong lần đổi cách đóng gói này.
 
-Trước khi xuất GPU, luồng đối chiếu reference của từng ID từ SQL collection và
-SQL maximize với candidate frozen, alias SHA, snapshot và input manifests.
-Phải có `FULL_SCOPE_READY` với **ít nhất 802.028 ID BTC**. Nếu thiếu nguồn,
-binding sai hoặc số ID thấp hơn yêu cầu thì dừng, không tự đổi sang batch 3.080.
-Membership lưu theo từng part trên Drive, rồi chốt report nhỏ. Chạy tiếp bỏ qua
-membership đã commit; scope hoàn tất không mở lại SQL/corpus. Nguồn SQL là hai
-checkpoint metadata riêng; không mở lại TAR hoặc vector payload.
+### Một thư viện chứa toàn bộ text thiếu
 
-Input part chưa chọn được đọc một lần vào scratch Colab, kiểm hash rồi lookup
-text cache. Draft/task/journal được lưu sau từng part, runtime mới không duyệt
-lại part đã chọn. Hash trùng giữa các nguồn thuộc cùng GPU nên dùng lại vector.
-Sau khi chọn toàn bộ, hàng đợi thiếu được giữ trên Drive. Dataset mỗi lượt chứa
-phần được giao trong trần 16 GB vector mới/acc; `scheduled_tasks`,
-`unscheduled_tasks`, `all_remaining_tasks_scheduled` phân biệt rõ một lượt và
-toàn bộ scope. Nhập Outputs rồi chạy tiếp để xuất phần còn thiếu, không tạo lại
-hàng đợi. Không hứa toàn bộ Qwen xong trong một lượt hay trong một đêm.
+`FullQueueKaggle.export_inputs` dùng journal chọn text đã lưu, lấy tất cả task
+chưa được import, không áp trần dung lượng output vào input. Copy mỗi file
+missing Parquet đã có một lần theo source/model; task tham chiếu offset trong
+file đó. Không tạo hàng chục nghìn file riêng cho từng task. Header thư viện
+phải có input_export_complete=true, unscheduled_tasks=0. Có thể có dòng text
+trùng giữa nguồn/model; worker ownership theo hash bảo đảm dùng lại vector.
 
-Scope ở `data_staging/btc-full-embeddings-71be0e12-v1/<hash>/scope.json`,
-mapping và tiến độ trong `embeddings_v1/`. `full_embedding_status.json` ghi
-coverage BGE/Qwen của toàn scope; chỉ khi mọi nguồn đủ cả hai model mới có
-`FULL_DATA_EMBEDDINGS_COMPLETE`. Active candidate/luồng submit không bị sửa.
+Thư viện được khóa bởi input_library.json và full_package.json. Dataset có
+prefix vmb-full-inputs-. Sau khi upload và đối chiếu job.json thành công, các
+lượt sau dùng lại dataset đó, không đóng gói/upload lại text. Nếu runtime CPU
+bị thay trước khi upload xong, chỉ file staging còn thiếu mới được khôi phục từ
+saved missing inputs; checksum và job hash vẫn phải khớp. Key-only Parquet đã
+lưu trên Drive dùng để lập kế hoạch, không mở lại corpus hoặc vector payload.
+
+### Kế hoạch GPU nhỏ, thay theo lượt
+
+`create_plan` giữ trần dự kiến 16 GB vector mới/acc/lượt, đây là lựa chọn cấu
+hình của pipeline. Whitelist task, cached keys, job/library hash, team và dự
+kiến dung lượng được seal riêng. Dataset kế hoạch có prefix vmb-full-plan-.
+Colab in hai link ALL_TEXT_DATASET_READY và GPU_PLAN_DATASET_READY. Hai acc
+Add Input cùng hai dataset, dùng 04_full_data_account_0.ipynb và
+04_full_data_account_1.ipynb. Account ID đã đặt sẵn 0/1. Chủ dataset cấp quyền
+đọc cả hai gói cho tài khoản còn lại.
+
+Có thể dùng Kaggle CPU và chỉ chạy cell 1 để kiểm mọi file input, kể cả file
+chưa được giao trong kế hoạch hiện tại. ALL_TEXT_INPUTS_PRESENT xác nhận toàn
+thư viện, số task trong kế hoạch có thể nhỏ hơn. Cell này không cài/nạp weights
+hoặc mở Drive. Khi chạy GPU dùng T4 x2, Internet ON, Save Version / Save & Run
+All. Worker chỉ chạy whitelist của kế hoạch, kiểm SHA/text keys khi sử dụng.
+Giới hạn phiên hoặc quota có thể khiến kế hoạch chưa hết việc; journal và
+Outputs của task hoàn tất phải được lưu thành công.
+
+Sau GPU điền hai owner/notebook vào KAGGLE_NOTEBOOK_OUTPUT rồi Run all notebook
+CPU. Importer khóa đúng thư viện, kế hoạch, account, task, vector hash/dimension
+và producer. Keys được GPU bỏ qua phải thật sự có trong lookup cùng producer
+trên Drive. Nhập kết quả cả hai acc rồi mới tạo kế hoạch tiếp theo, loại task
+đã xong và dùng lại vector trùng. Lượt sau chỉ thay dataset kế hoạch nhỏ, giữ
+thư viện text. Không cần tải vector cũ vào Kaggle để resume.
+
+### Chuyển từ gói 1,84 GB cũ
+
+Chủ dự án đã xác nhận chưa chạy GPU gói cũ. Vì vậy bản notebook này đặt
+MIGRATE_UNSTARTED_LEGACY=True để ghi lịch sử chuyển sang thư viện đầy đủ.
+Job, dataset, active_round và receipt cũ không bị xóa; Outputs cũ vẫn nhập được.
+Nếu một người khác đã chạy GPU gói cũ thì giữ False và nhập kết quả trước khi
+chuyển. Active submission candidate luôn được giữ nguyên.
+
+Scope và membership ở btc-full-embeddings-71be0e12-v1/<hash>/scope.json.
+Thư viện, kế hoạch, import receipts và full_embedding_status.json ở
+embeddings_v1/kaggle-2x2/. ROUND_COMPLETE chỉ hoàn thành kế hoạch của account;
+FULL_DATA_EMBEDDINGS_COMPLETE mới có nghĩa mọi nguồn đủ BGE và Qwen. Query,
+vector index, reranker và submission vẫn là giai đoạn riêng.
+
+### Tránh IOPub timeout và giữ kết quả phiên bị lỗi
+
+Hai notebook GPU ghi stdout/stderr đầy đủ vào
+`/kaggle/working/vmb_full_queue/gpu-worker.log`. IOPub chỉ nhận các dòng tiến
+độ có giới hạn, heartbeat và GPU_RUN_SUMMARY; không nhận JSON chứa toàn bộ
+task/text hashes. Worker và manifest đã khóa trong dataset không bị sửa, nên
+dataset text/kế hoạch hiện có vẫn dùng được mà không xuất lại.
+
+Nếu worker lỗi nhưng đã tạo partial manifest đúng job/plan/account và checksum,
+notebook báo process_state=FAILED rồi kết thúc để Kaggle có thể lưu Outputs.
+Đây không phải xác nhận embedding hoàn tất. Thiếu manifest hoặc manifest sai
+vẫn báo lỗi và giữ nguyên các file để kiểm tra. Giới hạn/quota/hạ tầng của
+Kaggle vẫn có thể ngắt phiên trước khi Outputs được lưu.
+
+Notebook CPU mới cho phép thăm dò Outputs của phiên ERROR/CANCELLED đã kết
+thúc, ngoài COMPLETE. Nó phải tải mới và kiểm manifest từ Kaggle trước, rồi
+importer kiểm đầy đủ task/vector/producer như thường lệ; RUNNING/QUEUED vẫn
+bị chặn. Với phiên `kaisercoding/impact` bị IOPub timeout, nhập handle đó vào
+KAGGLE_NOTEBOOK_OUTPUT để thử lấy phần đã lưu trước khi đổi kế hoạch. Nếu
+Kaggle không lưu manifest/vector của phiên lỗi thì không thể xác nhận hay
+khôi phục những phần đó chỉ từ log.
