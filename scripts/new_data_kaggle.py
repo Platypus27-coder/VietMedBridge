@@ -109,20 +109,22 @@ class NewDataKaggle:
         """Save draft refs and missing-text tasks before committing each input part."""
         for family in FAMILIES:
             selected = self.journals(family)
-            pending = [s for s in self.view.sources if s['ordinal'] not in selected]
-            print(f'SELECTION {family}: {len(selected)}/{len(self.sources)} parts saved; {len(pending)} new', flush=True)
+            complete = self.view._journals(family)
+            pending = [s for s in self.view.sources if s['ordinal'] not in selected and self.view._key(s) not in complete]
+            print(f'SELECTION {family}: {len(selected)} selection parts saved | {len(complete)}/{len(self.sources)} maps complete; {len(pending)} new', flush=True)
             if not pending:
                 continue
             expected = self.view.identities[family]
             blocks = blocks_factory(self.view.data, SimpleNamespace(identity=expected['encoder'], dimension=expected['dimension']),
                                     self.work / family, receipt_api=receipt_api, progress=print)
-            complete = self.view._journals(family)
             try:
                 for source in pending:
                     part, ordinal = source['part'], source['ordinal']
                     path = bound(self.view.project, source['build']['build_dir']) / 'index_inputs' / part['path']
-                    verify_file(path, part['sha256'])
-                    rows = pq.read_table(path, columns=['id', 'text']).to_pylist()
+                    local_input = self.work / 'current-input.parquet'
+                    if publish_file(path, local_input) != part['sha256']:
+                        raise ValueError('Frozen input checksum mismatch during staging.')
+                    rows = pq.read_table(local_input, columns=['id', 'text']).to_pylist()
                     if len(rows) != part['rows'] or any(r['id'] != key(r['text']) for r in rows):
                         raise ValueError('Frozen input row/hash mismatch.')
                     known = lookup(blocks, [r['id'] for r in rows])
@@ -264,12 +266,19 @@ class NewDataKaggle:
         model_code = {n: sha256_file(Path(checkout)/'src/vietmedbridge'/n) for n in ('retrieval_models.py', 'qwen_models.py')}
         scripts = Path(__file__).resolve().parent
         workers = {n: sha256_file(scripts/n) for n in SOURCE_FILES}
+        frozen_sources = {source['build']['build_run']: source['build'] for source in self.view.sources}
         job = seal({'schema': 'new-data-kaggle-v1', 'selection_binding': self.binding, 'batch': self.view.batch['manifest_sha256'],
             'source_batch_dir': self.view.root.relative_to(self.view.project).as_posix(),
+            'coverage_scope': {k: self.view.batch[k] for k in ('official_ids','source_builds','source_documents_sum','input_rows_before_cross_source_dedup','scope_manifest_sha256') if k in self.view.batch},
+            'frozen_sources': [{'build_run': b['build_run'], 'candidate_manifest_sha256': b['candidate_manifest_sha256'],
+                'index_inputs_manifest_sha256': b['index_inputs_manifest_sha256'], 'unique_dense_inputs': b['unique_dense_inputs'],
+                'inherited_complete_models': sorted(b.get('completed_views', {}))} for b in frozen_sources.values()],
+            'scheduled_tasks': len(tasks), 'unscheduled_tasks': sum(remaining.values())-len(tasks),
+            'all_remaining_tasks_scheduled': sum(remaining.values()) == len(tasks),
             'team': self.team, 'code_commit': code_commit, 'repo_url': 'https://github.com/Platypus27-coder/VietMedBridge.git',
             'models': self.view.identities, 'config': config, 'runtime': runtime, 'model_code': model_code,
             'worker_sources': workers, 'tasks': tasks, 'remaining_tasks_before_round': remaining,
-            'scheduled_bytes_per_account': used, 'scope': 'New frozen child embeddings only; no submission inference.'})
+            'scheduled_bytes_per_account': used, 'scope': self.view.batch.get('scope','Frozen corpus child embedding tasks only; no submission inference.')})
         target = self.work / 'exports' / job['manifest_sha256'][:16]
         target.mkdir(parents=True, exist_ok=True)
         for i, task in enumerate(tasks, 1):
@@ -280,10 +289,19 @@ class NewDataKaggle:
             copied(scripts/name, target/name, checksum)
         atomic_json(target/'job.json', job)
         atomic_json(self.root/'exports'/('job-'+job['manifest_sha256']+'.json'), job)
+        if 'official_ids' in self.view.batch:
+            self.coverage()
         return target, job
 
     def coverage(self):
-        return {f: {'completed_parts': len(self.view._journals(f)), 'total_parts': len(self.sources)} for f in FAMILIES}
+        coverage = {f: {'completed_parts': len(self.view._journals(f)), 'total_parts': len(self.sources)} for f in FAMILIES}
+        if 'official_ids' in self.view.batch:
+            complete = all(v['completed_parts'] == v['total_parts'] for v in coverage.values())
+            atomic_json(self.root/'full_embedding_status.json', seal({
+                'state': 'FULL_DATA_EMBEDDINGS_COMPLETE' if complete else 'FULL_DATA_EMBEDDINGS_IN_PROGRESS',
+                'official_ids_in_scope': self.view.batch['official_ids'], 'batch': self.view.batch['manifest_sha256'],
+                'coverage': coverage, 'payload_verification': 'SHA256_ON_USE', 'updated_at': utc_now()}))
+        return coverage
 
     def install(self, output, *, receipt_api=None, blocks_factory=ResumableContentBlocks):
         output = Path(output)
@@ -437,7 +455,8 @@ def upload_job(flow, target, job, owner):
             raise ValueError('Upload pointer belongs to another job.')
         handle = saved['dataset_handle']
     else:
-        handle = owner+'/vmb-new-'+job['manifest_sha256'][:12]+'-'+str(time.time_ns())
+        prefix = '/vmb-full-' if job.get('coverage_scope', {}).get('official_ids') else '/vmb-new-'
+        handle = owner+prefix+job['manifest_sha256'][:12]+'-'+str(time.time_ns())
         atomic_json(pointer, {'job': job['manifest_sha256'], 'dataset_handle': handle, 'state': 'UPLOAD_PLANNED'})
         saved = read_json(pointer)
     if saved['state'] == 'UPLOAD_PLANNED':

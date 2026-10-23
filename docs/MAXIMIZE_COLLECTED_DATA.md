@@ -100,3 +100,41 @@ trong `embedding_batches/<hash>/embeddings_v1`, tách biệt batch 10 nguồn.
 
 Đây là embedding các recovery delta đã freeze; không chứng minh đã có nội dung
 cho toàn bộ URL BTC hoặc đủ Qwen/BGE cho mọi candidate khác.
+
+## Luồng đầy đủ — toàn bộ dữ liệu hợp lệ đã xử lý
+
+Dùng **`notebooks/04_colab_export_full_data_kaggle.ipynb` trên Colab CPU →
+Run all**. Giữ `KAGGLE_ACCOUNTS=2`, Outputs trống để xuất. Đây là notebook
+chính cho yêu cầu full data; hai notebook xuất từng batch ở trên chỉ là công cụ
+theo phạm vi riêng. Người dùng tự chạy notebook; không chạy hai CPU writer cùng
+scope một lúc. Secret Kaggle và hai GPU notebook dùng như trên.
+
+Nguồn gồm baseline đã freeze, đủ 10 nguồn intake đã freeze, và mọi recovery
+candidate trong `delta_candidates.json`. Giữ cả legacy content đã được yêu cầu
+tận dụng, không lọc bỏ tài liệu cũ hoặc cộng số document rows thành số ID BTC.
+Manifest nguồn và input gốc được dùng lại; không crawl/extract/chunk/freeze hay
+xây lại catalog. BGE baseline COMPLETE được kế thừa qua một manifest đã seal,
+không mở 1.797 map/input payload chỉ để kiểm kê. Qwen đã có trong content cache
+và các model/view COMPLETE khác cũng được dùng lại đúng producer/model identity.
+
+Trước khi xuất GPU, luồng đối chiếu reference của từng ID từ SQL collection và
+SQL maximize với candidate frozen, alias SHA, snapshot và input manifests.
+Phải có `FULL_SCOPE_READY` với **ít nhất 802.028 ID BTC**. Nếu thiếu nguồn,
+binding sai hoặc số ID thấp hơn yêu cầu thì dừng, không tự đổi sang batch 3.080.
+Membership lưu theo từng part trên Drive, rồi chốt report nhỏ. Chạy tiếp bỏ qua
+membership đã commit; scope hoàn tất không mở lại SQL/corpus. Nguồn SQL là hai
+checkpoint metadata riêng; không mở lại TAR hoặc vector payload.
+
+Input part chưa chọn được đọc một lần vào scratch Colab, kiểm hash rồi lookup
+text cache. Draft/task/journal được lưu sau từng part, runtime mới không duyệt
+lại part đã chọn. Hash trùng giữa các nguồn thuộc cùng GPU nên dùng lại vector.
+Sau khi chọn toàn bộ, hàng đợi thiếu được giữ trên Drive. Dataset mỗi lượt chứa
+phần được giao trong trần 16 GB vector mới/acc; `scheduled_tasks`,
+`unscheduled_tasks`, `all_remaining_tasks_scheduled` phân biệt rõ một lượt và
+toàn bộ scope. Nhập Outputs rồi chạy tiếp để xuất phần còn thiếu, không tạo lại
+hàng đợi. Không hứa toàn bộ Qwen xong trong một lượt hay trong một đêm.
+
+Scope ở `data_staging/btc-full-embeddings-71be0e12-v1/<hash>/scope.json`,
+mapping và tiến độ trong `embeddings_v1/`. `full_embedding_status.json` ghi
+coverage BGE/Qwen của toàn scope; chỉ khi mọi nguồn đủ cả hai model mới có
+`FULL_DATA_EMBEDDINGS_COMPLETE`. Active candidate/luồng submit không bị sửa.

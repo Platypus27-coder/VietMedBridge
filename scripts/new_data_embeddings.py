@@ -137,7 +137,9 @@ class NewDataEmbeddings:
         expected = self.identities[family]
         identity = {"input_manifest_sha256": inputs["manifest_sha256"], "input_count": inputs["input_count"],
                     "encoder": expected["encoder"], "dimension": expected["dimension"], "format": "content-reference-v1"}
-        return self.output / family / source["build"]["build_run"], identity
+        inherited = source['build'].get('completed_views', {}).get(family)
+        root = bound(self.project, inherited['path']) if inherited else self.output / family / source['build']['build_run']
+        return root, identity
 
     def _valid_part(self, family, source, saved):
         checked(saved)
@@ -152,6 +154,19 @@ class NewDataEmbeddings:
     def _journals(self, family):
         expected = {self._key(s): s for s in self.sources}
         merged = {}
+        groups = {}
+        for source in self.sources:
+            if family in source['build'].get('completed_views', {}):
+                groups.setdefault(source['build']['build_run'], []).append(source)
+        for sources in groups.values():
+            root, identity = self._view(family, sources[0])
+            reference = sources[0]['build']['completed_views'][family]
+            saved = checked(read_json(root / 'embeddings.json'))
+            if (saved.get('state') != 'COMPLETE' or saved['manifest_sha256'] != reference['manifest_sha256']
+                    or any(saved.get(k) != v for k, v in identity.items()) or len(saved['parts']) != len(sources)):
+                raise ValueError('Inherited complete embedding view changed.')
+            for source, record in zip(sources, saved['parts']):
+                merged[self._key(source)] = self._valid_part(family, source, record)
         directory = self.output / family / "progress"
         for path in sorted(directory.glob("worker-*.json")):
             saved = checked(read_json(path))
@@ -177,6 +192,8 @@ class NewDataEmbeddings:
             grouped.setdefault(source["build"]["build_run"], []).append(source)
         for sources in grouped.values():
             root, identity = self._view(family, sources[0])
+            if family in sources[0]['build'].get('completed_views', {}):
+                continue  # Existing complete views are read-only; never rewrite the submit namespace.
             if all(self._key(s) in completed for s in sources):
                 path = root / "embeddings.json"
                 value = seal(identity | {"signature": digest_json(identity), "state": "COMPLETE",

@@ -259,6 +259,82 @@ def recovery_transfer():
     return value
 
 
+def full_transfer():
+    value = recovery_transfer()
+    value.cells[0].source = dedent('''
+        # 04 — Toàn bộ dữ liệu đã xử lý: baseline + 10 nguồn + mọi recovery batch
+
+        **Colab CPU → Run all**, `KAGGLE_ACCOUNTS=2`, Outputs để trống khi xuất.
+        Bật Notebook access cho Secret `KAGGLE_JSON`. Không chạy lại 02/03.
+
+        Trước GPU phải có `FULL_SCOPE_READY` với **ít nhất 802.028 ID BTC**.
+        Notebook nhận mọi model input đã freeze, giữ cả nguồn legacy đã được
+        yêu cầu tận dụng. Số document rows hoặc text không phải số ID BTC khác nhau.
+        Tạo manifest membership từ hai SQL metadata checkpoint; không đọc TAR,
+        không chunk lại và không mở vector payload để kiểm kê.
+
+        BGE/Qwen đã có manifest COMPLETE được kế thừa bằng metadata. Phần còn
+        thiếu dùng lookup cache theo text hash; input part đã chọn được bỏ qua
+        khi chạy tiếp. Gói mỗi lượt có trần 16 GB vector mới/acc: xem rõ scheduled
+        và unscheduled tasks. Toàn bộ hàng đợi được giữ trên Drive, không bỏ task.
+
+        Khi có `NEW_DATASET_READY`: hai acc Add Input CÙNG dataset, chạy hai bản
+        `04_new_data_account_0.ipynb` / `04_new_data_account_1.ipynb`, Internet ON,
+        T4 x2, Save & Run All. Sau GPU điền hai handle Outputs rồi Run all notebook
+        CPU này để nhập và xuất lượt còn thiếu. FULL_SCOPE_READY là đủ đầu vào;
+        chỉ FULL_DATA_EMBEDDINGS_COMPLETE mới xác nhận đủ vector cho mọi nguồn.
+    ''').strip()
+    value.cells[1].source = value.cells[1].source.replace('xuất text đã cứu; không đọc raw TAR', 'xuất TOÀN BỘ dữ liệu đã freeze')
+    value.cells[1].source = value.cells[1].source.replace('/content/VietMedBridge-recovery-kaggle', '/content/VietMedBridge-full-kaggle')
+    value.cells[1].source = value.cells[1].source.replace('/content/vmb_recovery_kaggle_cpu', '/content/vmb_full_kaggle_cpu')
+    prepare = value.cells[2].source.split('\nRECOVERY_SOURCE=')[0]
+    for name in ('recovery_kaggle_batch.py', 'full_btc_embeddings.py'):
+        prepare += '\n(WORK_DIR/'+repr(name)+').write_text('+repr((ROOT/'scripts'/name).read_text(encoding='utf-8'))+",encoding='utf-8')\n"
+        prepare += 'sys.modules.pop('+repr(Path(name).stem)+',None)\n'
+    prepare += dedent('''
+        from full_btc_embeddings import prepare_full_scope,load_full_batch,PARENT
+        SCOPE_ROOT,SCOPE=prepare_full_scope(PROJECT,CHECKOUT,WORK_DIR/'metadata',minimum_ids=802028)
+        BATCH_DIR=SCOPE_ROOT.relative_to(PROJECT).as_posix()
+        def full_flow(work,*,accounts=2,gpu_count=2,batch_dir=None):
+            return pipeline.NewDataKaggle(PROJECT,work,identities,accounts=accounts,gpu_count=gpu_count,
+                batch_loader=lambda project:load_full_batch(project,batch_dir or BATCH_DIR,minimum_ids=802028))
+        print(json.dumps({k:SCOPE[k] for k in ('state','official_ids','official_total','reused_ids','new_chunked_ids',
+            'source_builds','source_documents_sum','input_rows_before_cross_source_dedup')},ensure_ascii=False,indent=2),flush=True)
+        print('Membership report:',SCOPE_ROOT/'scope.json',flush=True)
+    ''')
+    value.cells[2].source = prepare
+    value.cells[3].source = cell('''
+        #@title 3. TOÀN BỘ scope: xuất text thiếu / nhập Outputs rồi tiếp tục hàng đợi
+        if KAGGLE_NOTEBOOK_OUTPUT.strip():
+            from kaggle.api.kaggle_api_extended import KaggleApi
+            from vietmedbridge.kaggle_outputs import output_handles
+            api=KaggleApi()
+            api.authenticate()
+            roots=[p.relative_to(PROJECT).as_posix() for p in (PROJECT/PARENT).glob('*/embeddings_v1')]
+            for handle in output_handles(KAGGLE_NOTEBOOK_OUTPUT):
+                output=pipeline.download_outputs(api,handle,WORK_DIR,project=PROJECT,import_roots=roots)
+                saved=pipeline.checked(pipeline.read_json(output/'job.json'))
+                if saved.get('coverage_scope',{}).get('official_ids',0)<802028:
+                    raise ValueError('Outputs này không thuộc full-data scope; nhập bằng notebook xuất tương ứng.')
+                flow=full_flow(WORK_DIR/'cpu',accounts=saved['team']['accounts'],
+                    gpu_count=saved['team']['gpu_count'],batch_dir=saved['source_batch_dir'])
+                print(json.dumps(flow.install(output,receipt_api=api_source),ensure_ascii=False,indent=2),flush=True)
+                KAGGLE_ACCOUNTS=saved['team']['accounts']
+        flow=full_flow(WORK_DIR/'cpu',accounts=KAGGLE_ACCOUNTS)
+        target,job=flow.export(CHECKOUT,config=config,runtime=runtime,code_commit=lock['commit'],receipt_api=api_source)
+        if target is None:
+            print(json.dumps(job,ensure_ascii=False,indent=2),flush=True)
+            if job['state']=='NO_PENDING_KAGGLE_TASKS' and all(v['completed_parts']==v['total_parts'] for v in job['coverage'].values()):
+                print('FULL_DATA_EMBEDDINGS_COMPLETE — mọi nguồn trong full scope đủ BGE và Qwen.',flush=True)
+        else:
+            print('FULL_SCOPE_ROUND:',job['coverage_scope'],'| scheduled',job['scheduled_tasks'],
+                '| still queued',job['unscheduled_tasks'],'| all scheduled',job['all_remaining_tasks_scheduled'],flush=True)
+            pipeline.upload_job(flow,target,job,owner)
+            print('Hai acc dùng CÙNG dataset; account_0 và account_1. Hàng đợi còn thiếu lưu trên Drive.',flush=True)
+    ''').source
+    return value
+
+
 def gpu(account_id=0):
     setup = cell('''
         # Kaggle only. This cell prints before any install or download.
@@ -358,6 +434,7 @@ def main():
     vendors()
     nb.write(transfer(), ROOT/'notebooks/04_colab_export_new_data_kaggle.ipynb')
     nb.write(recovery_transfer(), ROOT/'notebooks/04_colab_export_recovered_data_kaggle.ipynb')
+    nb.write(full_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     for account in range(2):
         nb.write(gpu(account), ROOT/f'notebooks/kaggle/04_new_data_account_{account}.ipynb')
 
