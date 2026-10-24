@@ -58,13 +58,18 @@ def full_queue_transfer():
     prepare += '\n(WORK_DIR/\'full_queue_embeddings.py\').write_text('+repr(source)+",encoding='utf-8')\n"
     source = (ROOT/'scripts/kaggle_output_transfer.py').read_text(encoding='utf-8')
     prepare += '\n(WORK_DIR/\'kaggle_output_transfer.py\').write_text('+repr(source)+",encoding='utf-8')\n"
+    source = (ROOT/'scripts/kaggle_output_paged.py').read_text(encoding='utf-8')
+    prepare += '\n(WORK_DIR/\'kaggle_output_paged.py\').write_text('+repr(source)+",encoding='utf-8')\n"
     prepare += dedent('''
         sys.modules.pop('full_queue_embeddings',None)
         sys.modules.pop('kaggle_output_transfer',None)
+        sys.modules.pop('kaggle_output_paged',None)
         for module_name in tuple(sys.modules):
             if module_name == 'kagglehub' or module_name.startswith('kagglehub.'):
                 sys.modules.pop(module_name,None)
         importlib.invalidate_caches()
+        from kaggle_output_paged import install_paged_output_transfer
+        install_paged_output_transfer()
         import full_queue_embeddings as queue
         def queue_flow(work,*,accounts=2,gpu_count=2,batch_dir=None):
             return queue.FullQueueKaggle(PROJECT,work,identities,accounts=accounts,gpu_count=gpu_count,

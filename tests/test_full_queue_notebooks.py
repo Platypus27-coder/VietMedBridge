@@ -31,6 +31,8 @@ def test_generated_cpu_embeds_current_helpers_and_exports_all_inputs():
             and n.args and isinstance(n.args[0],ast.Constant) and isinstance(n.args[0].value,str)]
     assert (ROOT/'scripts/full_queue_embeddings.py').read_text(encoding='utf-8') in [n.args[0].value for n in writes]
     assert (ROOT/'scripts/kaggle_output_transfer.py').read_text(encoding='utf-8') in [n.args[0].value for n in writes]
+    assert (ROOT/'scripts/kaggle_output_paged.py').read_text(encoding='utf-8') in [n.args[0].value for n in writes]
+    assert 'install_paged_output_transfer()' in source
     assert 'flow.export_inputs(' in notebook.cells[3].source
     assert 'flow.create_plan(' in notebook.cells[3].source
     assert 'flow.export(' not in notebook.cells[3].source

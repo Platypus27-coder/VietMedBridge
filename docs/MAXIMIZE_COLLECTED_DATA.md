@@ -225,14 +225,33 @@ khôi phục những phần đó chỉ từ log.
 
 Luồng full-data biết sẵn đường dẫn
 `vmb_full_queue/result/new-data-result.json`. Notebook CPU lấy trực tiếp file
-này qua KaggleHub, khóa số saved version rồi lấy archive Outputs của cùng
-version, không dùng ListKernelSessionOutput cho từng trang. Cache archive ở ổ
-tạm Colab được thư viện dùng lại khi còn runtime; không tạo thêm bản sao toàn
-bộ vectors trước khi native importer đưa chúng về Drive. JSON tiến độ/version
+này qua KaggleHub, khóa số saved version rồi lấy từng file được manifest tham
+chiếu, cùng job/plan. Không yêu cầu archive. Bản tối ưu dùng
+ListKernelSessionOutput page_size=200, version_label cố định, lấy URL trực tiếp
+cho tối đa 200 file mỗi yêu cầu thay vì gọi download API riêng cho mỗi vector.
+Chỉ có tối đa bốn lượt tải payload đồng thời; file đã hoàn tất giữ
+completion marker trong cache Colab để lần thử sau dùng lại. Không tải log,
+worker journals hoặc notebook HTML nếu importer không cần. JSON tiến độ/version
 lưu ở `data_staging/kaggle_output_downloads` trên Drive.
 
+Cursor từng trang hoàn tất lưu trong cache Colab; khi resume chỉ dùng lại cursor
+nếu các file thuộc trang đã xử lý vẫn có completion marker. Không ghi URL có chữ
+ký vào log hoặc Drive. Tiến độ KAGGLE_TRANSFER báo tổng file, số đã có trong cache,
+số còn thiếu và ETA tải đo từ tốc độ thực tế. ETA này chưa gồm native validation
+và nhập vector về Drive. File vector mới được kiểm SHA trước khi đánh dấu tải
+xong, và native importer giữ các kiểm tra producer/task/dimension trước publish.
+
 HTTP 429/5xx được thử lại có giới hạn, tôn trọng Retry-After. 401/403/404 không
-bị lặp lại. Sau tải archive phải có manifest, job, plan và mọi vector mà manifest
-tham chiếu; thiếu file thì dừng trước import. Hash và producer vẫn được native
+bị lặp lại. Phải có manifest, job, plan và mọi vector mà manifest tham chiếu;
+thiếu file thì dừng trước import. Hash và producer vẫn được native
 importer kiểm như trước. Cache tạm không phải bản backup độc lập: chỉ checkpoint
 đã nhập thành công về Drive mới dùng lại được sau khi mất runtime Colab.
+
+Luồng tải cũng thử lại có giới hạn khi gặp ChunkedEncodingError, ConnectionError
+hoặc Timeout; giữ cùng version và cache, không xóa file đang tải dở. Downloader
+KaggleHub 1.0.3 dùng HTTP Range để tiếp tục một file khi server hỗ trợ và kiểm checksum
+khi hoàn tất. Lỗi hết đĩa, sai checksum hoặc chứng chỉ không được coi là lỗi
+mạng để thử lại. Với runtime đang dùng notebook cũ, chạy cell trong
+`scripts/resume_kaggle_output_download_cell.py` để chuyển sang tải file có tên
+(tuần tự trong cell vá), rồi chạy lại riêng cell 3; không
+restart runtime hoặc chạy lại GPU để xử lý lỗi tải Outputs này.

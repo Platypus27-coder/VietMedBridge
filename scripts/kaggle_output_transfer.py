@@ -1,9 +1,12 @@
 """Fetch pinned notebook Outputs without enumerating every output-file page."""
-from contextlib import contextmanager
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager, nullcontext
 from email.utils import parsedate_to_datetime
 import os
 from pathlib import Path, PurePosixPath
 import time
+
+from requests.exceptions import ChunkedEncodingError, ConnectionError, SSLError, Timeout
 
 from vietmedbridge.artifacts import atomic_json, digest_json
 
@@ -14,14 +17,21 @@ def _request():
 
 
 def retry_kaggle(operation, *, report=print, attempts=6, sleep=time.sleep):
-    """Retry only throttling/transient server errors; never retry permission errors."""
+    """Retry a pinned transfer after throttling, server or interrupted-stream errors.
+
+    The Hub downloader retains the partial file. Calling the same operation with
+    the same cache lets it use HTTP Range when the server advertises support.
+    Do not remove partial payloads or mark them complete here.
+    """
     for attempt in range(attempts):
         try:
             return operation()
         except Exception as error:
             response = getattr(error, 'response', None)
             status = getattr(response, 'status_code', None)
-            if status not in (429, 500, 502, 503, 504) or attempt == attempts-1:
+            interrupted = (status is None and isinstance(error, (ChunkedEncodingError, ConnectionError, Timeout))
+                           and not isinstance(error, SSLError))
+            if (not interrupted and status not in (429, 500, 502, 503, 504)) or attempt == attempts-1:
                 raise
             value = (getattr(response, 'headers', {}) or {}).get('Retry-After')
             delay = min(15 * 2**attempt, 120)
@@ -36,7 +46,8 @@ def retry_kaggle(operation, *, report=print, attempts=6, sleep=time.sleep):
             if delay > 300:
                 raise RuntimeError('Kaggle requests a cooldown longer than five minutes; '
                                    'retain this runtime/cache and retry after the server cooldown.') from error
-            report(f'KAGGLE_RETRY HTTP {status} | same pinned resource | wait {delay:.0f}s '
+            reason = f'network {type(error).__name__}' if interrupted else f'HTTP {status}'
+            report(f'KAGGLE_RETRY {reason} | same pinned resource; partial cache retained | wait {delay:.0f}s '
                    f'| attempt {attempt+1}/{attempts-1}')
             while delay > 0:
                 step = min(30, delay)
@@ -88,10 +99,10 @@ class SavedNotebookOutputs:
         atomic_json(self.record, {'handle': self.handle, 'pinned_handle': self.pinned,
                                  'state': state, **details})
 
-    def _download(self, *, path=None, force=False):
+    def _download(self, *, path=None, force=False, cache_active=False):
         import kagglehub
         def transfer():
-            with _cache_at(self.cache):
+            with (nullcontext() if cache_active else _cache_at(self.cache)):
                 # The public Hub resolver downloads a single named file, or the
                 # full archived bundle. It does not list output pages for these.
                 return Path(kagglehub.notebook_output_download(self.pinned, path=path,
@@ -111,25 +122,61 @@ class SavedNotebookOutputs:
         return path
 
     def all(self, relative, manifest):
-        self._saved('FETCHING_BUNDLE', manifest_sha256=manifest['manifest_sha256'])
-        self.report('KAGGLE_OUTPUT_BUNDLE: download/reuse pinned archive; no output-page enumeration')
-        directory = self._download()
-        target = directory.joinpath(*PurePosixPath(relative).parts)
+        # A large dynamically generated archive can repeatedly lose its stream
+        # without advertising Range support. The manifest already names every
+        # asset needed by native install, so neither an archive nor a listing
+        # request is necessary. Completed named files retain Hub cache markers.
+        self._saved('FETCHING_NAMED_FILES', manifest_sha256=manifest['manifest_sha256'])
+        target = self._download(path=relative)
         root = target.parent.resolve()
-        required = ['job.json', 'new-data-result.json']
+        required = ['job.json']
         if manifest.get('execution_plan'):
             required.append('execution-plan.json')
         required.extend(block['path'] for block in manifest['blocks'])
-        missing = []
+        required = list(dict.fromkeys(required))
+        # Validate every path before starting additional remote requests.
         for name in required:
+            pure = PurePosixPath(name)
+            if (not name or pure.is_absolute() or '..' in pure.parts or '\\' in name
+                    or ':' in name or pure.as_posix() != name):
+                raise ValueError('Unsafe saved vector path.')
             path = (root/name).resolve()
             if not path.is_relative_to(root):
                 raise ValueError('Saved vector path escapes the result directory.')
-            if not path.is_file():
-                missing.append(name)
-        if missing:
-            self._saved('BUNDLE_INCOMPLETE', missing_files=len(missing))
-            raise RuntimeError(f'Kaggle output archive is incomplete: {len(missing)} required files missing. '
-                               'No checkpoint import has started; retain the saved version.')
+        remote_root = PurePosixPath(relative).parent
+        finished = 0
+        total = len(required)
+        def fetch(name):
+            local = self._download(path=(remote_root/name).as_posix(), cache_active=True)
+            if not local.is_file() or local.resolve() != (root/name).resolve():
+                raise RuntimeError(f'Kaggle did not return required output file: {name}')
+            return name
+        self.report(f'KAGGLE_OUTPUT_FILES: 0/{total:,} | two named transfers; no archive or output-page scan')
+        # Set the process-wide cache once, outside the pool. Per-thread changes
+        # of KAGGLEHUB_CACHE could restore each other's environment mid-transfer.
+        try:
+            with _cache_at(self.cache), ThreadPoolExecutor(max_workers=2) as pool:
+                names = iter(required)
+                pending = {pool.submit(fetch, name) for name in [next(names, None), next(names, None)]
+                           if name is not None}
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        future.result()
+                        finished += 1
+                        if finished % 32 == 0 or finished == total:
+                            self.report(f'KAGGLE_OUTPUT_FILES: {finished:,}/{total:,} ready in cache '
+                                        '| native checksums checked during import')
+                        if finished % 128 == 0:
+                            self._saved('FETCHING_NAMED_FILES', completed_files=finished, total_files=total,
+                                        manifest_sha256=manifest['manifest_sha256'])
+                    for _ in done:
+                        name = next(names, None)
+                        if name is not None:
+                            pending.add(pool.submit(fetch, name))
+        except Exception:
+            self._saved('NAMED_FILES_INTERRUPTED', completed_files=finished, total_files=total,
+                        manifest_sha256=manifest['manifest_sha256'])
+            raise
         self._saved('BUNDLE_READY_FOR_NATIVE_VALIDATION', manifest_sha256=manifest['manifest_sha256'])
         return target
