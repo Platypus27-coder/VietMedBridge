@@ -422,11 +422,20 @@ def validate_job(directory, checkout=None):
     return job
 
 
-def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_failed=False):
+def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_failed=False,
+                     manifest_path=None):
     """Page through the new-data manifest first, before downloading vectors."""
     from vietmedbridge.kaggle_outputs import _download_pages, output_handles
     output_handles(handle)
-    status = api.kernels_status(handle)
+    transport = None
+    if manifest_path is not None:
+        try:
+            from .kaggle_output_transfer import SavedNotebookOutputs, retry_kaggle
+        except ImportError:
+            from kaggle_output_transfer import SavedNotebookOutputs, retry_kaggle
+        status = retry_kaggle(lambda: api.kernels_status(handle))
+    else:
+        status = api.kernels_status(handle)
     status = status.get('status') if isinstance(status, dict) else status.status
     status = getattr(status, 'name', str(status)).upper()
     failed = status in {'ERROR', 'FAILED', 'CANCELLED', 'CANCELED'}
@@ -438,12 +447,16 @@ def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_
     base = Path(work)/'downloads'/digest_json(handle)[:16]
     probe = base/('probe-'+str(time.time_ns()))
     probe.mkdir(parents=True, exist_ok=True)
-    paths = _download_pages(api, handle, probe, file_pattern=r'(^|/)new-data-result[.]json$', force=True)
+    if manifest_path is not None:
+        transport = SavedNotebookOutputs(api, handle, work, project=project)
+        paths = [transport.manifest(manifest_path)]
+    else:
+        paths = _download_pages(api, handle, probe, file_pattern=r'(^|/)new-data-result[.]json$', force=True)
     manifests = [p for p in paths if p.name == 'new-data-result.json']
     if len(manifests) != 1:
         raise RuntimeError(f'{handle}: expected one new-data-result.json, found {len(manifests)}; choose the saved new-data worker version.')
     manifest = checked(read_json(manifests[0]))
-    relative = manifests[0].relative_to(probe)
+    relative = Path(manifest_path) if transport is not None else manifests[0].relative_to(probe)
     if project is not None:
         from_parent = Path(project)/'data_staging'/'btc-new-71be0e12-20261019-v1'/'freeze_batch_v1'/'embeddings_v1'
         roots=[from_parent,*[bound(project,p) for p in import_roots]]
@@ -458,8 +471,12 @@ def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_
             return manifests[0].parent
     destination = base/manifest['manifest_sha256'][:16]
     destination.mkdir(parents=True, exist_ok=True)
-    paths = _download_pages(api, handle, destination, force=False, quiet=False)
-    target = destination/relative
+    if transport is not None:
+        target = transport.all(manifest_path, manifest)
+        paths = [target]
+    else:
+        paths = _download_pages(api, handle, destination, force=False, quiet=False)
+        target = destination/relative
     if target not in paths or checked(read_json(target)) != manifest:
         raise ValueError('Saved Kaggle Outputs changed after preflight; select a fixed version.')
     return target.parent

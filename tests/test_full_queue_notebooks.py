@@ -30,11 +30,13 @@ def test_generated_cpu_embeds_current_helpers_and_exports_all_inputs():
             and isinstance(n.func,ast.Attribute) and n.func.attr=='write_text'
             and n.args and isinstance(n.args[0],ast.Constant) and isinstance(n.args[0].value,str)]
     assert (ROOT/'scripts/full_queue_embeddings.py').read_text(encoding='utf-8') in [n.args[0].value for n in writes]
+    assert (ROOT/'scripts/kaggle_output_transfer.py').read_text(encoding='utf-8') in [n.args[0].value for n in writes]
     assert 'flow.export_inputs(' in notebook.cells[3].source
     assert 'flow.create_plan(' in notebook.cells[3].source
     assert 'flow.export(' not in notebook.cells[3].source
     assert 'supersede_unstarted_legacy=MIGRATE_UNSTARTED_LEGACY' in notebook.cells[3].source
     assert 'allow_failed=True' in notebook.cells[3].source
+    assert "manifest_path='vmb_full_queue/result/new-data-result.json'" in notebook.cells[3].source
     assert 'sys.modules.pop(module_name,None)' in source
 
 

@@ -48,6 +48,7 @@ def full_queue_transfer():
         'KAGGLE_ACCOUNTS = 2 #@param {type:"integer"}',
         'KAGGLE_ACCOUNTS = 2 #@param {type:"integer"}\n'
         'MIGRATE_UNSTARTED_LEGACY = True #@param {type:"boolean"}')
+    value.cells[1].source = value.cells[1].source.replace("'kagglehub'", "'kagglehub==1.0.3'")
     prepare = value.cells[2].source.replace(
         'import new_data_kaggle as pipeline',
         "for module_name in ('new_data_kaggle','new_data_embeddings','new_data_cache_lookup','new_data_drive_api'):\n"
@@ -55,8 +56,14 @@ def full_queue_transfer():
         'importlib.invalidate_caches()\nimport new_data_kaggle as pipeline')
     source = (ROOT/'scripts/full_queue_embeddings.py').read_text(encoding='utf-8')
     prepare += '\n(WORK_DIR/\'full_queue_embeddings.py\').write_text('+repr(source)+",encoding='utf-8')\n"
+    source = (ROOT/'scripts/kaggle_output_transfer.py').read_text(encoding='utf-8')
+    prepare += '\n(WORK_DIR/\'kaggle_output_transfer.py\').write_text('+repr(source)+",encoding='utf-8')\n"
     prepare += dedent('''
         sys.modules.pop('full_queue_embeddings',None)
+        sys.modules.pop('kaggle_output_transfer',None)
+        for module_name in tuple(sys.modules):
+            if module_name == 'kagglehub' or module_name.startswith('kagglehub.'):
+                sys.modules.pop(module_name,None)
         importlib.invalidate_caches()
         import full_queue_embeddings as queue
         def queue_flow(work,*,accounts=2,gpu_count=2,batch_dir=None):
@@ -73,7 +80,8 @@ def full_queue_transfer():
             api.authenticate()
             roots=[p.relative_to(PROJECT).as_posix() for p in (PROJECT/PARENT).glob('*/embeddings_v1')]
             for handle in output_handles(KAGGLE_NOTEBOOK_OUTPUT):
-                output=pipeline.download_outputs(api,handle,WORK_DIR,project=PROJECT,import_roots=roots,allow_failed=True)
+                output=pipeline.download_outputs(api,handle,WORK_DIR,project=PROJECT,import_roots=roots,allow_failed=True,
+                    manifest_path='vmb_full_queue/result/new-data-result.json')
                 saved=pipeline.checked(pipeline.read_json(output/'job.json'))
                 if saved.get('coverage_scope',{}).get('official_ids',0)<802028:
                     raise ValueError('Outputs không thuộc scope full-data; dùng notebook xuất tương ứng.')

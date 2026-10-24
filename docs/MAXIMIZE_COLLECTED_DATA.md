@@ -220,3 +220,19 @@ bị chặn. Với phiên `kaisercoding/impact` bị IOPub timeout, nhập handl
 KAGGLE_NOTEBOOK_OUTPUT để thử lấy phần đã lưu trước khi đổi kế hoạch. Nếu
 Kaggle không lưu manifest/vector của phiên lỗi thì không thể xác nhận hay
 khôi phục những phần đó chỉ từ log.
+
+### Nhập Outputs không quét hàng trăm trang danh sách file
+
+Luồng full-data biết sẵn đường dẫn
+`vmb_full_queue/result/new-data-result.json`. Notebook CPU lấy trực tiếp file
+này qua KaggleHub, khóa số saved version rồi lấy archive Outputs của cùng
+version, không dùng ListKernelSessionOutput cho từng trang. Cache archive ở ổ
+tạm Colab được thư viện dùng lại khi còn runtime; không tạo thêm bản sao toàn
+bộ vectors trước khi native importer đưa chúng về Drive. JSON tiến độ/version
+lưu ở `data_staging/kaggle_output_downloads` trên Drive.
+
+HTTP 429/5xx được thử lại có giới hạn, tôn trọng Retry-After. 401/403/404 không
+bị lặp lại. Sau tải archive phải có manifest, job, plan và mọi vector mà manifest
+tham chiếu; thiếu file thì dừng trước import. Hash và producer vẫn được native
+importer kiểm như trước. Cache tạm không phải bản backup độc lập: chỉ checkpoint
+đã nhập thành công về Drive mới dùng lại được sau khi mất runtime Colab.
