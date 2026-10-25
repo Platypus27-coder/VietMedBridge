@@ -32,7 +32,24 @@ except ImportError:
 SOURCE_FILES = (*base.SOURCE_FILES, 'full_queue_embeddings.py')
 LIBRARY_SCHEMA = 'full-data-text-library-v1'
 PLAN_SCHEMA = 'full-data-execution-plan-v1'
+ELASTIC_PLAN_SCHEMA = 'full-data-execution-plan-v2'
 MAX_OUTPUT_BYTES = 16_000_000_000
+ELASTIC_OUTPUT_BYTES = 18_000_000_000
+EXECUTOR_FILES = ('full_queue_embeddings.py', 'new_data_kaggle.py')
+
+
+def execution_worker(plan, task):
+    return plan['task_workers'][task['id']] if plan['schema'] == ELASTIC_PLAN_SCHEMA else task['worker']
+
+
+def execution_team(plan, library):
+    return plan['team'] if plan['schema'] == ELASTIC_PLAN_SCHEMA else library['team']
+
+
+def verify_executor(plan):
+    if plan['schema'] == ELASTIC_PLAN_SCHEMA:
+        for name, checksum in plan['executor_sources'].items():
+            verify_file(Path(__file__).resolve().parent/name, checksum)
 
 
 def _without_sha(value):
@@ -106,15 +123,25 @@ def validate_library(directory, checkout=None):
 
 def validate_plan(plan, library):
     plan, library = _value(plan), _validate_library_header(library)
-    if (plan.get('schema') != PLAN_SCHEMA or plan.get('library_job') != library['manifest_sha256']
-            or plan.get('selection_binding') != library['selection_binding'] or plan.get('team') != library['team']
+    elastic = plan.get('schema') == ELASTIC_PLAN_SCHEMA
+    if (plan.get('schema') not in (PLAN_SCHEMA, ELASTIC_PLAN_SCHEMA) or plan.get('library_job') != library['manifest_sha256']
+            or plan.get('selection_binding') != library['selection_binding'] or (not elastic and plan.get('team') != library['team'])
             or plan.get('coverage_scope') != library.get('coverage_scope', {})):
         raise ValueError('Execution plan belongs to another input library, scope or team.')
+    team = execution_team(plan, library)
+    assignment = kaggle_assignment(accounts=team['accounts'], account_id=0, gpu_count=team['gpu_count'])
+    if elastic and (set(plan.get('executor_sources', {})) != set(EXECUTOR_FILES)
+                    or any(not _is_sha(v) for v in plan['executor_sources'].values())
+                    or plan.get('library_team') != library['team']):
+        raise ValueError('Execution scheduler or original library team changed.')
     budget, tasks, entries = plan.get('output_bytes_per_account'), plan.get('tasks'), {t['id']: t for t in library['tasks']}
-    if (type(budget) is not int or not 0 < budget <= MAX_OUTPUT_BYTES or not isinstance(tasks, list)
+    if (type(budget) is not int or not 0 < budget <= (ELASTIC_OUTPUT_BYTES if elastic else MAX_OUTPUT_BYTES) or not isinstance(tasks, list)
             or not tasks or len(set(tasks)) != len(tasks) or not set(tasks) <= set(entries)
             or plan.get('scheduled_tasks') != len(tasks)):
         raise ValueError('Invalid execution task whitelist/output budget.')
+    if elastic and (set(plan.get('task_workers', {})) != set(tasks)
+                    or any(type(w) is not int or not 0 <= w < assignment['workers'] for w in plan['task_workers'].values())):
+        raise ValueError('Execution task/GPU assignments are incomplete or out of range.')
     cached = plan.get('cached_keys', {})
     if (set(cached) != set(FAMILIES) or any(not isinstance(values, list) or len(set(values)) != len(values)
             or any(not _is_sha(k) for k in values) for values in cached.values())):
@@ -122,14 +149,14 @@ def validate_plan(plan, library):
     estimates = plan.get('task_output_bytes', {})
     if set(estimates) != set(tasks):
         raise ValueError('Missing bounded task output accounting.')
-    used = [0]*library['team']['accounts']
+    used = [0]*team['accounts']
     for task_id in tasks:
         task = entries[task_id]
         estimate = estimates[task_id]
         minimum = library['models'][task['family']]['dimension']*4+1024
         if type(estimate) is not int or not minimum <= estimate <= task['rows']*minimum or estimate % minimum:
             raise ValueError('Execution task output estimate is invalid.')
-        used[task['worker']//library['team']['gpu_count']] += estimate
+        used[execution_worker(plan, task)//team['gpu_count']] += estimate
     if plan.get('estimated_bytes_per_account') != used or any(n > budget for n in used):
         raise ValueError('Execution plan exceeds the per-account output budget.')
     if (type(plan.get('remaining_tasks_after_plan')) is not int or plan['remaining_tasks_after_plan'] < 0
@@ -233,29 +260,43 @@ class FullQueueKaggle(base.NewDataKaggle):
         return target, library
 
     def create_plan(self, library, *, output_bytes=MAX_OUTPUT_BYTES, receipt_api=None,
-                    blocks_factory=ResumableContentBlocks, supersede_unstarted_legacy=False):
+                    blocks_factory=ResumableContentBlocks, supersede_unstarted_legacy=False,
+                    execution_accounts=None, replace_unstarted_plan=None):
         library = _validate_library_header(_value(library))
         if library['selection_binding'] != self.binding or library['models'] != self.view.identities:
             raise ValueError('Input library differs from this frozen selection.')
-        if type(output_bytes) is not int or not 0 < output_bytes <= MAX_OUTPUT_BYTES:
-            raise ValueError('Output budget must be between 1 and 16 GB per account.')
+        elastic = execution_accounts is not None
+        team = {'accounts': execution_accounts, 'gpu_count': self.team['gpu_count']} if elastic else self.team
+        assignment = kaggle_assignment(accounts=team['accounts'], account_id=0, gpu_count=team['gpu_count'])
+        if type(output_bytes) is not int or not 0 < output_bytes <= (ELASTIC_OUTPUT_BYTES if elastic else MAX_OUTPUT_BYTES):
+            raise ValueError('Output budget exceeds the scheduler allowance; leave room below Kaggle saved Outputs capacity.')
         active = self.root/'active_execution_plan.json'
         if active.exists():
             record = checked(read_json(active))
             if record.get('binding') != self.binding or record.get('library_job') != library['manifest_sha256']:
                 raise ValueError('Active execution pointer belongs to another library/selection.')
             plan = validate_plan(self.saved_plan(record['plan']), library)
+            if (replace_unstarted_plan != plan['manifest_sha256'] and _is_sha(replace_unstarted_plan)
+                    and (self.root/'history'/('unstarted-'+replace_unstarted_plan+'.json')).is_file()):
+                replace_unstarted_plan = None
             imported_accounts = {r['account_id'] for path in (self.root/'imports').glob('*.json')
                 if (r := checked(read_json(path))).get('execution_plan') == plan['manifest_sha256']}
-            if imported_accounts != set(range(self.team['accounts'])):
-                if record.get('state') == 'UPLOAD_PENDING' and not imported_accounts:
-                    target = self.work/'execution-plans'/plan['manifest_sha256'][:16]
-                    target.mkdir(parents=True, exist_ok=True)
-                    atomic_json(target/'job.json', plan)
-                    return target, plan
-                return None, {'state': 'WAITING_FOR_KAGGLE_OUTPUTS', 'execution_plan': plan['manifest_sha256'],
-                    'library_job': library['manifest_sha256'], 'dataset_handle': record.get('dataset_handle'),
-                    'imported_accounts': sorted(imported_accounts), 'required_accounts': list(range(self.team['accounts']))}
+            if imported_accounts != set(range(plan['team']['accounts'])):
+                if replace_unstarted_plan == plan['manifest_sha256'] and not imported_accounts and elastic:
+                    atomic_json(self.root/'history'/('unstarted-'+plan['manifest_sha256']+'.json'), seal({
+                        'state': 'SUPERSEDED_UNSTARTED', 'previous': record, 'unstarted_confirmed': True,
+                        'replacement_team': team, 'updated_at': utc_now()}))
+                    print(f'REPLACE_CONFIRMED_UNSTARTED_PLAN: {plan["manifest_sha256"][:12]} | old imports retained', flush=True)
+                else:
+                    if replace_unstarted_plan is not None:
+                        raise ValueError('Only the exact confirmed unstarted plan with no imports may be replaced.')
+                    if record.get('state') == 'UPLOAD_PENDING' and not imported_accounts:
+                        if plan['team'] != team:
+                            raise ValueError('Saved pending plan has another execution team; retain it or explicitly replace it.')
+                        return self.stage_plan(plan), plan
+                    return None, {'state': 'WAITING_FOR_KAGGLE_OUTPUTS', 'execution_plan': plan['manifest_sha256'],
+                        'library_job': library['manifest_sha256'], 'dataset_handle': record.get('dataset_handle'),
+                        'imported_accounts': sorted(imported_accounts), 'required_accounts': list(range(plan['team']['accounts']))}
         legacy = self.root/'active_round.json'
         if legacy.exists():
             saved = checked(read_json(legacy))
@@ -272,7 +313,9 @@ class FullQueueKaggle(base.NewDataKaggle):
                     'unstarted_confirmed': supersede_unstarted_legacy, 'updated_at': utc_now()}))
         done = self.imported()
         pending = [t for t in library['tasks'] if t['id'] not in done]
-        used, scheduled, estimates = [0]*self.team['accounts'], [], {}
+        used, scheduled, estimates = [0]*team['accounts'], [], {}
+        task_workers, loads, affinity = {}, [0]*assignment['workers'], {}
+        assets_read = 0
         cached, cache_only, affected = {f: set() for f in FAMILIES}, [], {f: set() for f in FAMILIES}
         for family in FAMILIES:
             family_tasks = [t for t in pending if t['family'] == family]
@@ -288,7 +331,7 @@ class FullQueueKaggle(base.NewDataKaggle):
                     unit_bytes = expected['dimension']*4+1024
                     # No need to read later key files once an account cannot
                     # fit even one new vector. Those tasks remain in the library.
-                    if used[account]+unit_bytes > output_bytes:
+                    if (all(n+unit_bytes > output_bytes for n in used) if elastic else used[account]+unit_bytes > output_bytes):
                         continue
                     asset = library['assets'][task['asset']]
                     if previous != task['asset']:
@@ -298,6 +341,9 @@ class FullQueueKaggle(base.NewDataKaggle):
                         if len(keys) != asset['rows']:
                             raise ValueError('Saved task-key index row coverage changed.')
                         previous = task['asset']
+                        assets_read += 1
+                        if elastic and assets_read % 32 == 0:
+                            print(f'PLAN_KEY_METADATA: {assets_read} key indexes | no corpus/text replay; imported tasks excluded', flush=True)
                     selected = keys[task['offset']:task['offset']+task['rows']]
                     if len(selected) != task['rows'] or digest_json(sorted(selected)) != task['keys_digest']:
                         raise ValueError('Saved library task keys changed.')
@@ -309,7 +355,20 @@ class FullQueueKaggle(base.NewDataKaggle):
                     estimate = (len(selected)-len(known))*unit_bytes
                     if estimate > output_bytes:
                         raise ValueError('One missing-text task exceeds the execution budget.')
-                    if used[account]+estimate > output_bytes:
+                    if elastic:
+                        group = (family, task['keys_digest'])
+                        candidates = [w for w in range(assignment['workers'])
+                                      if used[w//team['gpu_count']]+estimate <= output_bytes]
+                        if group in affinity:
+                            candidates = [affinity[group]] if affinity[group] in candidates else []
+                        if not candidates:
+                            continue
+                        worker = min(candidates, key=lambda w: (loads[w], w))
+                        affinity[group] = worker
+                        task_workers[task['id']] = worker
+                        loads[worker] += (len(selected)-len(known))*(8 if family == 'qwen' else 1)
+                        account = worker//team['gpu_count']
+                    elif used[account]+estimate > output_bytes:
                         continue
                     used[account] += estimate
                     scheduled.append(task['id'])
@@ -325,22 +384,35 @@ class FullQueueKaggle(base.NewDataKaggle):
         if not scheduled:
             return None, {'state': 'NO_PENDING_KAGGLE_TASKS', 'coverage': self.coverage()}
         remaining = len(pending)-len(cache_only)
-        plan = seal({'schema': PLAN_SCHEMA, 'library_job': library['manifest_sha256'],
-            'selection_binding': self.binding, 'team': self.team, 'coverage_scope': library.get('coverage_scope', {}),
+        extra = {}
+        if elastic:
+            directory = Path(__file__).resolve().parent
+            sources = {n: sha256_file(directory/n) for n in EXECUTOR_FILES}
+            for name, checksum in sources.items():
+                base.copied(directory/name, self.root/'executors'/checksum/name, checksum)
+            extra = {'library_team': library['team'], 'task_workers': task_workers, 'executor_sources': sources,
+                     'replaces_unstarted_plan': replace_unstarted_plan}
+        plan = seal({'schema': ELASTIC_PLAN_SCHEMA if elastic else PLAN_SCHEMA, 'library_job': library['manifest_sha256'],
+            'selection_binding': self.binding, 'team': team, 'coverage_scope': library.get('coverage_scope', {}),
             'tasks': scheduled, 'cached_keys': {f: sorted(v) for f, v in cached.items()},
             'task_output_bytes': estimates, 'output_bytes_per_account': output_bytes, 'estimated_bytes_per_account': used,
             'scheduled_tasks': len(scheduled), 'remaining_tasks_before_plan': remaining,
-            'remaining_tasks_after_plan': remaining-len(scheduled), 'created_at': utc_now()})
+            'remaining_tasks_after_plan': remaining-len(scheduled), 'created_at': utc_now(), **extra})
         validate_plan(plan, library)
         atomic_json(self.root/'plans'/(plan['manifest_sha256']+'.json'), plan)
         # Commit before upload: cold retry resumes exactly this plan rather than
         # rebuilding a fresh timestamp/whitelist and discarding its checkpoint.
         atomic_json(active, seal({'binding': self.binding, 'plan': plan['manifest_sha256'],
                                  'library_job': library['manifest_sha256'], 'state': 'UPLOAD_PENDING'}))
+        return self.stage_plan(plan), plan
+
+    def stage_plan(self, plan):
         target = self.work/'execution-plans'/plan['manifest_sha256'][:16]
         target.mkdir(parents=True, exist_ok=True)
+        for name, checksum in plan.get('executor_sources', {}).items():
+            base.copied(self.root/'executors'/checksum/name, target/name, checksum)
         atomic_json(target/'job.json', plan)
-        return target, plan
+        return target
 
     def saved_plan(self, plan_sha):
         if not _is_sha(plan_sha):
@@ -362,10 +434,11 @@ class FullQueueKaggle(base.NewDataKaggle):
             raise ValueError('GPU Outputs differ from the saved full-library execution plan.')
         if result.get('state') not in ('ROUND_COMPLETE', 'CHECKPOINTED_PARTIAL'):
             raise ValueError('Invalid full-library execution result state.')
-        assignment = kaggle_assignment(accounts=self.team['accounts'], account_id=result['account_id'], gpu_count=self.team['gpu_count'])
+        team = execution_team(plan, library)
+        assignment = kaggle_assignment(accounts=team['accounts'], account_id=result['account_id'], gpu_count=team['gpu_count'])
         tasks = {t['id']: t for t in library['tasks']}
         receipts = [r['task'] for r in result['tasks']]
-        allowed = {task for task in plan['tasks'] if tasks[task]['worker'] in assignment['worker_ids']}
+        allowed = {task for task in plan['tasks'] if execution_worker(plan, tasks[task]) in assignment['worker_ids']}
         if len(set(receipts)) != len(receipts) or not set(receipts) <= allowed:
             raise ValueError('Output contains duplicate or non-whitelisted execution tasks.')
         if result.get('state') == 'ROUND_COMPLETE' and set(receipts) != allowed:
@@ -377,10 +450,21 @@ class FullQueueKaggle(base.NewDataKaggle):
         receipt = self.root/'imports'/(result['manifest_sha256']+'.json')
         if report.get('execution_plan') != plan['manifest_sha256']:
             prior = checked(read_json(receipt))
-            prior = seal({**_without_sha(prior), 'execution_plan': plan['manifest_sha256']})
+            prior = seal({**_without_sha(prior), 'execution_plan': plan['manifest_sha256'], 'execution_team': team})
             atomic_json(receipt, prior)
             report = prior
         return report
+
+    def assigned_output_tasks(self, job, result):
+        if result.get('plan', {}).get('schema') != ELASTIC_PLAN_SCHEMA:
+            return super().assigned_output_tasks(job, result)
+        plan = validate_plan(self.saved_plan(result.get('execution_plan')), job)
+        if result.get('plan') != plan:
+            raise ValueError('Elastic output scheduler differs from the saved execution plan.')
+        team = execution_team(plan, job)
+        assignment = kaggle_assignment(accounts=team['accounts'], account_id=result['account_id'], gpu_count=team['gpu_count'])
+        entries = {t['id']: t for t in job['tasks']}
+        return {tid for tid in plan['tasks'] if execution_worker(plan, entries[tid]) in assignment['worker_ids']}
 
 
 def upload_library(flow, target, library, owner):
@@ -413,6 +497,8 @@ def upload_plan(flow, target, plan, owner):
     validate_plan(plan, library)
     if plan != flow.saved_plan(plan['manifest_sha256']) or plan['selection_binding'] != flow.binding:
         raise ValueError('Execution upload differs from its saved plan/selection.')
+    if plan['schema'] == ELASTIC_PLAN_SCHEMA:
+        target = flow.stage_plan(plan)
     handle = base.upload_job(flow, target, plan, owner, activation_filename='uploaded_execution_plan.json', dataset_prefix='/vmb-full-plan-')
     atomic_json(flow.root/'active_execution_plan.json', seal({'binding': flow.binding, 'plan': plan['manifest_sha256'],
         'library_job': plan['library_job'], 'dataset_handle': handle, 'state': 'VERIFIED'}))
@@ -423,7 +509,10 @@ def run_worker(directory, plan, output, work, *, worker_id, factories, deadline,
     directory, output, work = Path(directory), Path(output), Path(work)
     library = validate_library(directory)
     plan = validate_plan(plan, library)
-    workers = library['team']['accounts']*library['team']['gpu_count']
+    verify_executor(plan)
+    team = execution_team(plan, library)
+    workers = team['accounts']*team['gpu_count']
+    original_workers = library['team']['accounts']*library['team']['gpu_count']
     if type(worker_id) is not int or not 0 <= worker_id < workers:
         raise ValueError('Worker ID outside the full-data team.')
     output.mkdir(parents=True, exist_ok=True)
@@ -439,7 +528,7 @@ def run_worker(directory, plan, output, work, *, worker_id, factories, deadline,
             raise ValueError('Worker journal belongs to another job/plan/worker.')
         completed = saved['tasks']
     entries = {t['id']: t for t in library['tasks']}
-    allowed = {tid for tid in plan['tasks'] if entries[tid]['worker'] == worker_id}
+    allowed = {tid for tid in plan['tasks'] if execution_worker(plan, entries[tid]) == worker_id}
     done = {r['task'] for r in completed}
     if len(done) != len(completed) or not done <= allowed:
         raise ValueError('Worker journal contains duplicate or non-whitelisted tasks.')
@@ -471,7 +560,7 @@ def run_worker(directory, plan, output, work, *, worker_id, factories, deadline,
                 values = rows[task['offset']:task['offset']+task['rows']]
                 keys = [r['id'] for r in values]
                 if (len(values) != task['rows'] or len(set(keys)) != len(keys) or digest_json(sorted(keys)) != task['keys_digest']
-                        or any(k != key(r['text']) or int(k[:8], 16) % workers != worker_id for k, r in zip(keys, values))):
+                        or any(k != key(r['text']) or int(k[:8], 16) % original_workers != task['worker'] for k, r in zip(keys, values))):
                     raise ValueError('Full-library task text/key/ownership changed.')
                 new_values = [r for r in values if r['id'] not in cached[family]]
                 expected_bytes = len(new_values)*(library['models'][family]['dimension']*4+1024)
@@ -495,9 +584,10 @@ def finalize(directory, plan, output, account_id):
     plan = validate_plan(plan, library)
     root = Path(output)/'result'
     root.mkdir(parents=True, exist_ok=True)
-    assignment = kaggle_assignment(accounts=library['team']['accounts'], account_id=account_id, gpu_count=library['team']['gpu_count'])
+    team = execution_team(plan, library)
+    assignment = kaggle_assignment(accounts=team['accounts'], account_id=account_id, gpu_count=team['gpu_count'])
     entries, tasks = {t['id']: t for t in library['tasks']}, []
-    allowed = {tid for tid in plan['tasks'] if entries[tid]['worker'] in assignment['worker_ids']}
+    allowed = {tid for tid in plan['tasks'] if execution_worker(plan, entries[tid]) in assignment['worker_ids']}
     for worker in assignment['worker_ids']:
         path = root/f'worker-{worker}.json'
         if not path.exists():
@@ -506,7 +596,7 @@ def finalize(directory, plan, output, account_id):
         if saved.get('job') != library['manifest_sha256'] or saved.get('execution_plan') != plan['manifest_sha256'] or saved.get('worker_id') != worker:
             raise ValueError('Worker journal belongs to another job/plan/assignment.')
         for receipt in saved['tasks']:
-            if receipt['task'] not in allowed or entries[receipt['task']]['worker'] != worker:
+            if receipt['task'] not in allowed or execution_worker(plan, entries[receipt['task']]) != worker:
                 raise ValueError('Worker returned a non-whitelisted execution task.')
             tasks.append(receipt)
     if len({r['task'] for r in tasks}) != len(tasks):
@@ -534,9 +624,11 @@ def launch(directory, plan, checkout, output, work, *, account_id=0, hours=10.0)
     library = validate_library(directory, checkout)
     plan_path = Path(plan)/'job.json' if Path(plan).is_dir() else Path(plan)
     plan = validate_plan(plan_path, library)
-    if embedding_runtime() != library['runtime'] or not torch.cuda.is_available() or torch.cuda.device_count() != library['team']['gpu_count']:
+    verify_executor(plan)
+    team = execution_team(plan, library)
+    if embedding_runtime() != library['runtime'] or not torch.cuda.is_available() or torch.cuda.device_count() != team['gpu_count']:
         raise RuntimeError('CUDA/runtime mismatch: select the locked T4 x2 runtime.')
-    assignment = kaggle_assignment(accounts=library['team']['accounts'], account_id=account_id, gpu_count=library['team']['gpu_count'])
+    assignment = kaggle_assignment(accounts=team['accounts'], account_id=account_id, gpu_count=team['gpu_count'])
     if not 0 < hours <= 10.5:
         raise ValueError('Use a save deadline up to 10.5 hours.')
     deadline, processes = time.monotonic()+hours*3600-180, []
@@ -544,8 +636,8 @@ def launch(directory, plan, checkout, output, work, *, account_id=0, hours=10.0)
         for gpu, worker in enumerate(assignment['worker_ids']):
             env = os.environ.copy()
             env['CUDA_VISIBLE_DEVICES'] = str(gpu)
-            env['PYTHONPATH'] = str(Path(checkout)/'src')+os.pathsep+str(Path(directory))
-            command = [sys.executable, '-u', str(Path(directory)/'full_queue_embeddings.py'), 'worker', '--job', str(directory),
+            env['PYTHONPATH'] = os.pathsep.join((str(Path(checkout)/'src'), str(Path(__file__).resolve().parent), str(Path(directory))))
+            command = [sys.executable, '-u', str(Path(__file__).resolve()), 'worker', '--job', str(directory),
                 '--plan', str(plan_path), '--output', str(Path(output)/'result'), '--work', str(Path(work)/f'worker-{worker}'),
                 '--worker-id', str(worker), '--deadline', str(deadline)]
             processes.append(subprocess.Popen(command, env=env))
@@ -594,7 +686,8 @@ def main():
         result = run_worker(args.job, args.plan, args.output, args.work, worker_id=args.worker_id, deadline=args.deadline,
             factories={'bge': lambda: TorchDenseEncoder(library['config']['dense']),
                        'qwen': lambda: TorchQwenEncoder(library['config']['second_dense'])})
-    print(base.json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    print('GPU_WORKER_RESULT:', base.json.dumps({k: v for k, v in result.items()
+          if k not in ('tasks', 'blocks', 'plan')}, ensure_ascii=False), flush=True)
 
 
 if __name__ == '__main__':

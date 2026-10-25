@@ -53,7 +53,7 @@ def test_gpu_notebooks_gate_the_complete_library_before_loading_models():
         assert SCOPE_SHA in first
         assert 'nvidia-smi' not in first and 'pip' not in first
         assert 'nvidia-smi' in notebook.cells[2].source
-        assert "JOB_DIR/'full_queue_embeddings.py'" in notebook.cells[3].source
+        assert "EXECUTOR_DIR/'full_queue_embeddings.py'" in notebook.cells[3].source
         assert "'--plan',str(PLAN_PATH)" in notebook.cells[3].source
         assert (ROOT/'scripts/kaggle_output_guard.py').read_text(encoding='utf-8') in notebook.cells[3].source
         assert 'GPU_RESULT=run_with_bounded_output(' in notebook.cells[3].source

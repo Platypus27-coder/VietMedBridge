@@ -16,6 +16,17 @@ def _request():
     return ApiGetKernelRequest()
 
 
+def retryable_tls_alert(error):
+    """Retry the observed protocol alert, never certificate validation failures."""
+    if not isinstance(error, SSLError):
+        return False
+    reason = str(error).upper()
+    if any(value in reason for value in ('CERTIFICATE_VERIFY_FAILED', 'CERTIFICATE VERIFICATION',
+                                        'HOSTNAME MISMATCH', 'CERTIFICATE EXPIRED')):
+        return False
+    return 'TLSV1_ALERT_DECODE_ERROR' in reason
+
+
 def retry_kaggle(operation, *, report=print, attempts=6, sleep=time.sleep):
     """Retry a pinned transfer after throttling, server or interrupted-stream errors.
 
@@ -30,7 +41,7 @@ def retry_kaggle(operation, *, report=print, attempts=6, sleep=time.sleep):
             response = getattr(error, 'response', None)
             status = getattr(response, 'status_code', None)
             interrupted = (status is None and isinstance(error, (ChunkedEncodingError, ConnectionError, Timeout))
-                           and not isinstance(error, SSLError))
+                           and (not isinstance(error, SSLError) or retryable_tls_alert(error)))
             if (not interrupted and status not in (429, 500, 502, 503, 504)) or attempt == attempts-1:
                 raise
             value = (getattr(response, 'headers', {}) or {}).get('Retry-After')
@@ -55,6 +66,9 @@ def retry_kaggle(operation, *, report=print, attempts=6, sleep=time.sleep):
                 delay -= step
                 if delay > 0:
                     report(f'KAGGLE_COOLDOWN: {delay:.0f}s remaining; no new API request yet')
+
+
+retry_kaggle._handles_tls_decode = True
 
 
 @contextmanager

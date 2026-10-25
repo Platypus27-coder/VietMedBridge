@@ -162,6 +162,40 @@ lưu trên Drive dùng để lập kế hoạch, không mở lại corpus hoặc
 
 ### Kế hoạch GPU nhỏ, thay theo lượt
 
+#### Ba tài khoản, giữ thư viện gốc và checkpoint đã nhập
+
+Chạy `notebooks/04_colab_prepare_3_accounts_kaggle.ipynb` trên Colab CPU.
+Notebook đã đặt execution team 3 acc × 2 GPU. Team gốc của thư viện và journal
+vẫn là 2×2: không đổi header text, không xuất lại 5,5 GB hoặc chọn lại corpus.
+Chủ dự án đã xác nhận kế hoạch `ab7954e4a47f…` chưa chạy GPU. Chỉ đúng kế hoạch
+đó, chưa có import receipt, mới được thay; bản cũ vẫn nằm trong `history`.
+11.588 task đã nhập được loại bằng biên nhận cũ trước khi chia việc.
+
+Kế hoạch v2 ghi rõ worker 0–5 cho từng task và phân tải theo số text còn thiếu;
+mỗi task chỉ giao một GPU. Những task có cùng model và toàn bộ tập key được
+ưu tiên cùng worker để dùng lại content cache. Task có tập key chồng lấn nhưng
+khác nhau vẫn có thể encode cùng text ở các worker khác nhau; không tuyên bố
+khử trùng tuyệt đối xuyên GPU. Không sửa text/model producer để đổi cách chia.
+CPU chỉ đọc key-only index và lookup metadata cần cho kế hoạch mới, không
+đọc lại corpus/text/vector payload. Retry upload dùng đúng kế hoạch đã lưu.
+
+[Kaggle Docs](https://www.kaggle.com/docs/notebooks) ghi tối đa 20 GB Outputs
+được lưu trong `/kaggle/working`. V2 dùng ngân sách dự kiến 18 GB/acc, gồm
+vector float32 và allowance metadata, chừa thêm dung lượng dưới mức này.
+Đây là ước tính, không phải cam kết mọi task sẽ xong trong một phiên GPU.
+
+Giữ dataset ALL_TEXT_DATASET_READY. Cả ba acc thay dataset kế hoạch cũ bằng
+GPU_PLAN_DATASET_READY mới, dùng lần lượt `04_full_data_3acc_account_0.ipynb`,
+`04_full_data_3acc_account_1.ipynb`, `04_full_data_3acc_account_2.ipynb`. Hai file điều
+phối nhỏ được khóa SHA trong kế hoạch; thư viện text/worker cũ không bị sửa.
+T4 x2, Internet ON, Save Version / Save & Run All. Cấp quyền đọc hai dataset
+cho cả hai thành viên còn lại. Sau khi ba Outputs được lưu, nhập bằng notebook
+CPU mới; importer kiểm task thuộc đúng execution account, key, model, vector
+SHA/shape và cache skip trước khi ghi receipt. Account 2 được nhập đúng vào
+cùng cache native và journal, không tạo lại namespace vector.
+
+Các đoạn dưới mô tả kế hoạch v1 hai acc, vẫn hỗ trợ nhập Outputs cũ.
+
 `create_plan` giữ trần dự kiến 16 GB vector mới/acc/lượt, đây là lựa chọn cấu
 hình của pipeline. Whitelist task, cached keys, job/library hash, team và dự
 kiến dung lượng được seal riêng. Dataset kế hoạch có prefix vmb-full-plan-.

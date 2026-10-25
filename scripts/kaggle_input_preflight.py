@@ -92,7 +92,8 @@ def inspect_full_queue_inputs(directory, library, plan, *, expected_scope, repor
             raise ValueError('Full-input library or execution plan header changed.')
         return value
     checked(library); checked(plan)
-    if library.get('schema') != 'full-data-text-library-v1' or plan.get('schema') != 'full-data-execution-plan-v1':
+    elastic = plan.get('schema') == 'full-data-execution-plan-v2'
+    if library.get('schema') != 'full-data-text-library-v1' or plan.get('schema') not in ('full-data-execution-plan-v1', 'full-data-execution-plan-v2'):
         raise ValueError('Add one all-text library and one matching execution-plan dataset.')
     scope = library.get('coverage_scope', {})
     sources = library.get('frozen_sources', [])
@@ -101,7 +102,8 @@ def inspect_full_queue_inputs(directory, library, plan, *, expected_scope, repor
             or len({s.get('build_run') for s in sources}) != 13
             or library.get('input_export_complete') is not True):
         raise ValueError('The full-input library does not cover the verified 13-source scope.')
-    if plan.get('library_job') != library['manifest_sha256'] or plan.get('team') != library.get('team'):
+    if (plan.get('library_job') != library['manifest_sha256'] or (not elastic and plan.get('team') != library.get('team'))
+            or (elastic and plan.get('library_team') != library.get('team'))):
         raise ValueError('Execution plan belongs to another text library or GPU team.')
     directory = Path(directory)
     files = {p.name for p in directory.iterdir() if p.is_file()}
@@ -128,6 +130,14 @@ def inspect_full_queue_inputs(directory, library, plan, *, expected_scope, repor
     planned = plan.get('tasks', [])
     if len(set(planned)) != len(planned) or not set(planned) <= set(tasks):
         raise ValueError('Execution plan contains duplicate or foreign tasks.')
+    team = plan['team']
+    if (type(team.get('accounts')) is not int or team['accounts'] < 1
+            or type(team.get('gpu_count')) is not int or team['gpu_count'] != 2):
+        raise ValueError('Invalid execution account/GPU team.')
+    if elastic and (set(plan.get('task_workers', {})) != set(planned)
+                    or any(type(w) is not int or not 0 <= w < team['accounts']*team['gpu_count']
+                           for w in plan['task_workers'].values())):
+        raise ValueError('Elastic execution task/GPU ownership changed.')
     for name, checksum in library.get('worker_sources', {}).items():
         if name not in files or Path(name).name != name:
             raise FileNotFoundError('Uploaded worker source is missing: '+name)
@@ -135,7 +145,7 @@ def inspect_full_queue_inputs(directory, library, plan, *, expected_scope, repor
             raise ValueError('Uploaded worker source changed: '+name)
     result = {'state': 'ALL_TEXT_INPUTS_PRESENT', 'library_job': library['manifest_sha256'],
               'scope': scope, 'all_exported_tasks': len(tasks), 'shared_text_files': len({t['asset'] for t in tasks.values()}),
-              'by_model': by_model, 'this_gpu_plan_tasks': len(planned),
+              'by_model': by_model, 'this_gpu_plan_tasks': len(planned), 'execution_team': team,
               'input_export_complete': True, 'payload_verification': 'SHA256_AND_TEXT_KEYS_ON_USE',
               'semantic_quality': 'NOT_CERTIFIED_BY_FILE_INVENTORY'}
     report('ALL_TEXT_INPUTS_PRESENT: entire library present; GPU execution is planned separately.')

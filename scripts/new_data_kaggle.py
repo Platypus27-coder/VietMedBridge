@@ -303,6 +303,11 @@ class NewDataKaggle:
                 'coverage': coverage, 'payload_verification': 'SHA256_ON_USE', 'updated_at': utc_now()}))
         return coverage
 
+    def assigned_output_tasks(self, job, result):
+        assignment = kaggle_assignment(accounts=job['team']['accounts'], account_id=result['account_id'],
+                                       gpu_count=job['team']['gpu_count'])
+        return {t['id'] for t in job['tasks'] if t['worker'] in assignment['worker_ids']}
+
     def install(self, output, *, receipt_api=None, blocks_factory=ResumableContentBlocks, cached_keys=None):
         output = Path(output)
         job = checked(read_json(output/'job.json'))
@@ -318,12 +323,12 @@ class NewDataKaggle:
                 raise ValueError('Committed import receipt binding changed.')
             return seal({**{k:v for k,v in prior.items() if k != 'manifest_sha256'},
                          'coverage': self.coverage(), 'payloads_reopened': False})
-        assignment = kaggle_assignment(accounts=job['team']['accounts'], account_id=result['account_id'], gpu_count=job['team']['gpu_count'])
+        allowed = self.assigned_output_tasks(job, result)
         tasks = {t['id']: t for t in job['tasks']}
         expected_keys, affected, completed_ids = {}, {f: set() for f in FAMILIES}, []
         for receipt in result['tasks']:
             task = tasks[receipt['task']]
-            if task['worker'] not in assignment['worker_ids'] or receipt['task'] in completed_ids:
+            if receipt['task'] not in allowed or receipt['task'] in completed_ids:
                 raise ValueError('Output contains duplicate/unassigned tasks.')
             keys = receipt['keys']
             if len(keys) != task['rows'] or len(set(keys)) != len(keys) or digest_json(sorted(keys)) != task['keys_digest']:
