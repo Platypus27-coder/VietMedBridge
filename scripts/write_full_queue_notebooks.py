@@ -280,9 +280,66 @@ def three_account_transfer():
     return value
 
 
+def completed_output_import():
+    value = three_account_transfer()
+    value.cells[0].source = dedent('''
+        # 04 — Nhập kết quả Kaggle đã hoàn thành về Drive (Colab CPU)
+
+        Acc 0 đã đặt sẵn: **kaisercoding/impact-2**, đúng manifest 918 task.
+        Chạy trên Colab CPU → Run all, dùng Secret KAGGLE_JSON đã có.
+        Notebook chỉ nhập Outputs; không xuất thư viện hoặc tạo kế hoạch GPU.
+
+        File đang tải và checkpoint tải được lưu trong
+        VietMedBridge/data_staging/kaggle_output_transfers trên Drive để runtime
+        mới dùng lại. Không tải dữ liệu về máy tính cá nhân. Chỉ file còn thiếu
+        được tải; SHA được kiểm trước khi nhập cache native. Chỉ khi có
+        NEW_DATA_KAGGLE_IMPORTED mới tính task là đã nhập Drive hoàn tất.
+
+        Thư viện, candidate và kế hoạch đang chạy của các acc khác giữ nguyên.
+    ''').strip()
+    value.cells[1].source = value.cells[1].source.replace(
+        'KAGGLE_NOTEBOOK_OUTPUT = ""', 'KAGGLE_NOTEBOOK_OUTPUT = "kaisercoding/impact-2"')
+    value.cells[3].source = cell('''
+        #@title 3. Nhập acc 0 về Drive; không tạo hay thay kế hoạch GPU
+        from kaggle.api.kaggle_api_extended import KaggleApi
+        from vietmedbridge.kaggle_outputs import output_handles
+        if not KAGGLE_NOTEBOOK_OUTPUT.strip():
+            raise ValueError('Điền handle notebook có Outputs đã lưu.')
+        api=KaggleApi()
+        api.authenticate()
+        download_work=PROJECT/'data_staging/kaggle_output_transfers'
+        download_work.mkdir(parents=True,exist_ok=True)
+        roots=[p.relative_to(PROJECT).as_posix() for p in (PROJECT/PARENT).glob('*/embeddings_v1')]
+        for handle in output_handles(KAGGLE_NOTEBOOK_OUTPUT):
+            expected=None
+            if handle.split('/')[:2]==['kaisercoding','impact-2']:
+                expected={
+                    'manifest_sha256':'11e88194e4e65edeabc66608f1c8cd30c35d1552089d60bb42110ad246653e79',
+                    'job':'d6ab9a432ac64e5aadb39a826b7dc2176094cc66d4f4e3d9e17c121e071c0711',
+                    'execution_plan':'c8d94f5f75f79ac89bd110b74b33befc3cbcf519be4fed2cf67be4df58fe7f56',
+                    'account_id':0,'completed_tasks':918}
+            output=pipeline.download_outputs(api,handle,download_work,project=PROJECT,
+                import_roots=roots,allow_failed=True,
+                manifest_path='vmb_full_queue/result/new-data-result.json',expected_result=expected)
+            saved=pipeline.checked(pipeline.read_json(output/'job.json'))
+            if (saved.get('schema')!='full-data-text-library-v1'
+                    or saved.get('coverage_scope',{}).get('official_ids')!=802028):
+                raise ValueError('Outputs không thuộc thư viện full-data 802.028 ID đã chốt.')
+            flow=queue_flow(WORK_DIR/'cpu',accounts=saved['team']['accounts'],
+                gpu_count=saved['team']['gpu_count'],batch_dir=saved['source_batch_dir'])
+            report=flow.install(output,receipt_api=api_source)
+            print(json.dumps({k:v for k,v in report.items() if k!='selection_ids'},
+                ensure_ascii=False,indent=2),flush=True)
+            print('DRIVE_IMPORT_COMPLETE:',handle,'| tasks',len(report['selection_ids']),flush=True)
+        print('Đã nhập kết quả. Chưa tạo kế hoạch mới; giữ phiên các acc còn lại.',flush=True)
+    ''').source
+    return value
+
+
 def main():
     nb.write(full_queue_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     nb.write(three_account_transfer(), ROOT/'notebooks/04_colab_prepare_3_accounts_kaggle.ipynb')
+    nb.write(completed_output_import(), ROOT/'notebooks/04_colab_import_completed_kaggle.ipynb')
     for account in (0,1):
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_full_data_account_{account}.ipynb')
     for account in (0,1,2):

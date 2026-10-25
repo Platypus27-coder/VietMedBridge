@@ -428,7 +428,7 @@ def validate_job(directory, checkout=None):
 
 
 def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_failed=False,
-                     manifest_path=None):
+                     manifest_path=None, expected_result=None):
     """Page through the new-data manifest first, before downloading vectors."""
     from vietmedbridge.kaggle_outputs import _download_pages, output_handles
     output_handles(handle)
@@ -461,6 +461,12 @@ def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_
     if len(manifests) != 1:
         raise RuntimeError(f'{handle}: expected one new-data-result.json, found {len(manifests)}; choose the saved new-data worker version.')
     manifest = checked(read_json(manifests[0]))
+    if expected_result is not None:
+        expected = dict(expected_result)
+        actual = {**manifest, 'completed_tasks': len(manifest.get('tasks', []))}
+        if (not expected or set(expected)-{'manifest_sha256', 'job', 'execution_plan', 'account_id', 'completed_tasks'}
+                or any(actual.get(name) != value for name, value in expected.items())):
+            raise ValueError('Saved Outputs differ from the expected completed GPU run; no vector download started.')
     relative = Path(manifest_path) if transport is not None else manifests[0].relative_to(probe)
     if project is not None:
         from_parent = Path(project)/'data_staging'/'btc-new-71be0e12-20261019-v1'/'freeze_batch_v1'/'embeddings_v1'
