@@ -273,8 +273,9 @@ def three_account_transfer():
         "print('Hai acc Add Input CÙNG thư viện text và CÙNG kế hoạch GPU. Lượt sau giữ thư viện text, thay kế hoạch.',flush=True)",
         "print('Ba acc dùng cùng hai dataset; account 0/1/2 đã đặt sẵn trong notebook GPU.',flush=True)")
     value.cells[3].source = value.cells[3].source.replace(
-        "print('GPU_PLAN_DATASET_READY:',",
-        "print('GPU_PLAN_ASSIGNMENTS:',{a:sum(plan['task_workers'][t]//2==a for t in plan['tasks']) for a in range(EXECUTION_ACCOUNTS)},flush=True)\n"
+        "plan_handle=queue.upload_plan(flow,plan_target,plan,owner)\n        print('GPU_PLAN_DATASET_READY:',",
+        "plan_handle=queue.upload_plan(flow,plan_target,plan,owner)\n"
+        "        print('GPU_PLAN_ASSIGNMENTS:',{a:sum(plan['task_workers'][t]//2==a for t in plan['tasks']) for a in range(EXECUTION_ACCOUNTS)},flush=True)\n"
         "        print('GPU_PLAN_DATASET_READY:',")
     return value
 
