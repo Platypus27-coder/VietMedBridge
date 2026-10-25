@@ -63,7 +63,8 @@ class ResumeCellTests(unittest.TestCase):
         for generated in (False, True):
             with self.subTest(generated=generated):
                 output, events = self.execute(plan, generated=generated)
-                self.assertIn('GPU_PLAN_DATASET_READY: https://www.kaggle.com/datasets/owner/already-uploaded-plan', output)
+                self.assertIn('CURRENT_PLAN_WAITING_FOR_OUTPUTS: https://www.kaggle.com/datasets/owner/already-uploaded-plan', output)
+                self.assertNotIn('GPU_PLAN_DATASET_READY:', output)
                 self.assertNotIn('GPU_PLAN_ASSIGNMENTS:', output)
                 self.assertNotIn('upload-new-plan', events)
 

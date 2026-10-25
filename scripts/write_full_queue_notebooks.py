@@ -56,6 +56,8 @@ def full_queue_transfer():
         'importlib.invalidate_caches()\nimport new_data_kaggle as pipeline')
     source = (ROOT/'scripts/full_queue_embeddings.py').read_text(encoding='utf-8')
     prepare += '\n(WORK_DIR/\'full_queue_embeddings.py\').write_text('+repr(source)+",encoding='utf-8')\n"
+    source = (ROOT/'scripts/qwen_token_batching.py').read_text(encoding='utf-8')
+    prepare += '\n(WORK_DIR/\'qwen_token_batching.py\').write_text('+repr(source)+",encoding='utf-8')\n"
     source = (ROOT/'scripts/kaggle_output_transfer.py').read_text(encoding='utf-8')
     prepare += '\n(WORK_DIR/\'kaggle_output_transfer.py\').write_text('+repr(source)+",encoding='utf-8')\n"
     source = (ROOT/'scripts/kaggle_output_paged.py').read_text(encoding='utf-8')
@@ -111,7 +113,11 @@ def full_queue_transfer():
             if plan_target is None:
                 print(json.dumps(plan,ensure_ascii=False,indent=2),flush=True)
                 if plan.get('dataset_handle'):
-                    print('GPU_PLAN_DATASET_READY:','https://www.kaggle.com/datasets/'+plan['dataset_handle'],flush=True)
+                    label='CURRENT_PLAN_WAITING_FOR_OUTPUTS:' if plan.get('state')=='WAITING_FOR_KAGGLE_OUTPUTS' else 'GPU_PLAN_DATASET_READY:'
+                    print(label,'https://www.kaggle.com/datasets/'+plan['dataset_handle'],flush=True)
+                if plan.get('state')=='WAITING_FOR_KAGGLE_OUTPUTS':
+                    print('Chưa tạo lượt mới. Cần nhập Outputs acc:',
+                        sorted(set(plan['required_accounts'])-set(plan['imported_accounts'])),flush=True)
                 if plan.get('state')=='NO_PENDING_KAGGLE_TASKS':
                     if not all(v['completed_parts']==v['total_parts'] for v in plan['coverage'].values()):
                         raise RuntimeError('Task hết nhưng mapping chưa đủ; giữ checkpoint, chưa xác nhận hoàn tất.')
@@ -139,7 +145,7 @@ def full_queue_gpu(account_id=0, expected_accounts=2):
         SESSION_STARTED=time.monotonic()
         KAGGLE_ACCOUNT_ID=__ACCOUNT__
         EXPECTED_EXECUTION_ACCOUNTS=__EXPECTED_ACCOUNTS__
-        SESSION_HOURS=10.0
+        SESSION_HOURS=11.5
         print('ALL-TEXT Kaggle preflight | account',KAGGLE_ACCOUNT_ID,flush=True)
         if not Path('/kaggle/input').is_dir() or Path('/var/colab/hostname').is_file():
             raise RuntimeError('GPU notebook chạy trên Kaggle; Colab dùng notebook xuất full-data.')
@@ -169,11 +175,19 @@ def full_queue_gpu(account_id=0, expected_accounts=2):
             raise ValueError('Missing locked library/worker source.')
         EXECUTOR_DIR=PLAN_PATH.parent if PLAN['schema']=='full-data-execution-plan-v2' else JOB_DIR
         if PLAN['schema']=='full-data-execution-plan-v2':
-            if set(PLAN.get('executor_sources',{}))!={'full_queue_embeddings.py','new_data_kaggle.py'}:
+            expected_executors={'full_queue_embeddings.py','new_data_kaggle.py'}
+            if PLAN.get('qwen_execution')=='qwen-token-batches-v1':
+                expected_executors.add('qwen_token_batching.py')
+            if set(PLAN.get('executor_sources',{}))!=expected_executors:
                 raise ValueError('Missing locked execution scheduler sources.')
             for name,checksum in PLAN['executor_sources'].items():
                 if hashlib.sha256((EXECUTOR_DIR/name).read_bytes()).hexdigest()!=checksum:
                     raise ValueError('Execution scheduler checksum changed.')
+        if PLAN.get('qwen_execution')!='qwen-token-batches-v1':
+            SESSION_HOURS=min(SESSION_HOURS,10.0)
+            print('LEGACY_EXECUTION_PLAN: giữ deadline cũ; bản tối ưu cần kế hoạch mới sau khi nhập đủ Outputs.',flush=True)
+        else:
+            print('QWEN_TOKEN_BATCHING_READY: benchmark trên GPU; deadline 11.5 giờ tính từ cell đầu.',flush=True)
     '''.replace('__ACCOUNT__', str(account_id)).replace('__EXPECTED_ACCOUNTS__', str(expected_accounts)))
     preflight.source += '\n'+(ROOT/'scripts/kaggle_input_preflight.py').read_text(encoding='utf-8')
     preflight.source += '\nPREFLIGHT=inspect_full_queue_inputs(JOB_DIR,JOB,PLAN,expected_scope='+repr(SCOPE_SHA)+')\n'
@@ -251,6 +265,11 @@ def three_account_transfer():
         gói; dùng 04_full_data_3acc_account_0 / 1 / 2, account ID đã đặt sẵn.
         Chọn T4 x2, Internet ON, Save Version → Save & Run All.
 
+        Kế hoạch mới khóa bộ tối ưu qwen-token-batches-v1. Trên GPU, chỉ chọn
+        batch token nhanh hơn ít nhất 5% và vượt canary so với native batch 16;
+        nếu không thì giữ native. Deadline 11,5 giờ từ cell đầu, dành khoảng
+        30 phút trước giới hạn 12 giờ. Không cam kết số task hay mức tăng tốc.
+
         Sau khi ba phiên lưu Outputs xong, điền ba handle notebook vào
         KAGGLE_NOTEBOOK_OUTPUT rồi chạy lại notebook CPU này để nhập và tạo
         lượt tiếp theo. Không tự chuyển team thư viện gốc sang 3.
@@ -259,7 +278,7 @@ def three_account_transfer():
         'KAGGLE_ACCOUNTS = 2 #@param {type:"integer"}',
         'KAGGLE_ACCOUNTS = 2  # Thư viện gốc; giữ để tiếp tục đúng checkpoint.\n'
         'EXECUTION_ACCOUNTS = 3  # Ba acc, mỗi acc T4 x2.\n'
-        'CONFIRMED_UNSTARTED_PLAN = "ab7954e4a47f3301ee6c484f696a1c312e86052dca6976e0d2e2f533a06d9ef8"')
+        'CONFIRMED_UNSTARTED_PLAN = None  # Chỉ tạo lượt mới sau khi nhập đủ Outputs.')
     value.cells[3].source = value.cells[3].source.replace(
         'print(json.dumps(flow.install(output,receipt_api=api_source),ensure_ascii=False,indent=2),flush=True)',
         'report=flow.install(output,receipt_api=api_source)\n'

@@ -289,3 +289,41 @@ mạng để thử lại. Với runtime đang dùng notebook cũ, chạy cell tr
 `scripts/resume_kaggle_output_download_cell.py` để chuyển sang tải file có tên
 (tuần tự trong cell vá), rồi chạy lại riêng cell 3; không
 restart runtime hoặc chạy lại GPU để xử lý lỗi tải Outputs này.
+
+### Nhập lượt 918 task và tối ưu lượt Qwen tiếp theo
+
+`04_colab_import_completed_kaggle.ipynb` chạy trên Colab CPU, đặt sẵn
+`kaisercoding/impact-2`. Manifest, job, kế hoạch c8d94f, account 0 và 918 task
+được đối chiếu trước khi tải vector. Notebook chỉ nhập; không tự tạo hoặc
+thay kế hoạch khi các account khác còn chạy. Cache tải, file tạm từng phần và
+cursor trang nằm trên Drive tại `data_staging/kaggle_output_transfers`, nên
+thay runtime vẫn dùng completion markers cũ. Native import kiểm SHA, đúng
+producer/key/shape/norm trước khi ghi receipt. Nhập lại receipt đã chốt không
+tải lại vector. Không ghi URL tải có chữ ký vào Drive.
+
+Sau khi nhập đủ Outputs của ba account, chạy
+`04_colab_prepare_3_accounts_kaggle.ipynb` để tạo kế hoạch nhỏ mới. Thư viện
+text 5,5 GB không xuất lại. Nếu còn thiếu Outputs, notebook in
+`CURRENT_PLAN_WAITING_FOR_OUTPUTS` và các account còn thiếu; không gắn nhãn
+GPU_PLAN_DATASET_READY cho kế hoạch cũ để tránh chạy trùng.
+
+Kế hoạch mới khóa thêm `qwen_token_batching.py` cùng policy
+`qwen-token-batches-v1`. Model code/runtime gốc, weights NF4, tokenizer,
+max_length, pooling, 4.096 chiều float32 và cache identity giữ nguyên. Mỗi
+GPU đo một canary tối đa 64 text từ task đầu, thử batch token 16/32/64,
+giới hạn 24.576 padded tokens. Chỉ chọn cách nhanh hơn native batch 16 ít
+nhất 5%, cosine từng vector >=0,99999 và sai số tuyệt đối tối đa <=0,001.
+Thời gian này gồm encode/token-length preparation; canary không được tính
+thành task hoàn thành hoặc ghi thay vector cũ. Nếu không đạt, dùng native.
+Kết quả mẫu không chứng nhận chất lượng text hay tốc độ toàn corpus.
+
+OOM giảm batch và thử lại đúng các hàng đó, ghi nhớ giới hạn theo nhóm độ
+dài token; thứ tự output được trả về đúng vị trí ban đầu. Lưu báo cáo đo
+trong Outputs `vmb_full_queue/result/qwen-tuning/worker-N.json`.
+
+Ba notebook GPU mới có deadline 11,5 giờ tính từ cell đầu và dành thêm 180
+giây để worker chốt trước mốc này, chừa khoảng 30 phút dưới giới hạn phiên
+CPU/GPU 12 giờ trong tài liệu Kaggle. Đây không phải cam kết một lượt sẽ
+hoàn thành mọi task được giao. Kế hoạch cũ vẫn dùng executor/deadline cũ;
+bản tối ưu chỉ áp dụng sau khi tạo và Add Input kế hoạch mới. Không thay
+executor trong dataset đang chạy hoặc tạo lại corpus/chunks.

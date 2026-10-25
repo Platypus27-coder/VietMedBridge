@@ -35,7 +35,9 @@ PLAN_SCHEMA = 'full-data-execution-plan-v1'
 ELASTIC_PLAN_SCHEMA = 'full-data-execution-plan-v2'
 MAX_OUTPUT_BYTES = 16_000_000_000
 ELASTIC_OUTPUT_BYTES = 18_000_000_000
-EXECUTOR_FILES = ('full_queue_embeddings.py', 'new_data_kaggle.py')
+LEGACY_EXECUTOR_FILES = ('full_queue_embeddings.py', 'new_data_kaggle.py')
+EXECUTOR_FILES = (*LEGACY_EXECUTOR_FILES, 'qwen_token_batching.py')
+QWEN_EXECUTION = 'qwen-token-batches-v1'
 
 
 def execution_worker(plan, task):
@@ -130,7 +132,10 @@ def validate_plan(plan, library):
         raise ValueError('Execution plan belongs to another input library, scope or team.')
     team = execution_team(plan, library)
     assignment = kaggle_assignment(accounts=team['accounts'], account_id=0, gpu_count=team['gpu_count'])
-    if elastic and (set(plan.get('executor_sources', {})) != set(EXECUTOR_FILES)
+    expected_sources = EXECUTOR_FILES if plan.get('qwen_execution') == QWEN_EXECUTION else LEGACY_EXECUTOR_FILES
+    if plan.get('qwen_execution') not in (None, QWEN_EXECUTION) or (not elastic and plan.get('qwen_execution')):
+        raise ValueError('Unknown Qwen execution policy; the native model producer must remain unchanged.')
+    if elastic and (set(plan.get('executor_sources', {})) != set(expected_sources)
                     or any(not _is_sha(v) for v in plan['executor_sources'].values())
                     or plan.get('library_team') != library['team']):
         raise ValueError('Execution scheduler or original library team changed.')
@@ -391,7 +396,7 @@ class FullQueueKaggle(base.NewDataKaggle):
             for name, checksum in sources.items():
                 base.copied(directory/name, self.root/'executors'/checksum/name, checksum)
             extra = {'library_team': library['team'], 'task_workers': task_workers, 'executor_sources': sources,
-                     'replaces_unstarted_plan': replace_unstarted_plan}
+                     'replaces_unstarted_plan': replace_unstarted_plan, 'qwen_execution': QWEN_EXECUTION}
         plan = seal({'schema': ELASTIC_PLAN_SCHEMA if elastic else PLAN_SCHEMA, 'library_job': library['manifest_sha256'],
             'selection_binding': self.binding, 'team': team, 'coverage_scope': library.get('coverage_scope', {}),
             'tasks': scheduled, 'cached_keys': {f: sorted(v) for f, v in cached.items()},
@@ -566,7 +571,8 @@ def run_worker(directory, plan, output, work, *, worker_id, factories, deadline,
                 expected_bytes = len(new_values)*(library['models'][family]['dimension']*4+1024)
                 if expected_bytes != plan['task_output_bytes'][task['id']]:
                     raise ValueError('Cached-key skip differs from the bounded task estimate.')
-                blocks.refs([r['text'] for r in new_values], batch_size=(batch_sizes or {'bge': 32, 'qwen': 16})[family],
+                defaults = {'bge':32,'qwen':64 if plan.get('qwen_execution') == QWEN_EXECUTION else 16}
+                blocks.refs([r['text'] for r in new_values], batch_size=(batch_sizes or defaults)[family],
                             encode_missing=True, encode_block_rows=base.TASK_ROWS)
                 completed.append({'task': task['id'], 'keys': keys})
                 atomic_json(journal, seal({'job': library['manifest_sha256'], 'execution_plan': plan['manifest_sha256'],
@@ -629,8 +635,8 @@ def launch(directory, plan, checkout, output, work, *, account_id=0, hours=10.0)
     if embedding_runtime() != library['runtime'] or not torch.cuda.is_available() or torch.cuda.device_count() != team['gpu_count']:
         raise RuntimeError('CUDA/runtime mismatch: select the locked T4 x2 runtime.')
     assignment = kaggle_assignment(accounts=team['accounts'], account_id=account_id, gpu_count=team['gpu_count'])
-    if not 0 < hours <= 10.5:
-        raise ValueError('Use a save deadline up to 10.5 hours.')
+    if not 0 < hours <= 11.5:
+        raise ValueError('Use a save deadline up to 11.5 hours, below the 12-hour session limit.')
     deadline, processes = time.monotonic()+hours*3600-180, []
     try:
         for gpu, worker in enumerate(assignment['worker_ids']):
@@ -683,9 +689,16 @@ def main():
         library = validate_library(args.job)
         if not torch.cuda.is_available() or embedding_runtime() != library['runtime']:
             raise RuntimeError('GPU worker runtime differs from the paid vector producer.')
-        result = run_worker(args.job, args.plan, args.output, args.work, worker_id=args.worker_id, deadline=args.deadline,
-            factories={'bge': lambda: TorchDenseEncoder(library['config']['dense']),
-                       'qwen': lambda: TorchQwenEncoder(library['config']['second_dense'])})
+        plan = validate_plan(args.plan,library)
+        def qwen_factory():
+            owner = TorchQwenEncoder(library['config']['second_dense'])
+            if plan.get('qwen_execution') == QWEN_EXECUTION:
+                from qwen_token_batching import TokenBatchOwner
+                return TokenBatchOwner(owner,Path(args.output)/'qwen-tuning'/f'worker-{args.worker_id}.json',
+                                       deadline=args.deadline)
+            return owner
+        result = run_worker(args.job, plan, args.output, args.work, worker_id=args.worker_id, deadline=args.deadline,
+            factories={'bge': lambda: TorchDenseEncoder(library['config']['dense']), 'qwen': qwen_factory})
     print('GPU_WORKER_RESULT:', base.json.dumps({k: v for k, v in result.items()
           if k not in ('tasks', 'blocks', 'plan')}, ensure_ascii=False), flush=True)
 

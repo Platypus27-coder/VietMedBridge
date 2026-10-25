@@ -57,6 +57,8 @@ def test_two_account_imports_survive_six_gpu_migration_and_account_two_import(pr
     assert (target/'job.json').read_bytes() == job_before
     assert (plan_dir/'full_queue_embeddings.py').is_file()
     assert (plan_dir/'new_data_kaggle.py').is_file()
+    assert (plan_dir/'qwen_token_batching.py').is_file()
+    assert plan['qwen_execution']=='qwen-token-batches-v1'
     assert not list(plan_dir.glob('*.parquet'))
     assert (flow.root/'history'/('unstarted-'+unstarted['manifest_sha256']+'.json')).is_file()
     # Cold retry uses the same small plan, no task/key/cache replay.
@@ -151,6 +153,20 @@ def test_three_notebooks_and_cpu_migration_are_preconfigured_and_compile():
         assert 'EXPECTED_EXECUTION_ACCOUNTS=3' in gpu.cells[1].source
         assert "PLAN['team']['accounts']" in gpu.cells[1].source
         assert "EXECUTOR_DIR/'full_queue_embeddings.py'" in gpu.cells[3].source
+        assert 'SESSION_HOURS=11.5' in gpu.cells[1].source
+        assert 'LEGACY_EXECUTION_PLAN:' in gpu.cells[1].source
+
+
+def test_previous_two_file_executor_plan_remains_valid_and_cannot_claim_new_tuning(project,tmp_path):
+    flow,target,job=library(project,tmp_path)
+    _,plan=flow.create_plan(job,execution_accounts=3,output_bytes=ELASTIC_OUTPUT_BYTES)
+    files={k:v for k,v in plan['executor_sources'].items() if k!='qwen_token_batching.py'}
+    with pytest.raises(ValueError,match='scheduler'):
+        validate_plan(resealed(plan,executor_sources=files),job)
+    legacy=resealed(plan,executor_sources=files,qwen_execution=None)
+    assert validate_plan(legacy,job)==legacy
+    with pytest.raises(ValueError,match='Unknown Qwen execution'):
+        validate_plan(resealed(plan,qwen_execution='unsafe-different-model'),job)
 
 
 def test_fresh_worker_uses_small_plan_executor_with_original_published_library(project, tmp_path):
