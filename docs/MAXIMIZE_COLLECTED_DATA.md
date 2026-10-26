@@ -352,3 +352,37 @@ trọng budget; không cam kết loại toàn bộ text trùng giữa GPU. Trư�
 hàng GPU dự kiến, phần tái sử dụng trong GPU và phần trùng giữa GPU. Không
 đánh dấu key chỉ mới được giao là đã có trên Drive. Task đã nhập vẫn loại
 trước khi chia việc và worker vẫn kiểm đầy đủ text/key/producer/payload.
+
+### Tiếp tục acc 0/1 khi acc 2 chưa có thông tin
+
+Chạy `04_colab_continue_accounts_0_1.ipynb` trên Colab CPU. Số acc thực thi
+đã đặt sẵn 2 và `CONTINUE_FROM_PLAN` khóa đúng kế hoạch c8d94f. Thư viện
+producer/team gốc vẫn 2x2; không xuất lại text và không chạy lại 02/03.
+Notebook yêu cầu biên nhận native của cả acc 0/1 cho source plan trước khi
+giải phóng phần họ chưa hoàn thành để cấp lại. Không yêu cầu receipt acc 2.
+
+Reservation được ghi riêng tại `reservations/<source-plan-sha>.json`, gồm
+account đang giữ, toàn bộ ID task gốc, receipt chứng minh acc 0/1 đã nhập và
+binding/library. Với c8d94f, acc 2 được giữ riêng 2.488 task. Task đã nhập
+hoặc đang giữ cho acc 2 bị loại trước khi đọc key index để lập kế hoạch.
+Các task acc 0/1 chưa hoàn thành và task chưa giao vẫn là ứng viên lượt mới.
+Những task có đủ vector trong cache có thể được chốt mà không encode lại.
+
+CPU chỉ xuất kế hoạch nhỏ mới, kèm tối ưu Qwen v2, cho bốn GPU. Hai notebook
+`04_continue_2acc_account_0.ipynb` và `04_continue_2acc_account_1.ipynb` có ID
+và team đặt sẵn; cả hai Add Input cùng thư viện text cũ và kế hoạch mới.
+Chủ dataset cần cấp quyền đọc kế hoạch mới cho tài khoản acc 1. Không dùng
+notebook ba acc hoặc kế hoạch c8d94f cho lượt mới.
+
+Cold retry khôi phục chính xác kế hoạch đã lưu. Các lượt sau chỉ chờ Outputs
+acc 0/1 của kế hoạch mới; reservation acc 2 vẫn tồn tại. Kế hoạch có
+`reserved_task_ids`, `reservations` và kiểm tra whitelist không giao nhau;
+reservation bị thay đổi/mất thì dừng trước cấp lại. Nếu chỉ còn task đang
+giữ, trạng thái là `WAITING_FOR_RESERVED_KAGGLE_OUTPUTS`, không phải COMPLETE.
+
+Saved plan và native import cũ không bị thay/xóa. Khi acc 2 gửi Outputs, nhập
+như thường lệ bằng manifest của nó, kể cả khi kế hoạch hai acc đang chạy.
+Native importer kiểm source plan/team/keys/payload riêng; không đổi active
+pointer của lượt mới. Khi receipt acc 2 đã commit, phần nó đã làm được loại
+và phần nó chưa hoàn thành trở lại ứng viên cho lượt sau. Không tự dừng phiên
+Kaggle acc 2, không giả định phần chưa có receipt là đã xong.

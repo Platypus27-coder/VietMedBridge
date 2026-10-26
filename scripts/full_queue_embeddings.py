@@ -179,10 +179,82 @@ def validate_plan(plan, library):
             or type(plan.get('remaining_tasks_before_plan')) is not int
             or plan['remaining_tasks_before_plan'] != len(tasks)+plan['remaining_tasks_after_plan']):
         raise ValueError('Execution plan task accounting changed.')
+    reserved=plan.get('reserved_task_ids',[])
+    if (not isinstance(reserved,list) or len(set(reserved))!=len(reserved)
+            or not set(reserved)<=set(entries) or set(reserved)&set(tasks)
+            or len(reserved)>plan['remaining_tasks_after_plan']):
+        raise ValueError('Reserved pending-account tasks overlap the new execution plan.')
     return plan
 
 
 class FullQueueKaggle(base.NewDataKaggle):
+    def account_receipts(self,library):
+        result=[]
+        for path in (self.root/'imports').glob('*.json'):
+            r=checked(read_json(path))
+            if r.get('job')==library['manifest_sha256'] and 'account_id' in r:
+                if (r.get('binding')!=self.binding or r.get('state')!='NEW_DATA_KAGGLE_IMPORTED'
+                        or not _is_sha(r.get('result'))):
+                    raise ValueError('Account import receipt belongs to another binding or is incomplete.')
+                result.append(r)
+        return result
+
+    def reserve_pending_accounts(self,library,source,team,receipts):
+        if (source['team']['gpu_count']!=team['gpu_count']
+                or not 0<team['accounts']<source['team']['accounts']):
+            raise ValueError('Continuation must keep the completed leading accounts and the original GPU count.')
+        released=list(range(team['accounts']))
+        matching=[r for r in receipts if r.get('execution_plan')==source['manifest_sha256']]
+        if not set(released)<={r['account_id'] for r in matching}:
+            raise ValueError('Import every continuing account before releasing its unfinished tasks.')
+        held=list(range(team['accounts'],source['team']['accounts']))
+        source_ids=set(source['tasks'])
+        tasks=[t for t in library['tasks'] if t['id'] in source_ids]
+        ids=sorted(t['id'] for t in tasks if execution_worker(source,t)//source['team']['gpu_count'] in held)
+        record={'schema':'pending-account-reservation-v1','binding':self.binding,
+            'library_job':library['manifest_sha256'],'source_plan':source['manifest_sha256'],
+            'released_accounts':released,'held_accounts':held,'held_task_ids':ids,
+            'release_receipts':{str(a):sorted(r['result'] for r in matching if r['account_id']==a) for a in released}}
+        path=self.root/'reservations'/(source['manifest_sha256']+'.json')
+        if path.exists():
+            old=checked(read_json(path))
+            if any(old.get(k)!=v for k,v in record.items() if k!='release_receipts'):
+                raise ValueError('Saved pending-account reservation changed.')
+        else:
+            atomic_json(path,seal(record))
+        print('CONTINUE_COMPLETED_ACCOUNTS:',released,'| keep pending accounts',held,
+              '| original assigned tasks',len(ids),'| old Outputs remain importable',flush=True)
+
+    def reserved_tasks(self,library,receipts):
+        held=set(); summaries=[]
+        for path in sorted((self.root/'reservations').glob('*.json')):
+            r=checked(read_json(path))
+            if (r.get('schema')!='pending-account-reservation-v1' or r.get('binding')!=self.binding
+                    or r.get('library_job')!=library['manifest_sha256'] or not _is_sha(r.get('source_plan'))):
+                raise ValueError('Invalid pending-account reservation binding.')
+            source=validate_plan(self.saved_plan(r['source_plan']),library)
+            released,accounts=r['released_accounts'],r['held_accounts']
+            if (released!=list(range(len(released))) or not released
+                    or accounts!=list(range(len(released),source['team']['accounts'])) or not accounts):
+                raise ValueError('Pending-account reservation owner set changed.')
+            proof=r.get('release_receipts',{})
+            for a in released:
+                valid={x['result'] for x in receipts if x.get('execution_plan')==r['source_plan'] and x['account_id']==a}
+                if not proof.get(str(a)) or not set(proof[str(a)])<=valid:
+                    raise ValueError('Continuing account is missing its committed import proof.')
+            entries={t['id']:t for t in library['tasks']}
+            by_account={a:{tid for tid in source['tasks'] if
+                execution_worker(source,entries[tid])//source['team']['gpu_count']==a} for a in accounts}
+            expected=set().union(*by_account.values())
+            if len(set(r['held_task_ids']))!=len(r['held_task_ids']) or set(r['held_task_ids'])!=expected:
+                raise ValueError('Reserved original-account task whitelist changed.')
+            finished={x['account_id'] for x in receipts if x.get('execution_plan')==r['source_plan']}
+            pending=[a for a in accounts if a not in finished]
+            for a in pending:held.update(by_account[a])
+            summaries.append({'source_plan':r['source_plan'],'pending_accounts':pending,
+                              'reserved_tasks':sum(len(by_account[a]) for a in pending)})
+        return held,summaries
+
     def export_inputs(self, checkout, *, config, runtime, code_commit, receipt_api=None,
                       blocks_factory=ResumableContentBlocks):
         """All pending text assets, independently of any GPU output budget."""
@@ -277,7 +349,7 @@ class FullQueueKaggle(base.NewDataKaggle):
 
     def create_plan(self, library, *, output_bytes=MAX_OUTPUT_BYTES, receipt_api=None,
                     blocks_factory=ResumableContentBlocks, supersede_unstarted_legacy=False,
-                    execution_accounts=None, replace_unstarted_plan=None):
+                    execution_accounts=None, replace_unstarted_plan=None,continue_completed_from=None):
         library = _validate_library_header(_value(library))
         if library['selection_binding'] != self.binding or library['models'] != self.view.identities:
             raise ValueError('Input library differs from this frozen selection.')
@@ -287,17 +359,32 @@ class FullQueueKaggle(base.NewDataKaggle):
         if type(output_bytes) is not int or not 0 < output_bytes <= (ELASTIC_OUTPUT_BYTES if elastic else MAX_OUTPUT_BYTES):
             raise ValueError('Output budget exceeds the scheduler allowance; leave room below Kaggle saved Outputs capacity.')
         active = self.root/'active_execution_plan.json'
+        receipts=self.account_receipts(library)
+        reserved,reservations=self.reserved_tasks(library,receipts)
+        if continue_completed_from is not None and not _is_sha(continue_completed_from):
+            raise ValueError('Continuation requires the exact source execution-plan SHA.')
         if active.exists():
             record = checked(read_json(active))
             if record.get('binding') != self.binding or record.get('library_job') != library['manifest_sha256']:
                 raise ValueError('Active execution pointer belongs to another library/selection.')
             plan = validate_plan(self.saved_plan(record['plan']), library)
+            if any(not (self.root/'reservations'/(r['source_plan']+'.json')).is_file()
+                   for r in plan.get('reservations',[])):
+                raise ValueError('Saved pending-account reservation is missing; no tasks may be reassigned.')
+            continuing=False
+            if continue_completed_from is not None:
+                if plan['manifest_sha256']==continue_completed_from:
+                    if not elastic:raise ValueError('Continuing accounts require an explicit execution team.')
+                    self.reserve_pending_accounts(library,plan,team,receipts)
+                    reserved,reservations=self.reserved_tasks(library,receipts)
+                    continuing=True
+                elif not (self.root/'reservations'/(continue_completed_from+'.json')).is_file():
+                    raise ValueError('Continuation source differs from the active plan and has no saved reservation.')
             if (replace_unstarted_plan != plan['manifest_sha256'] and _is_sha(replace_unstarted_plan)
                     and (self.root/'history'/('unstarted-'+replace_unstarted_plan+'.json')).is_file()):
                 replace_unstarted_plan = None
-            imported_accounts = {r['account_id'] for path in (self.root/'imports').glob('*.json')
-                if (r := checked(read_json(path))).get('execution_plan') == plan['manifest_sha256']}
-            if imported_accounts != set(range(plan['team']['accounts'])):
+            imported_accounts = {r['account_id'] for r in receipts if r.get('execution_plan')==plan['manifest_sha256']}
+            if imported_accounts != set(range(plan['team']['accounts'])) and not continuing:
                 if replace_unstarted_plan == plan['manifest_sha256'] and not imported_accounts and elastic:
                     atomic_json(self.root/'history'/('unstarted-'+plan['manifest_sha256']+'.json'), seal({
                         'state': 'SUPERSEDED_UNSTARTED', 'previous': record, 'unstarted_confirmed': True,
@@ -328,7 +415,11 @@ class FullQueueKaggle(base.NewDataKaggle):
                 atomic_json(history, seal({'legacy': saved, 'superseded_by_library': library['manifest_sha256'],
                     'unstarted_confirmed': supersede_unstarted_legacy, 'updated_at': utc_now()}))
         done = self.imported()
-        pending = [t for t in library['tasks'] if t['id'] not in done]
+        reserved-=done
+        pending_all=[t for t in library['tasks'] if t['id'] not in done]
+        pending=[t for t in pending_all if t['id'] not in reserved]
+        if reserved:
+            print('PENDING_ACCOUNT_TASKS_RESERVED:',len(reserved),'| dispatchable',len(pending),flush=True)
         used, scheduled, estimates = [0]*team['accounts'], [], {}
         task_workers, loads, affinity = {}, [0]*assignment['workers'], {}
         planning_stats={}
@@ -418,8 +509,11 @@ class FullQueueKaggle(base.NewDataKaggle):
             atomic_json(self.root/'imports'/('cache-'+digest_json(cache_only)+'.json'), seal({
                 'binding': self.binding, 'selection_ids': cache_only, 'state': 'REUSED_NEWLY_AVAILABLE_CACHE'}))
         if not scheduled:
+            if reserved:
+                return None,{'state':'WAITING_FOR_RESERVED_KAGGLE_OUTPUTS','reserved_tasks':len(reserved),
+                             'reservations':reservations,'coverage':self.coverage()}
             return None, {'state': 'NO_PENDING_KAGGLE_TASKS', 'coverage': self.coverage()}
-        remaining = len(pending)-len(cache_only)
+        remaining = len(pending_all)-len(cache_only)
         extra = {}
         if elastic:
             directory = Path(__file__).resolve().parent
@@ -428,7 +522,8 @@ class FullQueueKaggle(base.NewDataKaggle):
                 base.copied(directory/name, self.root/'executors'/checksum/name, checksum)
             extra = {'library_team': library['team'], 'task_workers': task_workers, 'executor_sources': sources,
                      'replaces_unstarted_plan': replace_unstarted_plan, 'qwen_execution': QWEN_EXECUTION,
-                     'planning_text_reuse':planning_stats}
+                     'planning_text_reuse':planning_stats,'reserved_task_ids':sorted(reserved),
+                     'reservations':reservations,'continued_from_plan':continue_completed_from}
         plan = seal({'schema': ELASTIC_PLAN_SCHEMA if elastic else PLAN_SCHEMA, 'library_job': library['manifest_sha256'],
             'selection_binding': self.binding, 'team': team, 'coverage_scope': library.get('coverage_scope', {}),
             'tasks': scheduled, 'cached_keys': {f: sorted(v) for f, v in cached.items()},

@@ -355,6 +355,48 @@ def completed_output_import():
     return value
 
 
+def two_account_continuation():
+    value=three_account_transfer()
+    value.cells[0].source=dedent('''
+        # 04 — Chạy tiếp acc 0/1 ngay; giữ riêng phần acc 2 chưa có thông tin
+
+        Chạy trên **Colab CPU → Run all**. Đã đặt sẵn hai acc, mỗi acc T4 x2,
+        và source plan c8d94f. Không cần chờ acc 2. Chỉ một phiên CPU tạo kế hoạch.
+
+        Acc 0/1 phải có biên nhận nhập Outputs trên Drive. Phần đã nhập được
+        loại trước khi chia việc. Toàn bộ task source plan giao acc 2 được ghi
+        reservation riêng, không giao lại cho acc 0/1. Kế hoạch/Outputs cũ giữ
+        nguyên để khi acc 2 về có thể nhập sau. Những task acc 0/1 chưa xong vẫn
+        được đưa vào lượt tiếp theo, cùng phần thư viện chưa từng được giao.
+
+        Chỉ đọc manifest và key index đã lưu; không đọc corpus, chunk lại hay
+        kiểm kê vector payload. Thư viện text 5,5 GB giữ nguyên. Colab chỉ xuất
+        kế hoạch nhỏ mới và in GPU_PLAN_DATASET_READY, dùng hai notebook
+        04_continue_2acc_account_0 / 1. Cả hai Add Input cùng thư viện cũ và
+        kế hoạch mới, T4 x2, Internet ON → Save & Run All. Cấp quyền đọc kế
+        hoạch mới cho acc 1. Bộ tối ưu Qwen v2 đã khóa trong kế hoạch mới.
+
+        Chạy lại cùng notebook dùng kế hoạch đã chốt; không tự tạo lượt trùng.
+        Chờ nhập đủ Outputs acc 0/1 của lượt mới để cấp lượt kế tiếp; không
+        chờ acc 2. Khi acc 2 đã nhập, phần nó chưa hoàn thành trở lại hàng đợi.
+    ''').strip()
+    value.cells[1].source=value.cells[1].source.replace(
+        'EXECUTION_ACCOUNTS = 3  # Ba acc, mỗi acc T4 x2.',
+        'EXECUTION_ACCOUNTS = 2  # Hai acc 0/1, mỗi acc T4 x2; acc 2 giữ riêng.')
+    value.cells[1].source+='\nCONTINUE_FROM_PLAN="c8d94f5f75f79ac89bd110b74b33befc3cbcf519be4fed2cf67be4df58fe7f56"\n'
+    value.cells[3].source=value.cells[3].source.replace(
+        'replace_unstarted_plan=CONFIRMED_UNSTARTED_PLAN)',
+        'replace_unstarted_plan=CONFIRMED_UNSTARTED_PLAN,continue_completed_from=CONTINUE_FROM_PLAN)')
+    value.cells[3].source=value.cells[3].source.replace(
+        'Ba acc dùng cùng hai dataset; account 0/1/2 đã đặt sẵn trong notebook GPU.',
+        'Hai acc 0/1 dùng cùng thư viện cũ và kế hoạch mới; phần acc 2 giữ riêng.')
+    value.cells[3].source=value.cells[3].source.replace(
+        "print('GPU_PLAN_ASSIGNMENTS:',",
+        "print('RESERVED_PENDING_ACCOUNTS:',plan.get('reservations',[]),'| tasks',len(plan.get('reserved_task_ids',[])),flush=True)\n"
+        "        print('GPU_PLAN_ASSIGNMENTS:',")
+    return value
+
+
 def qwen_benchmark_notebook():
     preflight=cell('''
         #@title 1. Kaggle T4 x2 — dùng thư viện text cũ, không cần kế hoạch mới
@@ -445,8 +487,10 @@ def main():
     nb.write(three_account_transfer(), ROOT/'notebooks/04_colab_prepare_3_accounts_kaggle.ipynb')
     nb.write(completed_output_import(), ROOT/'notebooks/04_colab_import_completed_kaggle.ipynb')
     nb.write(qwen_benchmark_notebook(), ROOT/'notebooks/kaggle/04_benchmark_qwen_t4.ipynb')
+    nb.write(two_account_continuation(), ROOT/'notebooks/04_colab_continue_accounts_0_1.ipynb')
     for account in (0,1):
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_full_data_account_{account}.ipynb')
+        nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_continue_2acc_account_{account}.ipynb')
     for account in (0,1,2):
         nb.write(full_queue_gpu(account, expected_accounts=3), ROOT/f'notebooks/kaggle/04_full_data_3acc_account_{account}.ipynb')
 
