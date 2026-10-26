@@ -308,11 +308,18 @@ text 5,5 GB không xuất lại. Nếu còn thiếu Outputs, notebook in
 GPU_PLAN_DATASET_READY cho kế hoạch cũ để tránh chạy trùng.
 
 Kế hoạch mới khóa thêm `qwen_token_batching.py` cùng policy
-`qwen-token-batches-v1`. Model code/runtime gốc, weights NF4, tokenizer,
+`qwen-token-batches-v2`; kế hoạch v1 cũ vẫn nhập được. Model code/runtime gốc, weights NF4, tokenizer,
 max_length, pooling, 4.096 chiều float32 và cache identity giữ nguyên. Mỗi
 GPU đo một canary tối đa 64 text từ task đầu, thử batch token 16/32/64,
-giới hạn 24.576 padded tokens. Chỉ chọn cách nhanh hơn native batch 16 ít
+ngân sách 24.576/49.152 padded tokens và lựa chọn math SDPA FP16 nếu runtime
+hỗ trợ. Theo [PyTorch numerical accuracy](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html),
+math SDPA mặc định có thể nâng đầu vào FP16 lên FP32; dùng reduction FP16 có
+thể giảm chi phí nhưng cần kiểm sai số. Đây là lựa chọn tính trung gian,
+không đổi weights NF4 hoặc dtype vector đầu ra. Chỉ chọn cách nhanh hơn native batch 16 ít
 nhất 5%, cosine từng vector >=0,99999 và sai số tuyệt đối tối đa <=0,001.
+Lựa chọn thắng phải vượt phép đo đối chiếu thứ hai; cờ backend được khôi
+phục kể cả khi OOM hoặc lỗi. Nếu gặp vector không hợp lệ ở input sau, chỉ
+task chưa commit đó được thử lại bằng native và runtime trở về native.
 Thời gian này gồm encode/token-length preparation; canary không được tính
 thành task hoàn thành hoặc ghi thay vector cũ. Nếu không đạt, dùng native.
 Kết quả mẫu không chứng nhận chất lượng text hay tốc độ toàn corpus.
@@ -327,3 +334,21 @@ CPU/GPU 12 giờ trong tài liệu Kaggle. Đây không phải cam kết một l
 hoàn thành mọi task được giao. Kế hoạch cũ vẫn dùng executor/deadline cũ;
 bản tối ưu chỉ áp dụng sau khi tạo và Add Input kế hoạch mới. Không thay
 executor trong dataset đang chạy hoặc tạo lại corpus/chunks.
+
+`04_benchmark_qwen_t4.ipynb` cho phép acc 0 đo riêng hai T4 ngay khi acc 1/2
+còn chạy. Add Input thư viện text cũ là đủ; không cần xuất/chờ kế hoạch mới.
+Notebook chỉ đọc tối đa ba task slice có kiểm SHA/key, nạp đúng producer và
+runtime, rồi lưu hai báo cáo JSON nhỏ trong Outputs. Không nhập Drive và
+không ghi nhận task corpus hoàn thành. Báo cáo có throughput đo được,
+canary, phép xác nhận lần hai và tên operator SDPA native đã quan sát; thời
+gian tải model/package không phải tốc độ encode. Chạy Save & Run All để tự
+kết thúc, không treo phiên interactive sau khi benchmark xong.
+
+Bộ lập kế hoạch dùng các key index đã lưu để tính khả năng tái sử dụng text
+trong từng GPU. GPU được chọn theo tải tính toán dự kiến sau khi bỏ các key
+đã có trong worker, thay vì chỉ so số hàng task. Nó vẫn cân bằng tải và tôn
+trọng budget; không cam kết loại toàn bộ text trùng giữa GPU. Trường
+`planning_text_reuse` và log `PLAN_TEXT_REUSE` báo số key mới khác nhau, số
+hàng GPU dự kiến, phần tái sử dụng trong GPU và phần trùng giữa GPU. Không
+đánh dấu key chỉ mới được giao là đã có trên Drive. Task đã nhập vẫn loại
+trước khi chia việc và worker vẫn kiểm đầy đủ text/key/producer/payload.

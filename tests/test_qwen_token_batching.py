@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from scripts.qwen_token_batching import TokenBatchEncoder,token_groups,vector_agreement
+from scripts.qwen_token_batching import TokenBatchEncoder,token_groups,vector_agreement,benchmark_texts
 from vietmedbridge.artifacts import read_json
 
 
@@ -116,3 +116,110 @@ def test_malformed_or_drifting_vectors_fail_agreement_gate():
     assert vector_agreement(a,a)[0]
     assert not vector_agreement(a,np.roll(a,1,axis=1))[0]
     assert not vector_agreement(a,np.full(a.shape,np.nan,dtype=np.float32))[0]
+
+
+def attention_native(clock,*,drift=False,bad_later=False):
+    n=Native(clock)
+    state={'enabled':False,'calls':[],'bad_later':bad_later}
+    def setter(value):
+        state['calls'].append(value)
+        state['enabled']=value
+    n.torch.backends=SimpleNamespace(cuda=SimpleNamespace(
+        allow_fp16_bf16_reduction_math_sdp=setter,
+        fp16_bf16_reduction_math_sdp_allowed=lambda:state['enabled']))
+    original=n._batch
+    def fast(texts):
+        before=clock.t
+        v=original(texts)
+        if state['enabled']:
+            clock.t=before+(clock.t-before)/3
+            if drift: v=np.roll(v,1,axis=1)
+            if state['bad_later']: v[:]=np.nan
+        return v
+    n._batch=fast
+    return n,state
+
+
+def test_faster_attention_requires_second_canary_and_always_restores_backend_flag(tmp_path):
+    clock=Clock();n,state=attention_native(clock)
+    e=TokenBatchEncoder(n,tmp_path/'tuned.json',attention_tuning=True,clock=clock,report=lambda *a,**k:None)
+    assert np.allclose(e.encode(sample()),vectors(sample()))
+    report=read_json(e.path)
+    assert report['kernel']=='fp16_math' and report['confirmation']['compatible']
+    assert report['confirmation']['selected_seconds']<=report['confirmation']['native_seconds']/1.05
+    assert not state['enabled'] and True in state['calls']
+    assert n.identity==e.identity
+
+
+def test_numerically_bad_attention_is_rejected_even_when_faster(tmp_path):
+    clock=Clock();n,state=attention_native(clock,drift=True)
+    e=TokenBatchEncoder(n,tmp_path/'tuned.json',attention_tuning=True,clock=clock,report=lambda *a,**k:None)
+    assert np.allclose(e.encode(sample()),vectors(sample()))
+    report=read_json(e.path)
+    assert report['kernel']=='native'
+    assert all(not t['compatible'] for t in report['trials'] if t['kernel']=='fp16_math')
+    assert not state['enabled']
+
+
+def test_later_invalid_attention_retries_only_current_uncommitted_task_natively(tmp_path):
+    clock=Clock();n,state=attention_native(clock)
+    e=TokenBatchEncoder(n,tmp_path/'tuned.json',attention_tuning=True,clock=clock,report=lambda *a,**k:None)
+    e.encode(sample())
+    assert e.selected_kernel=='fp16_math'
+    state['bad_later']=True
+    texts=['101:90','102:91']
+    assert np.allclose(e.encode(texts),vectors(texts))
+    assert e.selected is None and e.selected_kernel=='native' and not state['enabled']
+
+
+def test_attention_flag_restored_after_oom_and_other_exceptions(tmp_path):
+    clock=Clock();n,state=attention_native(clock)
+    n.limit=4
+    e=TokenBatchEncoder(n,tmp_path/'tuned.json',attention_tuning=True,clock=clock,report=lambda *a,**k:None)
+    e.attempted,e.selected,e.selected_kernel=True,32,'fp16_math'
+    assert np.allclose(e.encode(['1:4']*8),vectors(['1:4']*8))
+    assert not state['enabled']
+    def fail(texts): raise RuntimeError('unexpected kernel failure')
+    n._batch=fail
+    with pytest.raises(RuntimeError,match='unexpected kernel'):
+        e.encode(['2:5'])
+    assert not state['enabled']
+
+
+def test_benchmark_notebook_needs_no_execution_plan_and_never_marks_tasks_done():
+    from scripts.write_full_queue_notebooks import qwen_benchmark_notebook
+    n=qwen_benchmark_notebook()
+    for cell in n.cells:
+        if cell.cell_type=='code':compile(cell.source,'<benchmark>','exec')
+    assert 'd6ab9a432ac64e5' in n.cells[1].source
+    assert 'PLAN_PATH' not in n.cells[1].source+n.cells[3].source
+    assert 'BENCHMARK_COMPLETE_NO_TASKS_COMMITTED' in n.cells[3].source
+    assert 'CUDA_VISIBLE_DEVICES' in n.cells[3].source
+    assert '.install(' not in n.cells[3].source and '.create_plan(' not in n.cells[3].source
+
+
+def test_benchmark_samples_only_three_assets_and_checks_exact_task_keys(tmp_path,monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from vietmedbridge.artifacts import digest_json,sha256_file
+    from vietmedbridge.content_embeddings import key
+    assets,tasks={},[]
+    for i in range(9):
+        name=f'missing-qwen-{i:06d}.parquet'
+        rows=[{'id':key(f'{i}-{j} text'),'text':f'{i}-{j} text'} for j in range(32)]
+        pq.write_table(pa.Table.from_pylist(rows),tmp_path/name)
+        checksum=sha256_file(tmp_path/name)
+        assets[name]={'rows':len(rows),'sha256':checksum}
+        tasks.append({'family':'qwen','asset':name,'offset':0,'rows':len(rows),
+            'sha256':checksum,'keys_digest':digest_json(sorted(r['id'] for r in rows))})
+    original=pq.read_table
+    opened=[]
+    def read(path,**kw):
+        opened.append(path.name)
+        return original(path,**kw)
+    monkeypatch.setattr(pq,'read_table',read)
+    texts=benchmark_texts(tmp_path,{'tasks':tasks,'assets':assets})
+    assert len(texts)==72 and opened==[tasks[i]['asset'] for i in (0,4,8)]
+    tasks[0]['keys_digest']='f'*64
+    with pytest.raises(ValueError,match='text/key binding'):
+        benchmark_texts(tmp_path,{'tasks':tasks,'assets':assets})

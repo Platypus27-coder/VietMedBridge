@@ -12,7 +12,7 @@ import pytest
 from test_new_data_kaggle import project, Encoder
 from test_full_queue_embeddings import library, run_account, resealed
 from scripts.full_queue_embeddings import (FullQueueKaggle, ELASTIC_PLAN_SCHEMA,
-    ELASTIC_OUTPUT_BYTES, finalize, run_worker, validate_plan, execution_worker)
+    ELASTIC_OUTPUT_BYTES, finalize, run_worker, validate_plan, execution_worker,reuse_worker)
 from scripts.new_data_embeddings import FAMILIES
 from scripts.write_full_queue_notebooks import full_queue_gpu, three_account_transfer
 from vietmedbridge.artifacts import read_json, atomic_json, sha256_file
@@ -58,7 +58,7 @@ def test_two_account_imports_survive_six_gpu_migration_and_account_two_import(pr
     assert (plan_dir/'full_queue_embeddings.py').is_file()
     assert (plan_dir/'new_data_kaggle.py').is_file()
     assert (plan_dir/'qwen_token_batching.py').is_file()
-    assert plan['qwen_execution']=='qwen-token-batches-v1'
+    assert plan['qwen_execution']=='qwen-token-batches-v2'
     assert not list(plan_dir.glob('*.parquet'))
     assert (flow.root/'history'/('unstarted-'+unstarted['manifest_sha256']+'.json')).is_file()
     # Cold retry uses the same small plan, no task/key/cache replay.
@@ -165,8 +165,32 @@ def test_previous_two_file_executor_plan_remains_valid_and_cannot_claim_new_tuni
         validate_plan(resealed(plan,executor_sources=files),job)
     legacy=resealed(plan,executor_sources=files,qwen_execution=None)
     assert validate_plan(legacy,job)==legacy
+    previous=resealed(plan,qwen_execution='qwen-token-batches-v1')
+    assert validate_plan(previous,job)==previous
     with pytest.raises(ValueError,match='Unknown Qwen execution'):
         validate_plan(resealed(plan,qwen_execution='unsafe-different-model'),job)
+
+
+def test_partial_key_overlap_is_reused_when_it_reduces_projected_completion_time():
+    keys=set(range(512))
+    masks={k:1 for k in range(400)}
+    worker,reused=reuse_worker([0,1],[1000,990],keys,masks,1)
+    assert worker==0 and reused==400
+    # A one-key overlap must not pin an expensive chain to an already busy GPU.
+    worker,reused=reuse_worker([0,1],[512,0],keys,{0:1},1)
+    assert worker==1 and reused==0
+    # A worker whose account is out of output budget is never selected.
+    assert reuse_worker([1],[0,0],keys,masks,1)==(1,0)
+
+
+def test_plan_reports_projected_unique_and_duplicate_text_work(project,tmp_path):
+    flow,target,job=library(project,tmp_path)
+    _,plan=flow.create_plan(job,execution_accounts=3,output_bytes=ELASTIC_OUTPUT_BYTES)
+    for family,stats in plan['planning_text_reuse'].items():
+        rows=sum(t['rows'] for t in job['tasks'] if t['id'] in plan['tasks'] and t['family']==family)
+        assert stats['projected_gpu_text_rows']+stats['within_gpu_reused_text_rows']==rows
+        assert stats['projected_gpu_text_rows']-stats['unique_uncached_text_keys']==stats['cross_gpu_duplicate_text_rows']
+        assert stats['within_gpu_reused_text_rows']>0
 
 
 def test_fresh_worker_uses_small_plan_executor_with_original_published_library(project, tmp_path):

@@ -37,7 +37,8 @@ MAX_OUTPUT_BYTES = 16_000_000_000
 ELASTIC_OUTPUT_BYTES = 18_000_000_000
 LEGACY_EXECUTOR_FILES = ('full_queue_embeddings.py', 'new_data_kaggle.py')
 EXECUTOR_FILES = (*LEGACY_EXECUTOR_FILES, 'qwen_token_batching.py')
-QWEN_EXECUTION = 'qwen-token-batches-v1'
+QWEN_EXECUTION = 'qwen-token-batches-v2'
+QWEN_EXECUTIONS = ('qwen-token-batches-v1',QWEN_EXECUTION)
 
 
 def execution_worker(plan, task):
@@ -46,6 +47,16 @@ def execution_worker(plan, task):
 
 def execution_team(plan, library):
     return plan['team'] if plan['schema'] == ELASTIC_PLAN_SCHEMA else library['team']
+
+
+def reuse_worker(candidates,loads,keys,masks,cost):
+    reuse={w:0 for w in candidates}
+    for k in keys:
+        mask=masks.get(k,0)
+        for w in candidates:
+            reuse[w]+=bool(mask & (1<<w))
+    worker=min(candidates,key=lambda w:(loads[w]+(len(keys)-reuse[w])*cost,-reuse[w],w))
+    return worker,reuse[worker]
 
 
 def verify_executor(plan):
@@ -132,8 +143,8 @@ def validate_plan(plan, library):
         raise ValueError('Execution plan belongs to another input library, scope or team.')
     team = execution_team(plan, library)
     assignment = kaggle_assignment(accounts=team['accounts'], account_id=0, gpu_count=team['gpu_count'])
-    expected_sources = EXECUTOR_FILES if plan.get('qwen_execution') == QWEN_EXECUTION else LEGACY_EXECUTOR_FILES
-    if plan.get('qwen_execution') not in (None, QWEN_EXECUTION) or (not elastic and plan.get('qwen_execution')):
+    expected_sources = EXECUTOR_FILES if plan.get('qwen_execution') in QWEN_EXECUTIONS else LEGACY_EXECUTOR_FILES
+    if plan.get('qwen_execution') not in (None, *QWEN_EXECUTIONS) or (not elastic and plan.get('qwen_execution')):
         raise ValueError('Unknown Qwen execution policy; the native model producer must remain unchanged.')
     if elastic and (set(plan.get('executor_sources', {})) != set(expected_sources)
                     or any(not _is_sha(v) for v in plan['executor_sources'].values())
@@ -320,6 +331,7 @@ class FullQueueKaggle(base.NewDataKaggle):
         pending = [t for t in library['tasks'] if t['id'] not in done]
         used, scheduled, estimates = [0]*team['accounts'], [], {}
         task_workers, loads, affinity = {}, [0]*assignment['workers'], {}
+        planning_stats={}
         assets_read = 0
         cached, cache_only, affected = {f: set() for f in FAMILIES}, [], {f: set() for f in FAMILIES}
         for family in FAMILIES:
@@ -329,6 +341,8 @@ class FullQueueKaggle(base.NewDataKaggle):
             expected = self.view.identities[family]
             blocks = blocks_factory(self.view.data, SimpleNamespace(identity=expected['encoder'], dimension=expected['dimension']),
                                     self.work/family, receipt_api=receipt_api, progress=print)
+            planned_masks={}
+            family_unique,family_worker_rows,family_reuse=0,0,0
             previous, keys = None, None
             try:
                 for task in family_tasks:
@@ -368,10 +382,21 @@ class FullQueueKaggle(base.NewDataKaggle):
                             candidates = [affinity[group]] if affinity[group] in candidates else []
                         if not candidates:
                             continue
-                        worker = min(candidates, key=lambda w: (loads[w], w))
+                        missing_keys=set(selected)-set(known)
+                        cost=8 if family=='qwen' else 1
+                        # Minimize projected work, not raw task counts. Overlap
+                        # reduces work only on the GPU holding those text keys.
+                        worker,reused_rows=reuse_worker(candidates,loads,missing_keys,planned_masks,cost)
                         affinity[group] = worker
                         task_workers[task['id']] = worker
-                        loads[worker] += (len(selected)-len(known))*(8 if family == 'qwen' else 1)
+                        new_worker_rows=len(missing_keys)-reused_rows
+                        loads[worker]+=new_worker_rows*cost
+                        family_worker_rows+=new_worker_rows
+                        family_reuse+=reused_rows
+                        for k in missing_keys:
+                            previous_mask=planned_masks.get(k,0)
+                            family_unique+=previous_mask==0
+                            planned_masks[k]=previous_mask | (1<<worker)
                         account = worker//team['gpu_count']
                     elif used[account]+estimate > output_bytes:
                         continue
@@ -381,6 +406,12 @@ class FullQueueKaggle(base.NewDataKaggle):
                     cached[family].update(known)
                 if affected[family]:
                     self.complete_maps(family, affected[family], blocks)
+                if elastic:
+                    planning_stats[family]={'unique_uncached_text_keys':family_unique,
+                        'projected_gpu_text_rows':family_worker_rows,
+                        'within_gpu_reused_text_rows':family_reuse,
+                        'cross_gpu_duplicate_text_rows':family_worker_rows-family_unique}
+                    print('PLAN_TEXT_REUSE:',family,planning_stats[family],'| metadata keys only',flush=True)
             finally:
                 blocks.close()
         if cache_only:
@@ -396,7 +427,8 @@ class FullQueueKaggle(base.NewDataKaggle):
             for name, checksum in sources.items():
                 base.copied(directory/name, self.root/'executors'/checksum/name, checksum)
             extra = {'library_team': library['team'], 'task_workers': task_workers, 'executor_sources': sources,
-                     'replaces_unstarted_plan': replace_unstarted_plan, 'qwen_execution': QWEN_EXECUTION}
+                     'replaces_unstarted_plan': replace_unstarted_plan, 'qwen_execution': QWEN_EXECUTION,
+                     'planning_text_reuse':planning_stats}
         plan = seal({'schema': ELASTIC_PLAN_SCHEMA if elastic else PLAN_SCHEMA, 'library_job': library['manifest_sha256'],
             'selection_binding': self.binding, 'team': team, 'coverage_scope': library.get('coverage_scope', {}),
             'tasks': scheduled, 'cached_keys': {f: sorted(v) for f, v in cached.items()},
@@ -571,7 +603,7 @@ def run_worker(directory, plan, output, work, *, worker_id, factories, deadline,
                 expected_bytes = len(new_values)*(library['models'][family]['dimension']*4+1024)
                 if expected_bytes != plan['task_output_bytes'][task['id']]:
                     raise ValueError('Cached-key skip differs from the bounded task estimate.')
-                defaults = {'bge':32,'qwen':64 if plan.get('qwen_execution') == QWEN_EXECUTION else 16}
+                defaults = {'bge':32,'qwen':64 if plan.get('qwen_execution') in QWEN_EXECUTIONS else 16}
                 blocks.refs([r['text'] for r in new_values], batch_size=(batch_sizes or defaults)[family],
                             encode_missing=True, encode_block_rows=base.TASK_ROWS)
                 completed.append({'task': task['id'], 'keys': keys})
@@ -692,10 +724,10 @@ def main():
         plan = validate_plan(args.plan,library)
         def qwen_factory():
             owner = TorchQwenEncoder(library['config']['second_dense'])
-            if plan.get('qwen_execution') == QWEN_EXECUTION:
+            if plan.get('qwen_execution') in QWEN_EXECUTIONS:
                 from qwen_token_batching import TokenBatchOwner
                 return TokenBatchOwner(owner,Path(args.output)/'qwen-tuning'/f'worker-{args.worker_id}.json',
-                                       deadline=args.deadline)
+                    deadline=args.deadline,attention_tuning=plan.get('qwen_execution')==QWEN_EXECUTION)
             return owner
         result = run_worker(args.job, plan, args.output, args.work, worker_id=args.worker_id, deadline=args.deadline,
             factories={'bge': lambda: TorchDenseEncoder(library['config']['dense']), 'qwen': qwen_factory})

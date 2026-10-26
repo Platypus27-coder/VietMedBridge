@@ -176,14 +176,14 @@ def full_queue_gpu(account_id=0, expected_accounts=2):
         EXECUTOR_DIR=PLAN_PATH.parent if PLAN['schema']=='full-data-execution-plan-v2' else JOB_DIR
         if PLAN['schema']=='full-data-execution-plan-v2':
             expected_executors={'full_queue_embeddings.py','new_data_kaggle.py'}
-            if PLAN.get('qwen_execution')=='qwen-token-batches-v1':
+            if PLAN.get('qwen_execution') in ('qwen-token-batches-v1','qwen-token-batches-v2'):
                 expected_executors.add('qwen_token_batching.py')
             if set(PLAN.get('executor_sources',{}))!=expected_executors:
                 raise ValueError('Missing locked execution scheduler sources.')
             for name,checksum in PLAN['executor_sources'].items():
                 if hashlib.sha256((EXECUTOR_DIR/name).read_bytes()).hexdigest()!=checksum:
                     raise ValueError('Execution scheduler checksum changed.')
-        if PLAN.get('qwen_execution')!='qwen-token-batches-v1':
+        if PLAN.get('qwen_execution') not in ('qwen-token-batches-v1','qwen-token-batches-v2'):
             SESSION_HOURS=min(SESSION_HOURS,10.0)
             print('LEGACY_EXECUTION_PLAN: giữ deadline cũ; bản tối ưu cần kế hoạch mới sau khi nhập đủ Outputs.',flush=True)
         else:
@@ -265,7 +265,7 @@ def three_account_transfer():
         gói; dùng 04_full_data_3acc_account_0 / 1 / 2, account ID đã đặt sẵn.
         Chọn T4 x2, Internet ON, Save Version → Save & Run All.
 
-        Kế hoạch mới khóa bộ tối ưu qwen-token-batches-v1. Trên GPU, chỉ chọn
+        Kế hoạch mới khóa bộ tối ưu qwen-token-batches-v2. Trên GPU, chỉ chọn
         batch token nhanh hơn ít nhất 5% và vượt canary so với native batch 16;
         nếu không thì giữ native. Deadline 11,5 giờ từ cell đầu, dành khoảng
         30 phút trước giới hạn 12 giờ. Không cam kết số task hay mức tăng tốc.
@@ -355,10 +355,96 @@ def completed_output_import():
     return value
 
 
+def qwen_benchmark_notebook():
+    preflight=cell('''
+        #@title 1. Kaggle T4 x2 — dùng thư viện text cũ, không cần kế hoạch mới
+        import hashlib,importlib,json,os,re,subprocess,sys,time
+        from pathlib import Path
+        if not Path('/kaggle/input').is_dir() or Path('/var/colab/hostname').is_file():
+            raise RuntimeError('Notebook đo tốc độ này chạy trên Kaggle T4 x2.')
+        KAGGLE_ACCOUNT_ID=0
+        libraries={}
+        for path in Path('/kaggle/input').rglob('job.json'):
+            item=json.loads(path.read_text())
+            if item.get('schema')=='full-data-text-library-v1':
+                libraries[item.get('manifest_sha256')]=(path.parent,item)
+        if len(libraries)!=1:
+            raise RuntimeError('Add Input đúng một thư viện text vmb-full-inputs-d6ab9a432ac6; không cần xuất dataset mới.')
+        JOB_DIR,JOB=next(iter(libraries.values()))
+        body={k:v for k,v in JOB.items() if k!='manifest_sha256'}
+        sha=hashlib.sha256(json.dumps(body,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        if (sha!=JOB['manifest_sha256'] or sha!='d6ab9a432ac64e5aadb39a826b7dc2176094cc66d4f4e3d9e17c121e071c0711'
+                or JOB.get('repo_url')!='https://github.com/Platypus27-coder/VietMedBridge.git'
+                or not re.fullmatch('[0-9a-f]{40}',JOB.get('code_commit',''))):
+            raise ValueError('Thư viện hoặc producer không khớp gói đã freeze.')
+        print('QWEN_BENCHMARK_INPUT_READY: thư viện cũ; tối đa ba task slice, không ghi task hoàn thành.',flush=True)
+    ''')
+    bootstrap=gpu(0).cells[2].source
+    bootstrap+='\n(WORK_DIR/\'qwen_token_batching.py\').write_text('+repr(
+        (ROOT/'scripts/qwen_token_batching.py').read_text(encoding='utf-8'))+",encoding='utf-8')\n"
+    bootstrap+="env['PYTHONPATH']=os.pathsep.join((str(WORK_DIR),str(CHECKOUT/'src'),str(JOB_DIR)))\n"
+    run=cell('''
+        #@title 3. Đo độc lập hai GPU; kết quả nhỏ trong Outputs
+        output=Path('/kaggle/working/vmb_qwen_benchmark')
+        output.mkdir(parents=True,exist_ok=True)
+        processes=[]
+        started=time.monotonic()
+        try:
+            for worker in (0,1):
+                child=env.copy()
+                child['CUDA_VISIBLE_DEVICES']=str(worker)
+                command=[sys.executable,'-u',str(WORK_DIR/'qwen_token_batching.py'),
+                    '--job',str(JOB_DIR),'--checkout',str(CHECKOUT),'--output',str(output),
+                    '--worker-id',str(worker)]
+                processes.append(subprocess.Popen(command,env=child))
+            while any(p.poll() is None for p in processes):
+                if any(p.poll() not in (None,0) for p in processes):
+                    raise RuntimeError('Benchmark worker lỗi; xem traceback, giữ model cache trong runtime.')
+                if time.monotonic()-started>2400:
+                    raise RuntimeError('Benchmark vượt 40 phút; kiểm tra tải model/runtime trước khi chạy corpus.')
+                print('QWEN_BENCHMARK_HEARTBEAT:',int(time.monotonic()-started),'s',flush=True)
+                time.sleep(15)
+            if any(p.returncode!=0 for p in processes):
+                raise RuntimeError('Benchmark chưa hoàn tất trên cả hai GPU.')
+        finally:
+            for p in processes:
+                if p.poll() is None: p.terminate()
+            for p in processes:
+                try: p.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    p.kill();p.wait(timeout=10)
+        for worker in (0,1):
+            report=json.loads((output/f'worker-{worker}.json').read_text())
+            print('QWEN_BENCHMARK_GPU:',worker,'| native texts/s',report.get('baseline_texts_per_second'),
+                '| selected texts/s',report.get('selected_texts_per_second'),
+                '| sample speedup',report.get('measured_sample_speedup'),'| kernel',report.get('kernel'),flush=True)
+        print('BENCHMARK_COMPLETE_NO_TASKS_COMMITTED: chỉ đo tốc độ, chưa encode hàng đợi và không đổi checkpoint Drive.',flush=True)
+    ''')
+    return book('''
+        # 04 — Đo tốc độ Qwen trên acc 0 trong lúc acc 1/2 vẫn chạy
+
+        Kaggle → Add Input thư viện cũ **vmb-full-inputs-d6ab9a432ac6-1792733353195313801**
+        → Internet ON → T4 x2 → Save & Run All. Không cần kế hoạch GPU mới,
+        không nhập/gộp/chạy lại task cũ. Không dùng GPU acc 1/2 đang chạy.
+
+        Hai GPU đo riêng native batch 16, nhóm theo token và nhánh FP16 math SDPA
+        nếu runtime hỗ trợ. Mọi lựa chọn phải nhanh hơn ít nhất 5%, vượt cosine
+        >=0,99999 và sai số tuyệt đối <=0,001, rồi xác nhận bằng phép đo thứ hai.
+        Nhánh nhanh không đạt sẽ bị loại. Weights NF4, text, tokenizer và pooling
+        gốc giữ nguyên; lựa chọn attention trung gian được ghi rõ trong báo cáo.
+
+        Notebook đọc tối đa ba task slice từ thư viện text đã có, không đọc Drive,
+        vector cũ hoặc toàn bộ corpus. Tải model/runtime vẫn cần thiết khi phiên
+        mới. Không ghi task vào hàng đợi đã hoàn thành. Outputs chỉ có hai JSON
+        đo tốc độ và log; gửi các dòng QWEN_BENCHMARK_GPU để chốt cấu hình.
+    ''',[preflight,cell(bootstrap),run],gpu=True)
+
+
 def main():
     nb.write(full_queue_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     nb.write(three_account_transfer(), ROOT/'notebooks/04_colab_prepare_3_accounts_kaggle.ipynb')
     nb.write(completed_output_import(), ROOT/'notebooks/04_colab_import_completed_kaggle.ipynb')
+    nb.write(qwen_benchmark_notebook(), ROOT/'notebooks/kaggle/04_benchmark_qwen_t4.ipynb')
     for account in (0,1):
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_full_data_account_{account}.ipynb')
     for account in (0,1,2):
