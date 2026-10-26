@@ -299,6 +299,49 @@ def three_account_transfer():
     return value
 
 
+def four_account_transfer():
+    value = three_account_transfer()
+    value.cells[0].source = dedent('''
+        # 04 — Tiếp tục phần còn thiếu trên 4 acc Kaggle / 8 GPU
+
+        Chạy **Colab CPU → Run all**. Đã đặt sẵn 4 acc, mỗi acc T4 x2.
+        Các Outputs trước đã nhập Drive thì để KAGGLE_NOTEBOOK_OUTPUT trống.
+        KAGGLE_ACCOUNTS=2 là khóa thư viện gốc; EXECUTION_ACCOUNTS=4 là
+        đội chạy lượt mới. Không sửa khóa thư viện để đổi số acc.
+
+        Notebook đọc biên nhận đã lưu để loại task đã nhập của mọi acc,
+        dùng key index để chọn phần text còn thiếu và xuất kế hoạch nhỏ.
+        Dataset text 5,5 GB dùng lại; không crawl/chunk/index lại hoặc
+        tải vector cũ để kiểm kê. Mỗi task trong kế hoạch chỉ có một GPU
+        phụ trách; bốn acc dùng các worker 0–7 và cùng một kế hoạch.
+
+        Nếu lượt cũ chưa nhập đủ Outputs, notebook giữ lượt đó và báo
+        WAITING_FOR_KAGGLE_OUTPUTS. Không tự thay một kế hoạch có thể
+        đang chạy. Retry sau lỗi upload dùng lại đúng kế hoạch đã chốt.
+
+        Khi có GPU_PLAN_DATASET_READY, cả bốn acc Add Input thư viện text
+        cũ và kế hoạch mới, cấp quyền đọc hai dataset cho các thành viên.
+        Dùng 04_full_data_4acc_account_0 / 1 / 2 / 3, ID đã đặt sẵn.
+        T4 x2, Internet ON → Save Version → Save & Run All.
+
+        Kế hoạch có bộ tối ưu qwen-token-batches-v2 và deadline 11,5 giờ.
+        Chỉ chọn nhánh đo được nhanh hơn và vượt kiểm tra sai số; không
+        cam kết tốc độ tăng bốn lần hoặc hoàn thành toàn bộ trong một lượt.
+        Ngân sách Outputs dự kiến 18 GB/acc vẫn áp dụng cho từng acc.
+
+        GPU_PLAN_ASSIGNMENTS báo số task của từng acc 0–3. Sau lượt chạy,
+        nhập đủ bốn Outputs trước khi tạo lượt kế tiếp. Task và URL là
+        hai đơn vị khác nhau; đây là embedding corpus, chưa phải submission.
+    ''').strip()
+    value.cells[1].source = value.cells[1].source.replace(
+        'EXECUTION_ACCOUNTS = 3  # Ba acc, mỗi acc T4 x2.',
+        'EXECUTION_ACCOUNTS = 4  # Bốn acc 0/1/2/3, mỗi acc T4 x2.')
+    value.cells[3].source = value.cells[3].source.replace(
+        'Ba acc dùng cùng hai dataset; account 0/1/2 đã đặt sẵn trong notebook GPU.',
+        'Bốn acc dùng cùng hai dataset; account 0/1/2/3 đã đặt sẵn trong notebook GPU.')
+    return value
+
+
 def completed_output_import():
     value = three_account_transfer()
     value.cells[0].source = dedent('''
@@ -485,6 +528,7 @@ def qwen_benchmark_notebook():
 def main():
     nb.write(full_queue_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     nb.write(three_account_transfer(), ROOT/'notebooks/04_colab_prepare_3_accounts_kaggle.ipynb')
+    nb.write(four_account_transfer(), ROOT/'notebooks/04_colab_prepare_4_accounts_kaggle.ipynb')
     nb.write(completed_output_import(), ROOT/'notebooks/04_colab_import_completed_kaggle.ipynb')
     nb.write(qwen_benchmark_notebook(), ROOT/'notebooks/kaggle/04_benchmark_qwen_t4.ipynb')
     nb.write(two_account_continuation(), ROOT/'notebooks/04_colab_continue_accounts_0_1.ipynb')
@@ -493,6 +537,8 @@ def main():
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_continue_2acc_account_{account}.ipynb')
     for account in (0,1,2):
         nb.write(full_queue_gpu(account, expected_accounts=3), ROOT/f'notebooks/kaggle/04_full_data_3acc_account_{account}.ipynb')
+    for account in range(4):
+        nb.write(full_queue_gpu(account, expected_accounts=4), ROOT/f'notebooks/kaggle/04_full_data_4acc_account_{account}.ipynb')
 
 
 if __name__=='__main__':
