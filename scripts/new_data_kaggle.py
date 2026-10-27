@@ -6,6 +6,7 @@ exports uncached texts. Neither export nor import changes the submission pointer
 from pathlib import Path
 from types import SimpleNamespace
 import argparse
+import copy
 import json
 import os
 import re
@@ -428,8 +429,10 @@ def validate_job(directory, checkout=None):
 
 
 def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_failed=False,
-                     manifest_path=None, expected_result=None):
+                     manifest_path=None, expected_result=None, on_manifest=None):
     """Page through the new-data manifest first, before downloading vectors."""
+    if on_manifest is not None and (not callable(on_manifest) or manifest_path is None):
+        raise ValueError('Manifest observer requires a callable and pinned manifest path.')
     from vietmedbridge.kaggle_outputs import _download_pages, output_handles
     output_handles(handle)
     transport = None
@@ -467,6 +470,10 @@ def download_outputs(api, handle, work, *, project=None, import_roots=(), allow_
         if (not expected or set(expected)-{'manifest_sha256', 'job', 'execution_plan', 'account_id', 'completed_tasks'}
                 or any(actual.get(name) != value for name, value in expected.items())):
             raise ValueError('Saved Outputs differ from the expected completed GPU run; no vector download started.')
+    if on_manifest is not None:
+        # Optional diagnostics use the same pinned saved version, after the
+        # expected-run guard and before any vector transfer or import shortcut.
+        on_manifest(transport, copy.deepcopy(manifest))
     relative = Path(manifest_path) if transport is not None else manifests[0].relative_to(probe)
     if project is not None:
         from_parent = Path(project)/'data_staging'/'btc-new-71be0e12-20261019-v1'/'freeze_batch_v1'/'embeddings_v1'

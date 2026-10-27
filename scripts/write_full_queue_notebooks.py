@@ -343,13 +343,21 @@ def four_account_transfer():
 
 
 def completed_output_import():
-    value = three_account_transfer()
+    value = four_account_transfer()
     value.cells[0].source = dedent('''
         # 04 — Nhập kết quả Kaggle đã hoàn thành về Drive (Colab CPU)
 
-        Acc 0 đã đặt sẵn: **kaisercoding/impact-2**, đúng manifest 918 task.
+        Acc 0 đã đặt sẵn: **kaisercoding/impact-3**, đúng manifest 1.198 task
+        của plan 63b6fe57cbf4. Link người chạy cung cấp có scriptVersionId
+        362515679; đây là ID phiên Kaggle, không phải số version 1/2/3.
         Chạy trên Colab CPU → Run all, dùng Secret KAGGLE_JSON đã có.
         Notebook chỉ nhập Outputs; không xuất thư viện hoặc tạo kế hoạch GPU.
+
+        Trước khi tải vector, kiểm tra đúng mã kết quả 00541f1dea44 và lấy
+        hai báo cáo qwen-tuning nhỏ từ cùng version đã khóa. In
+        QWEN_TUNING_REPORT để biết mode, batch, kernel, tốc độ đo và lý do
+        các lựa chọn bị loại; lưu báo cáo trên Drive để đọc sau. Báo cáo
+        thiếu không làm mất kết quả vector hợp lệ. Không chạy model/GPU.
 
         File đang tải và checkpoint tải được lưu trong
         VietMedBridge/data_staging/kaggle_output_transfers trên Drive để runtime
@@ -360,11 +368,15 @@ def completed_output_import():
         Thư viện, candidate và kế hoạch đang chạy của các acc khác giữ nguyên.
     ''').strip()
     value.cells[1].source = value.cells[1].source.replace(
-        'KAGGLE_NOTEBOOK_OUTPUT = ""', 'KAGGLE_NOTEBOOK_OUTPUT = "kaisercoding/impact-2"')
+        'KAGGLE_NOTEBOOK_OUTPUT = ""', 'KAGGLE_NOTEBOOK_OUTPUT = "kaisercoding/impact-3"')
+    source = (ROOT/'scripts/kaggle_qwen_diagnostics.py').read_text(encoding='utf-8')
+    value.cells[2].source += '\n(WORK_DIR/\'kaggle_qwen_diagnostics.py\').write_text('+repr(source)+",encoding='utf-8')\n"
+    value.cells[2].source += "sys.modules.pop('kaggle_qwen_diagnostics',None)\nimportlib.invalidate_caches()\n"
     value.cells[3].source = cell('''
         #@title 3. Nhập acc 0 về Drive; không tạo hay thay kế hoạch GPU
         from kaggle.api.kaggle_api_extended import KaggleApi
         from vietmedbridge.kaggle_outputs import output_handles
+        from kaggle_qwen_diagnostics import read_qwen_tuning
         if not KAGGLE_NOTEBOOK_OUTPUT.strip():
             raise ValueError('Điền handle notebook có Outputs đã lưu.')
         api=KaggleApi()
@@ -380,9 +392,21 @@ def completed_output_import():
                     'job':'d6ab9a432ac64e5aadb39a826b7dc2176094cc66d4f4e3d9e17c121e071c0711',
                     'execution_plan':'c8d94f5f75f79ac89bd110b74b33befc3cbcf519be4fed2cf67be4df58fe7f56',
                     'account_id':0,'completed_tasks':918}
+            if handle.split('/')[:2]==['kaisercoding','impact-3']:
+                expected={
+                    'manifest_sha256':'00541f1dea440b984f647aff3161b076ea24e3ef6501d534cfcd50c6e73316a4',
+                    'job':'d6ab9a432ac64e5aadb39a826b7dc2176094cc66d4f4e3d9e17c121e071c0711',
+                    'execution_plan':'63b6fe57cbf42fbf355f4d1c476a1fa68801c4b91d03c65855274f35861dec15',
+                    'account_id':0,'completed_tasks':1198}
+            def observer(transport,result):
+                if result.get('plan',{}).get('qwen_execution') in ('qwen-token-batches-v1','qwen-token-batches-v2'):
+                    read_qwen_tuning(transport,result,PROJECT,identities['qwen']['encoder'])
+                else:
+                    print('QWEN_TUNING_REPORTS_NOT_PRODUCED: legacy execution plan; native import continues.',flush=True)
             output=pipeline.download_outputs(api,handle,download_work,project=PROJECT,
                 import_roots=roots,allow_failed=True,
-                manifest_path='vmb_full_queue/result/new-data-result.json',expected_result=expected)
+                manifest_path='vmb_full_queue/result/new-data-result.json',expected_result=expected,
+                on_manifest=observer)
             saved=pipeline.checked(pipeline.read_json(output/'job.json'))
             if (saved.get('schema')!='full-data-text-library-v1'
                     or saved.get('coverage_scope',{}).get('official_ids')!=802028):
