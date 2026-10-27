@@ -867,6 +867,46 @@ def colab_gpu_single_account_notebook():
     setup = setup.replace(
         '# Để trống để xuất gói. Sau GPU: owner/notebook[,owner2/notebook2] để nhập Outputs.\n',
         '')
+    old_project_block = '''PROJECT = Path('/content/drive/MyDrive/VietMedBridge')
+relative = 'data_staging/btc-maximize-71be0e12-v1'
+if not (PROJECT/relative/'delta_candidates.json').is_file():
+    PROJECT = Path('/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge')
+PROJECT = PROJECT.resolve()'''
+    new_project_block = dedent(f'''\
+        EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
+        DRIVE_ROOT_CANDIDATES = [
+            Path('/content/drive/MyDrive/VietMedBridge'),
+            Path('/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge'),
+        ]
+        PROJECT = None
+        for candidate in DRIVE_ROOT_CANDIDATES:
+            scope_parent = candidate/'data_staging/btc-full-embeddings-71be0e12-v1'
+            active_path = scope_parent/'active_scope.json'
+            if not active_path.is_file():
+                continue
+            try:
+                active_scope = json.loads(active_path.read_text(encoding='utf-8'))
+                scope_root = (candidate/active_scope['root']).resolve()
+                if scope_root.parent != scope_parent.resolve():
+                    continue
+                library_path = scope_root/'embeddings_v1/kaggle-4x2/input_library.json'
+                if not library_path.is_file():
+                    continue
+                saved_library = json.loads(library_path.read_text(encoding='utf-8'))
+                if saved_library.get('manifest_sha256') == EXPECTED_LIBRARY_JOB:
+                    PROJECT = candidate.resolve()
+                    print('DRIVE_ROOT_SELECTED:',PROJECT,'| existing full library verified',flush=True)
+                    break
+            except (OSError, KeyError, TypeError, ValueError):
+                continue
+        if PROJECT is None:
+            raise FileNotFoundError(
+                'Không tìm thấy full input library đã freeze trong hai vị trí Drive. '
+                'Notebook dừng trước khi tạo assignment; kiểm tra Drive mount hoặc thư mục full-embeddings.'
+            )''')
+    if old_project_block not in setup:
+        raise ValueError('Expected Drive root selection block was not found in the Colab setup.')
+    setup = setup.replace(old_project_block, new_project_block)
     if 'Notebook chuyển dữ liệu này chạy trên Colab CPU' in setup:
         raise ValueError('Single-Colab setup still contains the CPU-only guard.')
 
@@ -874,6 +914,9 @@ def colab_gpu_single_account_notebook():
     plan_source = plan_source.replace(
         '#@title 3. Tạo plan Colab 1×1 GPU; giữ riêng task Kaggle acc 2 đang chạy',
         '#@title 3. Phân công task tự động; giữ riêng task Kaggle acc 2 đang chạy')
+    plan_source = plan_source.replace(
+        "raise FileNotFoundError('Drive chưa có full input library đã freeze; dừng để không tạo lại từ corpus.')",
+        "raise FileNotFoundError(f'Drive full input library chưa có tại {pointer}; chưa tạo assignment.')")
     # The optional old Kaggle output is imported once at the end, after Colab work.
     optional_start = plan_source.index("if KAGGLE_NOTEBOOK_OUTPUT.strip():")
     flow_start = plan_source.index("\nflow=queue_flow(", optional_start) + 1
