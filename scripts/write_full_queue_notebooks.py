@@ -561,11 +561,11 @@ def colab_gpu_plan_notebook():
         "print('NEW DATA: CPU export/import; không chạy lại 02/03, không nạp model weights.', flush=True)",
         "print('COLAB PLAN: dùng manifest frozen trên Drive; không export corpus hay nạp model.', flush=True)")
     value.cells[0].source = dedent('''
-        # Colab CPU — tạo hàng đợi embedding 4 phiên Colab, mỗi phiên 1 GPU
+        # Colab CPU — tạo hàng đợi embedding cho một phiên Colab, một GPU
 
         Chạy một lần trên Colab CPU. Kế hoạch mới giữ riêng task của Kaggle acc 2
         đang chạy trong plan 63b6fe57cbf4; phần của các acc đã nhập và task chưa
-        được giao sẽ sang 4 Colab worker. Notebook chỉ đọc manifest/key index đã
+        được giao sẽ sang một Colab worker. Notebook chỉ đọc manifest/key index đã
         lưu trên Drive để lập lịch; không encode, không đọc lại corpus.
 
         Trước khi chạy, thêm Colab Secret `KAGGLE_JSON`, bật Notebook access,
@@ -575,12 +575,12 @@ def colab_gpu_plan_notebook():
     ''').strip()
     value.cells[1].source = value.cells[1].source.replace(
         'KAGGLE_ACCOUNTS = 2 #@param {type:"integer"}',
-        'KAGGLE_ACCOUNTS = 4 #@param {type:"integer"}')
+        'SOURCE_KAGGLE_ACCOUNTS = 4  # Original 63b6 plan team; Colab runs one account')
     value.cells[3].source = cell(f'''
-        #@title 3. Tạo plan Colab 4×1 GPU; giữ riêng task Kaggle acc 2 đang chạy
+        #@title 3. Tạo plan Colab 1×1 GPU; giữ riêng task Kaggle acc 2 đang chạy
         CONTINUE_FROM_PLAN = "{SOURCE_EXECUTION_PLAN}"
         EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
-        EXECUTION_ACCOUNTS = 4
+        EXECUTION_ACCOUNTS = 1
         EXECUTION_GPUS_PER_ACCOUNT = 1
 
         if KAGGLE_NOTEBOOK_OUTPUT.strip():
@@ -620,14 +620,14 @@ def colab_gpu_plan_notebook():
             plan=flow.saved_plan(active.get('plan'))
             if (plan.get('team')!={{'accounts':EXECUTION_ACCOUNTS,'gpu_count':EXECUTION_GPUS_PER_ACCOUNT}}
                     or plan.get('continued_from_plan')!=CONTINUE_FROM_PLAN):
-                raise RuntimeError('Drive đang có plan khác. Không thay plan sau khi worker có thể đã chạy.')
+                raise RuntimeError('Drive đang có plan Colab khác. Không đổi assignment khi worker có thể đã chạy.')
             target=flow.stage_plan(plan)
             print('COLAB_PLAN_REUSED: không tạo task assignment mới.',flush=True)
         print('COLAB_PLAN_READY:',plan['manifest_sha256'],flush=True)
         print('TEAM:',plan['team'],'| tasks:',plan['scheduled_tasks'],'| task IDs còn khóa Kaggle:',
             len(plan.get('reserved_task_ids',[])),'| source pending accounts:',plan.get('reservations',[]),flush=True)
         print('PLAN_ON_DRIVE:',flow.root/'plans'/(plan['manifest_sha256']+'.json'),flush=True)
-        print('ACCOUNT_ID trên 4 Colab: 0, 1, 2, 3. Mỗi ID dùng đúng một GPU và một checkpoint folder.',flush=True)
+        print('Dùng đúng một Colab GPU: ACCOUNT_ID=0; checkpoint riêng trên Drive.',flush=True)
     ''').source
     return value
 
@@ -643,20 +643,20 @@ def colab_gpu_worker_notebook():
     value.cells[0].source = dedent(f'''
         # Colab GPU worker — embedding phần task được giao, checkpoint trực tiếp lên Drive
 
-        Dùng cùng notebook cho bốn phiên Colab. Mỗi phiên đặt `KAGGLE_ACCOUNT_ID`
-        lần lượt 0, 1, 2, 3 và cùng `COLAB_PLAN_SHA` in từ notebook tạo plan.
-        Mỗi worker chỉ chạy whitelist riêng của mình; khởi động lại cùng plan/account
-        sẽ đọc journal trên Drive và tiếp tục, không tạo assignment mới.
+        Dùng một phiên Colab GPU. Đặt `KAGGLE_ACCOUNT_ID=0` và `COLAB_PLAN_SHA`
+        đúng giá trị notebook tạo plan đã in. Worker chạy toàn bộ whitelist được
+        giao cho phiên này; khởi động lại cùng plan/account sẽ đọc journal trên
+        Drive và tiếp tục, không tạo assignment mới.
 
         Đặt Colab runtime GPU (T4), bật Internet, thêm Secret `KAGGLE_JSON`, bật
         Notebook access, rồi Run all. Text library/model cache được tải vào runtime
         Colab; vector blocks, map, result manifest và task journal nằm trong
         `VietMedBridge/data_staging/colab_gpu_checkpoints` trên Drive.
-        Không chạy cell tạo plan ở đây và không dùng cùng account ID ở hai phiên.
+        Không chạy cell tạo plan ở đây hoặc chạy worker này song song ở phiên khác.
     ''').strip()
     value.cells[1].source = value.cells[1].source.replace(
         'KAGGLE_ACCOUNTS = 2 #@param {type:"integer"}',
-        'KAGGLE_ACCOUNTS = 4 #@param {type:"integer"}')
+        'SOURCE_KAGGLE_ACCOUNTS = 4  # Original 63b6 plan team; Colab runs one account')
     value.cells[3].source = cell(f'''
         #@title 3. Chạy một worker Colab GPU; journal/checkpoint trên Drive
         import importlib
@@ -671,8 +671,8 @@ def colab_gpu_worker_notebook():
         COLAB_PLAN_SHA = "" #@param {{type:"string"}}
         WORKER_HOURS = 11.0 #@param {{type:"number"}}
 
-        if not 0<=KAGGLE_ACCOUNT_ID<4 or not re.fullmatch(r'[0-9a-f]{{64}}',COLAB_PLAN_SHA):
-            raise ValueError('Đặt account ID 0–3 và COLAB_PLAN_SHA chính xác từ notebook tạo plan.')
+        if KAGGLE_ACCOUNT_ID!=0 or not re.fullmatch(r'[0-9a-f]{{64}}',COLAB_PLAN_SHA):
+            raise ValueError('Dùng ACCOUNT_ID=0 và COLAB_PLAN_SHA chính xác từ notebook tạo plan.')
         gpu_probe=subprocess.run(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],
             check=True,text=True,capture_output=True)
         if len([line for line in gpu_probe.stdout.splitlines() if line.strip()])!=1:
@@ -696,9 +696,9 @@ def colab_gpu_worker_notebook():
         flow=queue_flow(WORK_DIR/'cpu',accounts=4,gpu_count=2,batch_dir=JOB['source_batch_dir'])
         PLAN=flow.saved_plan(COLAB_PLAN_SHA)
         PLAN=queue.validate_plan(PLAN,JOB)
-        if (PLAN.get('team')!={{'accounts':4,'gpu_count':1}}
+        if (PLAN.get('team')!={{'accounts':1,'gpu_count':1}}
                 or PLAN.get('continued_from_plan')!=SOURCE_PLAN):
-            raise ValueError('Plan không phải continuation Colab 4×1 đã khóa; không chạy.')
+            raise ValueError('Plan không phải continuation Colab 1×1 đã khóa; không chạy.')
         PLAN_DIR=flow.stage_plan(PLAN)
         plan_path=PLAN_DIR/'job.json'
         sys.path[:0]=[str(PLAN_DIR),str(JOB_DIR),str(CHECKOUT/'src')]
@@ -753,21 +753,21 @@ def colab_gpu_import_notebook():
     value.cells[0].source = dedent('''
         # Colab CPU — nhập checkpoint Colab về Drive rồi chuẩn bị lượt Kaggle 4×2
 
-        Chạy một lần sau khi bốn Colab account đã tạo `new-data-result.json` trên
-        Drive. Notebook nhập từng account theo thứ tự, dùng SHA/manifest gốc và
-        native importer; chạy lại an toàn, receipt đã nhập sẽ không tải lại payload.
+        Chạy sau khi Colab account 0 tạo `new-data-result.json` trên Drive.
+        Notebook dùng SHA/manifest gốc và native importer; chạy lại an toàn,
+        receipt đã nhập sẽ không tải lại payload.
         Có thể nhập thêm Outputs Kaggle acc 2 nếu phiên đó đã hoàn tất.
 
-        Chỉ khi đủ receipt cho bốn worker của plan Colab, notebook mới tạo kế hoạch
+        Chỉ khi receipt của worker Colab account 0 đã nhập, notebook mới tạo kế hoạch
         Kaggle 4 acc × T4×2. Task của Kaggle acc 2 cũ vẫn bị giữ riêng nếu chưa có
         Outputs được nhập; không giao task đang chạy cho Kaggle/Colab lần nữa.
     ''').strip()
     value.cells[1].source = value.cells[1].source.replace(
         'KAGGLE_ACCOUNTS = 2 #@param {type:"integer"}',
-        'KAGGLE_ACCOUNTS = 4 #@param {type:"integer"}')
+        'SOURCE_KAGGLE_ACCOUNTS = 4  # Original 63b6 plan team; Colab runs one account')
     value.cells[1].source += '\nCOLAB_PLAN_SHA = "" #@param {type:"string"}\n'
     value.cells[3].source = cell(f'''
-        #@title 3. Nhập Colab receipts tuần tự; đủ 4 account mới cấp lượt Kaggle
+        #@title 3. Nhập Colab receipt; sau đó cấp lượt Kaggle 4×2
         COLAB_PLAN_SHA = COLAB_PLAN_SHA.strip()
         EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
         if not re.fullmatch(r'[0-9a-f]{{64}}',COLAB_PLAN_SHA):
@@ -799,10 +799,10 @@ def colab_gpu_import_notebook():
                 print(json.dumps(old_flow.install(output,receipt_api=api_source),ensure_ascii=False,indent=2),flush=True)
 
         plan=flow.saved_plan(COLAB_PLAN_SHA)
-        if plan.get('team')!={{'accounts':4,'gpu_count':1}}:
+        if plan.get('team')!={{'accounts':1,'gpu_count':1}}:
             raise ValueError('Colab plan sai team; không nhập.')
         imported=[];missing=[]
-        for account in range(4):
+        for account in range(1):
             output=(PROJECT/'data_staging/colab_gpu_checkpoints'/COLAB_PLAN_SHA/
                 f'account-{{account}}'/'vmb_full_queue'/'result')
             manifest=output/'new-data-result.json'
@@ -825,8 +825,8 @@ def colab_gpu_import_notebook():
         else:
             receipts=flow.account_receipts(library)
             plan_receipts={{r['account_id'] for r in receipts if r.get('execution_plan')==COLAB_PLAN_SHA}}
-            if plan_receipts!=set(range(4)):
-                raise RuntimeError('Chưa có đủ bốn import receipts; không thể mở khóa plan tiếp theo.')
+            if plan_receipts!={{0}}:
+                raise RuntimeError('Chưa có receipt của Colab account 0; không thể mở khóa plan tiếp theo.')
             target,next_plan=flow.create_plan(library,receipt_api=api_source,
                 execution_accounts=4,execution_gpu_count=2)
             if target is None:

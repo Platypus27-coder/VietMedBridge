@@ -10,7 +10,10 @@ from test_full_queue_embeddings import library,resealed
 from test_full_queue_three_accounts import finish_account
 from scripts import full_queue_embeddings as q
 from scripts.new_data_embeddings import FAMILIES
-from scripts.write_full_queue_notebooks import two_account_continuation,full_queue_gpu
+from scripts.write_full_queue_notebooks import (
+    colab_gpu_import_notebook, colab_gpu_plan_notebook, colab_gpu_worker_notebook,
+    two_account_continuation, full_queue_gpu,
+)
 from vietmedbridge.artifacts import atomic_json,read_json
 
 
@@ -88,20 +91,35 @@ def test_two_accounts_continue_without_waiting_and_late_account_two_still_import
     assert (flow.root/'plans'/(old['manifest_sha256']+'.json')).read_bytes()==old_plan
 
 
-def test_colab_one_gpu_per_account_reserves_only_still_running_kaggle_account(project,tmp_path,monkeypatch):
+def test_colab_single_gpu_account_reserves_only_still_running_kaggle_account(project,tmp_path,monkeypatch):
     flow,target,job,old=source_round(project,tmp_path,monkeypatch,accounts=(0,1,3),execution_accounts=4)
     entries={t['id']:t for t in job['tasks']}
     account_two={tid for tid in old['tasks'] if q.execution_worker(old,entries[tid])//2==2}
     imported=flow.imported()
-    _,colab=flow.create_plan(job,execution_accounts=4,execution_gpu_count=1,
+    _,colab=flow.create_plan(job,execution_accounts=1,execution_gpu_count=1,
         output_bytes=q.ELASTIC_OUTPUT_BYTES,continue_completed_from=old['manifest_sha256'])
-    assert colab['team']=={'accounts':4,'gpu_count':1}
+    assert colab['team']=={'accounts':1,'gpu_count':1}
     assert set(colab['reserved_task_ids'])==account_two
     assert not set(colab['tasks'])&(imported|account_two)
-    assert set(colab['task_workers'].values())<=set(range(4))
+    assert set(colab['task_workers'].values())=={0}
     reservation=read_json(flow.root/'reservations'/(old['manifest_sha256']+'.json'))
     assert reservation['released_accounts']==[0,1,3]
     assert reservation['held_accounts']==[2]
+
+
+def test_colab_notebooks_use_one_worker_and_import_one_receipt():
+    plan=colab_gpu_plan_notebook()
+    worker=colab_gpu_worker_notebook()
+    importer=colab_gpu_import_notebook()
+    for notebook in (plan,worker,importer):
+        for c in notebook.cells:
+            if c.cell_type=='code':compile(c.source,'<single-colab-worker>','exec')
+    assert 'EXECUTION_ACCOUNTS = 1' in plan.cells[3].source
+    assert 'EXECUTION_GPUS_PER_ACCOUNT = 1' in plan.cells[3].source
+    assert "'accounts':1,'gpu_count':1" in worker.cells[3].source
+    assert 'KAGGLE_ACCOUNT_ID!=0' in worker.cells[3].source
+    assert 'for account in range(1)' in importer.cells[3].source
+    assert 'plan_receipts!={0}' in importer.cells[3].source
 
 
 def test_partial_source_import_releases_only_that_account(project,tmp_path,monkeypatch):
