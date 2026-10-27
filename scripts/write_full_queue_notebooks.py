@@ -843,7 +843,6 @@ def colab_gpu_import_notebook():
 def colab_gpu_single_account_notebook():
     plan_book = colab_gpu_plan_notebook()
     worker_book = colab_gpu_worker_notebook()
-    import_book = colab_gpu_import_notebook()
 
     setup = plan_book.cells[1].source.replace(
         '#@title 1. Colab CPU — kết nối Drive và tải mã khóa',
@@ -864,9 +863,10 @@ def colab_gpu_single_account_notebook():
     setup = setup.replace(
         'SOURCE_KAGGLE_ACCOUNTS = 4  # Original 63b6 plan team; Colab runs one account\n', '')
     setup = setup.replace('MIGRATE_UNSTARTED_LEGACY = True #@param {type:"boolean"}\n', '')
+    setup = setup.replace('KAGGLE_NOTEBOOK_OUTPUT = "" #@param {type:"string"}\n', '')
     setup = setup.replace(
         '# Để trống để xuất gói. Sau GPU: owner/notebook[,owner2/notebook2] để nhập Outputs.\n',
-        '# Có thể để trống nếu chưa có Outputs Kaggle cần nhập.\n')
+        '')
     if 'Notebook chuyển dữ liệu này chạy trên Colab CPU' in setup:
         raise ValueError('Single-Colab setup still contains the CPU-only guard.')
 
@@ -956,29 +956,49 @@ def colab_gpu_single_account_notebook():
         "if RUN_COLAB_WORKER:\n" + indent(worker_body, '    ') + "\nelse:\n"
         "    print('Colab worker already imported; skipping embedding.',flush=True)")
 
-    import_source = import_book.cells[3].source
-    import_lines = import_source.splitlines()
-    import_title = import_lines[0]
-    import_title = import_title.replace(
-        '#@title 3. Nhập Colab receipt;',
-        '#@title 5. Nhập Colab receipt;')
-    import_body = '\n'.join(import_lines[1:]).strip()
-    import_body = import_body.replace(
-        "raise ValueError('Điền COLAB_PLAN_SHA đã dùng ở cả bốn worker.')",
-        "raise ValueError('Assignment lock không hợp lệ; không nhập receipt.')")
-    import_body += dedent(f'''\
+    import_source = dedent(f'''\
+        #@title 5. Nhập checkpoint vào Drive; tiếp tục nếu còn task
+        if RUN_COLAB_IMPORT:
+            EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
+            flow=queue_flow(WORK_DIR/'cpu',accounts=4,gpu_count=2,batch_dir=BATCH_DIR)
+            pointer=flow.root/'input_library.json'
+            if not pointer.is_file():
+                raise FileNotFoundError('Không thấy full input library frozen trên Drive.')
+            library=queue._validate_library_header(queue.read_json(pointer))
+            if library.get('manifest_sha256')!=EXPECTED_LIBRARY_JOB:
+                raise ValueError('Full input library khác job đã chốt.')
 
-        if not missing:
-            queue.atomic_json(COLAB_PLAN_POINTER,queue.seal({{
-                'schema':'colab-single-account-plan-v1','library_job':EXPECTED_LIBRARY_JOB,
-                'source_plan':"{SOURCE_EXECUTION_PLAN}",'plan':COLAB_PLAN_SHA,
-                'state':'IMPORTED','updated_at':queue.utc_now()}}))
-            RUN_COLAB_WORKER=False
-            RUN_COLAB_IMPORT=False
-            print('COLAB_SINGLE_ACCOUNT_IMPORT_COMPLETE: worker will not be reassigned on rerun.',flush=True)
-    ''')
-    import_source = (import_title + '\nif RUN_COLAB_IMPORT:\n' + indent(import_body, '    ')
-        + "\nelse:\n    print('Colab result already imported; skipping repeat import/plan creation.',flush=True)")
+            plan=flow.saved_plan(COLAB_PLAN_SHA)
+            if plan.get('team')!={{'accounts':1,'gpu_count':1}}:
+                raise ValueError('Assignment lock sai team; không nhập.')
+            output=(PROJECT/'data_staging/colab_gpu_checkpoints'/COLAB_PLAN_SHA/
+                'account-0'/'vmb_full_queue'/'result')
+            manifest=output/'new-data-result.json'
+            if not manifest.is_file():
+                raise FileNotFoundError('Worker chưa ghi receipt lên Drive; chạy lại cùng notebook để tiếp tục.')
+            result=queue.checked(queue.read_json(manifest))
+            if (result.get('execution_plan')!=COLAB_PLAN_SHA or result.get('account_id')!=0
+                    or result.get('job')!=EXPECTED_LIBRARY_JOB):
+                raise ValueError('Colab result không khớp task assignment; không nhập.')
+            report=flow.install(output,receipt_api=api_source)
+            print('COLAB_RESULT_IMPORTED_TO_DRIVE:',json.dumps({{
+                'state':result['state'],'completed_tasks':len(report['selection_ids']),
+                'assigned_tasks':len(plan['tasks']),'coverage':flow.coverage()
+            }},ensure_ascii=False,indent=2),flush=True)
+
+            if result.get('state')=='ROUND_COMPLETE':
+                queue.atomic_json(COLAB_PLAN_POINTER,queue.seal({{
+                    'schema':'colab-single-account-plan-v1','library_job':EXPECTED_LIBRARY_JOB,
+                    'source_plan':"{SOURCE_EXECUTION_PLAN}",'plan':COLAB_PLAN_SHA,
+                    'state':'IMPORTED','updated_at':queue.utc_now()}}))
+                RUN_COLAB_WORKER=False
+                RUN_COLAB_IMPORT=False
+                print('COLAB_ACCOUNT_COMPLETE: no more Colab tasks in this assignment.',flush=True)
+            else:
+                print('COLAB_PARTIAL_CHECKPOINT_IMPORTED: rerun this same notebook to resume remaining assigned tasks.',flush=True)
+        else:
+            print('Colab account assignment already complete; skipping embedding/import.',flush=True)
+    ''').strip()
 
     metadata_source = plan_book.cells[2].source.replace(
         '#@title 2. Kết nối manifest frozen và cache đã có — CPU, không mở vector payload',
@@ -989,8 +1009,8 @@ def colab_gpu_single_account_notebook():
 
             Chọn một GPU Colab (T4), thêm Secret `KAGGLE_JSON`, kết nối Drive, rồi bấm **Run all**.
             Notebook tự khóa task của Kaggle acc 2 đang chạy, tạo phân công nội bộ 1×1, chạy worker 0,
-            lưu vector/journal/manifest trực tiếp vào Drive, rồi nhập checkpoint và chuẩn bị
-            lượt Kaggle kế tiếp. Không cần mở notebook plan/import riêng.
+            lưu vector/journal/manifest trực tiếp vào Drive, rồi nhập receipt ngay trên Drive.
+            Không cần mở notebook plan/import riêng hay xuất plan dataset mới.
 
             Nếu Colab dừng giữa chừng, chạy lại **cùng notebook**. Plan và checkpoint Drive
             được giữ nguyên để tiếp tục; không mở thêm phiên Colab song song với account 0.
