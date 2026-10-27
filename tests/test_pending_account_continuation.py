@@ -25,9 +25,9 @@ def partial_account(target,job,plan,output,work,identities,account,monkeypatch):
     return q.finalize(target,plan,output,account)
 
 
-def source_round(project,tmp_path,monkeypatch,*,accounts=(0,1)):
+def source_round(project,tmp_path,monkeypatch,*,accounts=(0,1),execution_accounts=3):
     flow,target,job=library(project,tmp_path)
-    _,old=flow.create_plan(job,execution_accounts=3,output_bytes=q.ELASTIC_OUTPUT_BYTES)
+    _,old=flow.create_plan(job,execution_accounts=execution_accounts,output_bytes=q.ELASTIC_OUTPUT_BYTES)
     for account in accounts:
         out=tmp_path/f'old-{account}'
         partial_account(target,job,old,out,tmp_path/f'old-gpu-{account}',project[1],account,monkeypatch)
@@ -88,13 +88,31 @@ def test_two_accounts_continue_without_waiting_and_late_account_two_still_import
     assert (flow.root/'plans'/(old['manifest_sha256']+'.json')).read_bytes()==old_plan
 
 
-def test_continuation_requires_import_proof_for_both_released_accounts(project,tmp_path,monkeypatch):
+def test_colab_one_gpu_per_account_reserves_only_still_running_kaggle_account(project,tmp_path,monkeypatch):
+    flow,target,job,old=source_round(project,tmp_path,monkeypatch,accounts=(0,1,3),execution_accounts=4)
+    entries={t['id']:t for t in job['tasks']}
+    account_two={tid for tid in old['tasks'] if q.execution_worker(old,entries[tid])//2==2}
+    imported=flow.imported()
+    _,colab=flow.create_plan(job,execution_accounts=4,execution_gpu_count=1,
+        output_bytes=q.ELASTIC_OUTPUT_BYTES,continue_completed_from=old['manifest_sha256'])
+    assert colab['team']=={'accounts':4,'gpu_count':1}
+    assert set(colab['reserved_task_ids'])==account_two
+    assert not set(colab['tasks'])&(imported|account_two)
+    assert set(colab['task_workers'].values())<=set(range(4))
+    reservation=read_json(flow.root/'reservations'/(old['manifest_sha256']+'.json'))
+    assert reservation['released_accounts']==[0,1,3]
+    assert reservation['held_accounts']==[2]
+
+
+def test_partial_source_import_releases_only_that_account(project,tmp_path,monkeypatch):
     flow,target,job,old=source_round(project,tmp_path,monkeypatch,accounts=(0,))
-    with pytest.raises(ValueError,match='Import every continuing account'):
-        flow.create_plan(job,execution_accounts=2,output_bytes=q.ELASTIC_OUTPUT_BYTES,
-                         continue_completed_from=old['manifest_sha256'])
-    assert not list((flow.root/'reservations').glob('*.json'))
-    assert read_json(flow.root/'active_execution_plan.json')['plan']==old['manifest_sha256']
+    entries={t['id']:t for t in job['tasks']}
+    held={tid for tid in old['tasks'] if q.execution_worker(old,entries[tid])//2 in (1,2)}
+    _,new=flow.create_plan(job,execution_accounts=2,output_bytes=q.ELASTIC_OUTPUT_BYTES,
+        continue_completed_from=old['manifest_sha256'])
+    assert new['team']=={'accounts':2,'gpu_count':2}
+    assert set(new['reserved_task_ids'])==held
+    assert not set(new['tasks'])&(flow.imported()|held)
     with pytest.raises(ValueError,match='exact source execution-plan SHA'):
         flow.create_plan(job,execution_accounts=2,continue_completed_from='guess')
 

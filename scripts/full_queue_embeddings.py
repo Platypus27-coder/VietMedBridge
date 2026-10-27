@@ -200,14 +200,14 @@ class FullQueueKaggle(base.NewDataKaggle):
         return result
 
     def reserve_pending_accounts(self,library,source,team,receipts):
-        if (source['team']['gpu_count']!=team['gpu_count']
-                or not 0<team['accounts']<source['team']['accounts']):
-            raise ValueError('Continuation must keep the completed leading accounts and the original GPU count.')
-        released=list(range(team['accounts']))
+        if type(team.get('accounts')) is not int or team['accounts'] < 1:
+            raise ValueError('Continuation requires at least one execution account.')
         matching=[r for r in receipts if r.get('execution_plan')==source['manifest_sha256']]
-        if not set(released)<={r['account_id'] for r in matching}:
-            raise ValueError('Import every continuing account before releasing its unfinished tasks.')
-        held=list(range(team['accounts'],source['team']['accounts']))
+        source_accounts=set(range(source['team']['accounts']))
+        released=sorted({r['account_id'] for r in matching})
+        if not set(released)<=source_accounts:
+            raise ValueError('Source plan has an import receipt for an unknown account.')
+        held=sorted(source_accounts-set(released))
         source_ids=set(source['tasks'])
         tasks=[t for t in library['tasks'] if t['id'] in source_ids]
         ids=sorted(t['id'] for t in tasks if execution_worker(source,t)//source['team']['gpu_count'] in held)
@@ -218,8 +218,15 @@ class FullQueueKaggle(base.NewDataKaggle):
         path=self.root/'reservations'/(source['manifest_sha256']+'.json')
         if path.exists():
             old=checked(read_json(path))
-            if any(old.get(k)!=v for k,v in record.items() if k!='release_receipts'):
+            if (old.get('schema')!='pending-account-reservation-v1'
+                    or old.get('binding')!=self.binding
+                    or old.get('library_job')!=library['manifest_sha256']
+                    or old.get('source_plan')!=source['manifest_sha256']):
                 raise ValueError('Saved pending-account reservation changed.')
+            # A reservation is immutable once created. Late results from held
+            # accounts release their tasks through the receipt inventory below.
+            self.reserved_tasks(library,receipts)
+            return
         else:
             atomic_json(path,seal(record))
         print('CONTINUE_COMPLETED_ACCOUNTS:',released,'| keep pending accounts',held,
@@ -234,8 +241,10 @@ class FullQueueKaggle(base.NewDataKaggle):
                 raise ValueError('Invalid pending-account reservation binding.')
             source=validate_plan(self.saved_plan(r['source_plan']),library)
             released,accounts=r['released_accounts'],r['held_accounts']
-            if (released!=list(range(len(released))) or not released
-                    or accounts!=list(range(len(released),source['team']['accounts'])) or not accounts):
+            source_accounts=set(range(source['team']['accounts']))
+            if (not isinstance(released,list) or not isinstance(accounts,list)
+                    or released!=sorted(set(released)) or accounts!=sorted(set(accounts))
+                    or set(released)&set(accounts) or set(released)|set(accounts)!=source_accounts):
                 raise ValueError('Pending-account reservation owner set changed.')
             proof=r.get('release_receipts',{})
             for a in released:
@@ -349,12 +358,19 @@ class FullQueueKaggle(base.NewDataKaggle):
 
     def create_plan(self, library, *, output_bytes=MAX_OUTPUT_BYTES, receipt_api=None,
                     blocks_factory=ResumableContentBlocks, supersede_unstarted_legacy=False,
-                    execution_accounts=None, replace_unstarted_plan=None,continue_completed_from=None):
+                    execution_accounts=None, execution_gpu_count=None, replace_unstarted_plan=None,
+                    continue_completed_from=None):
         library = _validate_library_header(_value(library))
         if library['selection_binding'] != self.binding or library['models'] != self.view.identities:
             raise ValueError('Input library differs from this frozen selection.')
         elastic = execution_accounts is not None
-        team = {'accounts': execution_accounts, 'gpu_count': self.team['gpu_count']} if elastic else self.team
+        if elastic:
+            team = {'accounts': execution_accounts,
+                    'gpu_count': self.team['gpu_count'] if execution_gpu_count is None else execution_gpu_count}
+        else:
+            if execution_gpu_count is not None:
+                raise ValueError('Changing the execution GPU count requires an elastic execution plan.')
+            team = self.team
         assignment = kaggle_assignment(accounts=team['accounts'], account_id=0, gpu_count=team['gpu_count'])
         if type(output_bytes) is not int or not 0 < output_bytes <= (ELASTIC_OUTPUT_BYTES if elastic else MAX_OUTPUT_BYTES):
             raise ValueError('Output budget exceeds the scheduler allowance; leave room below Kaggle saved Outputs capacity.')
