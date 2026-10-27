@@ -889,7 +889,7 @@ PROJECT = PROJECT.resolve()'''
                 scope_root = (candidate/active_scope['root']).resolve()
                 if scope_root.parent != scope_parent.resolve():
                     continue
-                library_path = scope_root/'embeddings_v1/kaggle-4x2/input_library.json'
+                library_path = scope_root/'embeddings_v1/kaggle-2x2/input_library.json'
                 if not library_path.is_file():
                     continue
                 saved_library = json.loads(library_path.read_text(encoding='utf-8'))
@@ -917,6 +917,9 @@ PROJECT = PROJECT.resolve()'''
     plan_source = plan_source.replace(
         "raise FileNotFoundError('Drive chưa có full input library đã freeze; dừng để không tạo lại từ corpus.')",
         "raise FileNotFoundError(f'Drive full input library chưa có tại {pointer}; chưa tạo assignment.')")
+    plan_source = plan_source.replace(
+        "flow=queue_flow(WORK_DIR/'cpu',accounts=4,gpu_count=2,batch_dir=BATCH_DIR)",
+        "flow=queue_flow(WORK_DIR/'cpu',accounts=2,gpu_count=2,batch_dir=BATCH_DIR)")
     # The optional old Kaggle output is imported once at the end, after Colab work.
     optional_start = plan_source.index("if KAGGLE_NOTEBOOK_OUTPUT.strip():")
     flow_start = plan_source.index("\nflow=queue_flow(", optional_start) + 1
@@ -974,6 +977,9 @@ PROJECT = PROJECT.resolve()'''
 
     worker_source = worker_book.cells[3].source
     worker_source = worker_source.replace(
+        "flow=queue_flow(WORK_DIR/'cpu',accounts=4,gpu_count=2,batch_dir=JOB['source_batch_dir'])",
+        "flow=queue_flow(WORK_DIR/'cpu',accounts=2,gpu_count=2,batch_dir=JOB['source_batch_dir'])")
+    worker_source = worker_source.replace(
         'KAGGLE_ACCOUNT_ID = 0 #@param {type:"integer"}\n', 'KAGGLE_ACCOUNT_ID = 0\n')
     worker_source = worker_source.replace(
         '        COLAB_PLAN_SHA = "" #@param {type:"string"}\n', '')
@@ -1003,7 +1009,7 @@ PROJECT = PROJECT.resolve()'''
         #@title 5. Nhập checkpoint vào Drive; tiếp tục nếu còn task
         if RUN_COLAB_IMPORT:
             EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
-            flow=queue_flow(WORK_DIR/'cpu',accounts=4,gpu_count=2,batch_dir=BATCH_DIR)
+            flow=queue_flow(WORK_DIR/'cpu',accounts=2,gpu_count=2,batch_dir=BATCH_DIR)
             pointer=flow.root/'input_library.json'
             if not pointer.is_file():
                 raise FileNotFoundError('Không thấy full input library frozen trên Drive.')
@@ -1071,6 +1077,122 @@ PROJECT = PROJECT.resolve()'''
     return value
 
 
+def kaggle_four_account_continuation_notebook():
+    source_book = colab_gpu_plan_notebook()
+    setup = source_book.cells[1].source.replace(
+        '#@title 1. Colab CPU — kết nối Drive và tải mã khóa',
+        '#@title 1. Colab CPU — kết nối Drive để chuẩn bị lượt Kaggle 4 acc')
+    setup = setup.replace(
+        'SOURCE_KAGGLE_ACCOUNTS = 4  # Original 63b6 plan team; Colab runs one account\n', '')
+    setup = setup.replace('KAGGLE_NOTEBOOK_OUTPUT = "" #@param {type:"string"}\n', '')
+    setup = setup.replace(
+        '# Để trống để xuất gói. Sau GPU: owner/notebook[,owner2/notebook2] để nhập Outputs.\n', '')
+    old_project_block = '''PROJECT = Path('/content/drive/MyDrive/VietMedBridge')
+relative = 'data_staging/btc-maximize-71be0e12-v1'
+if not (PROJECT/relative/'delta_candidates.json').is_file():
+    PROJECT = Path('/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge')
+PROJECT = PROJECT.resolve()'''
+    new_project_block = dedent(f'''\
+        EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
+        DRIVE_ROOT_CANDIDATES = [
+            Path('/content/drive/MyDrive/VietMedBridge'),
+            Path('/content/drive/.shortcut-targets-by-id/1uKKHYEcMPodnJIscKPi6jsoNBJvyhFGK/VietMedBridge'),
+        ]
+        PROJECT = None
+        for candidate in DRIVE_ROOT_CANDIDATES:
+            scope_parent = candidate/'data_staging/btc-full-embeddings-71be0e12-v1'
+            active_path = scope_parent/'active_scope.json'
+            if not active_path.is_file():
+                continue
+            try:
+                active_scope = json.loads(active_path.read_text(encoding='utf-8'))
+                scope_root = (candidate/active_scope['root']).resolve()
+                if scope_root.parent != scope_parent.resolve():
+                    continue
+                library_path = scope_root/'embeddings_v1/kaggle-2x2/input_library.json'
+                if not library_path.is_file():
+                    continue
+                saved_library = json.loads(library_path.read_text(encoding='utf-8'))
+                if saved_library.get('manifest_sha256') == EXPECTED_LIBRARY_JOB:
+                    PROJECT = candidate.resolve()
+                    print('DRIVE_ROOT_SELECTED:',PROJECT,'| full library team 2×T4 verified',flush=True)
+                    break
+            except (OSError, KeyError, TypeError, ValueError):
+                continue
+        if PROJECT is None:
+            raise FileNotFoundError(
+                'Không tìm thấy full input library d6ab... trên Drive; chưa tạo plan hay đổi assignment.'
+            )''')
+    if old_project_block not in setup:
+        raise ValueError('Expected Drive root selection block was not found in continuation setup.')
+    setup = setup.replace(old_project_block, new_project_block)
+
+    plan = dedent(f'''\
+        #@title 3. Tạo plan tiếp tục 4 acc × T4×2; giữ task đang chạy của plan 63b6
+        CONTINUE_FROM_PLAN = "{SOURCE_EXECUTION_PLAN}"
+        EXPECTED_LIBRARY_JOB = "{FULL_LIBRARY_JOB}"
+        SOURCE_LIBRARY_ACCOUNTS = 2
+        EXECUTION_ACCOUNTS = 4
+        EXECUTION_GPUS_PER_ACCOUNT = 2
+
+        flow=queue_flow(WORK_DIR/'cpu',accounts=SOURCE_LIBRARY_ACCOUNTS,gpu_count=2,batch_dir=BATCH_DIR)
+        pointer=flow.root/'input_library.json'
+        if not pointer.is_file():
+            raise FileNotFoundError(f'Full input library chưa có tại {{pointer}}; không tạo task mới.')
+        library=queue._validate_library_header(queue.read_json(pointer))
+        if library.get('manifest_sha256')!=EXPECTED_LIBRARY_JOB:
+            raise ValueError('Full input library sai manifest; giữ nguyên task cũ.')
+
+        active_path=flow.root/'active_execution_plan.json'
+        active=queue.checked(queue.read_json(active_path))
+        if active.get('plan')==CONTINUE_FROM_PLAN:
+            target,plan=flow.create_plan(library,receipt_api=api_source,
+                execution_accounts=EXECUTION_ACCOUNTS,execution_gpu_count=EXECUTION_GPUS_PER_ACCOUNT,
+                continue_completed_from=CONTINUE_FROM_PLAN)
+        else:
+            plan=flow.saved_plan(active.get('plan'))
+            if (plan.get('team')!={{'accounts':EXECUTION_ACCOUNTS,'gpu_count':EXECUTION_GPUS_PER_ACCOUNT}}
+                    or plan.get('continued_from_plan')!=CONTINUE_FROM_PLAN):
+                raise RuntimeError('Drive đang có plan khác; không đổi assignment khi task có thể đang chạy.')
+            target=flow.stage_plan(plan)
+            print('KAGGLE_CONTINUATION_PLAN_REUSED: cùng phân công, không tạo trùng.',flush=True)
+
+        if target is None:
+            print('KAGGLE_CONTINUATION_STATUS:',json.dumps(plan,ensure_ascii=False,indent=2),flush=True)
+            print('Chưa có task an toàn để giao; account chưa có receipt vẫn được giữ riêng.',flush=True)
+        else:
+            handle=queue.upload_plan(flow,target,plan,owner)
+            print('KAGGLE_CONTINUATION_PLAN_READY: https://www.kaggle.com/datasets/'+handle,flush=True)
+            print('PLAN:',plan['manifest_sha256'],'| team:',plan['team'],'| scheduled:',plan['scheduled_tasks'],
+                '| remaining:',plan.get('remaining_tasks_after_plan'),
+                '| reserved from old running accounts:',len(plan.get('reserved_task_ids',[])),flush=True)
+            print('INPUT_LIBRARY: https://www.kaggle.com/datasets/{FULL_LIBRARY_HANDLE}',flush=True)
+            print('Thêm đúng hai dataset trên vào 04_full_data_4acc_account_0/1/2/3; không dùng plan cũ.',flush=True)
+    ''')
+    value = nb.v4.new_notebook(cells=[
+        nb.v4.new_markdown_cell(dedent(f'''\
+            # Tiếp tục Qwen trên Kaggle — 4 acc × T4×2
+
+            Chạy notebook này **một lần trên Colab CPU** để dùng receipt đã lưu trên Drive và xuất plan tiếp nối.
+            Nó giữ riêng task chưa có receipt của plan `{SOURCE_EXECUTION_PLAN[:12]}`, không chạy embedding,
+            không nạp model và không tạo lại thư viện text.
+
+            Khi có `KAGGLE_CONTINUATION_PLAN_READY`, trên cả 4 tài khoản Kaggle Add Input cùng:
+            1. thư viện text `vmb-full-inputs-d6ab9a432ac6-1792733353195313801`;
+            2. dataset plan mới được in ở cuối notebook.
+
+            Chạy `04_full_data_4acc_account_0.ipynb`, `..._1.ipynb`, `..._2.ipynb`, `..._3.ipynb` tương ứng.
+            Nếu acc 2 vẫn đang chạy plan cũ, để phiên đó hoàn tất/lưu Outputs trước khi mở worker mới trên acc 2.
+        ''').strip()),
+        nb.v4.new_code_cell(setup),
+        source_book.cells[2],
+        nb.v4.new_code_cell(plan),
+    ])
+    value.metadata = dict(source_book.metadata)
+    value.metadata.pop('accelerator', None)
+    return value
+
+
 def main():
     nb.write(full_queue_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     nb.write(three_account_transfer(), ROOT/'notebooks/04_colab_prepare_3_accounts_kaggle.ipynb')
@@ -1082,6 +1204,7 @@ def main():
     nb.write(colab_gpu_worker_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_worker.ipynb')
     nb.write(colab_gpu_import_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_import_and_kaggle_continue.ipynb')
     nb.write(colab_gpu_single_account_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_single_account.ipynb')
+    nb.write(kaggle_four_account_continuation_notebook(), ROOT/'notebooks/04_colab_continue_kaggle_4_accounts.ipynb')
     for account in (0,1):
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_full_data_account_{account}.ipynb')
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_continue_2acc_account_{account}.ipynb')
