@@ -150,6 +150,8 @@ def full_queue_gpu(account_id=0, expected_accounts=2):
         EXPECTED_EXECUTION_ACCOUNTS=__EXPECTED_ACCOUNTS__
         SESSION_HOURS=11.5
         print('ALL-TEXT Kaggle preflight | account',KAGGLE_ACCOUNT_ID,flush=True)
+        print('KAGGLE_WORKER_PRESET:',json.dumps({'account_id':KAGGLE_ACCOUNT_ID,
+            'expected_team':{'accounts':EXPECTED_EXECUTION_ACCOUNTS,'gpu_count':2}},ensure_ascii=False),flush=True)
         if not Path('/kaggle/input').is_dir() or Path('/var/colab/hostname').is_file():
             raise RuntimeError('GPU notebook chạy trên Kaggle; Colab dùng notebook xuất full-data.')
         libraries,plans={},{}
@@ -166,8 +168,14 @@ def full_queue_gpu(account_id=0, expected_accounts=2):
         if len(compatible)!=1:
             raise RuntimeError('Add Input đúng MỘT GPU_PLAN_DATASET_READY khớp thư viện text; gỡ kế hoạch cũ khi đổi lượt.')
         PLAN_PATH,PLAN=compatible[0]
-        if PLAN.get('team')!={'accounts':EXPECTED_EXECUTION_ACCOUNTS,'gpu_count':2}:
-            raise ValueError('Dùng kế hoạch GPU mới đúng số acc đã cấu hình; gỡ kế hoạch 2 acc cũ trước khi chạy GPU.')
+        expected_team={'accounts':EXPECTED_EXECUTION_ACCOUNTS,'gpu_count':2}
+        print('PLAN_TEAM_CHECK:',json.dumps({'notebook_expected_team':expected_team,
+            'attached_plan_team':PLAN.get('team'),'plan_sha256':PLAN.get('manifest_sha256'),
+            'plan_file':str(PLAN_PATH)},ensure_ascii=False),flush=True)
+        if PLAN.get('team')!=expected_team:
+            raise ValueError(f"TEAM_MISMATCH: this notebook expects {expected_team}; "
+                f"the attached plan is {PLAN.get('team')} ({PLAN.get('manifest_sha256')}). "
+                'Use the matching account-count worker notebook and plan; no GPU tasks started.')
         if JOB.get('repo_url')!='https://github.com/Platypus27-coder/VietMedBridge.git' or not re.fullmatch('[0-9a-f]{40}',JOB.get('code_commit','')):
             raise ValueError('Library producer repo/commit invalid.')
         if not 0<=KAGGLE_ACCOUNT_ID<PLAN['team']['accounts'] or PLAN['team']['gpu_count']!=2:
