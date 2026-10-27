@@ -12,7 +12,7 @@ def notebook():
     def cell(source):
         return nb.v4.new_code_cell(dedent(source).strip())
     sources = {name:(ROOT/'scripts'/name).read_text(encoding='utf-8') for name in
-               ('new_data_drive_api.py','qwen_token_batching.py','colab_qwen_benchmark.py')}
+               ('new_data_drive_api.py','qwen_token_batching.py','colab_qwen_benchmark.py','qwen_t4_experiments.py')}
     setup = cell('''
         #@title 1. Colab GPU T4 — Drive API, thư viện frozen và runtime Kaggle
         import copy,hashlib,importlib,importlib.metadata,json,os,re,shutil,subprocess,sys,time
@@ -148,6 +148,26 @@ def notebook():
         else:
             print('BENCHMARK_FAILED: báo cáo lỗi đã lưu Drive; chưa kết luận tốc độ.',flush=True)
     ''')
+    extra = nb.v4.new_code_cell(run.source.replace(
+        '#@title 3. Đo một GPU: native batch 16 so với bộ tự chọn Qwen v2',
+        '#@title 5. Thử thêm batch 8/12/24, CPU threads và efficient attention — so với v2').replace(
+        'REPORT_PATH','EXTRA_REPORT_PATH').replace("WORK/'benchmark.json'","WORK/'benchmark-extended.json'").replace(
+        "WORK/'colab_qwen_benchmark.py'","WORK/'qwen_t4_experiments.py'"))
+    save_extra = cell('''
+        #@title 6. Lưu kết quả bổ sung; chỉ nhận mức tăng thêm so với v2
+        EXTRA_DRIVE_REPORT=publish_report(api,EXTRA_REPORT_PATH)
+        extra=json.loads(EXTRA_REPORT_PATH.read_text(encoding='utf-8'))
+        if extra['state']=='BENCHMARK_COMPLETE_NO_TASKS_COMMITTED':
+            e=extra['evaluation']
+            print('T4_EXTRA_SUMMARY: existing v2',round(e['reference_v2_texts_per_second'],2),'texts/s | candidate',
+                (round(e['candidate_texts_per_second'],2) if e['candidate_texts_per_second'] is not None else 'unavailable'),
+                'texts/s | additional speedup',
+                (round(e['additional_speedup_over_v2'],2) if e['additional_speedup_over_v2'] is not None else 'unavailable'),
+                '| accepted',e['candidate_accepted'],'| scope',e['measurement_scope'],
+                '| config',e['selected_config'],flush=True)
+        else:
+            print('T4_EXTRA_FAILED: giữ v2; báo cáo lỗi đã lưu Drive.',flush=True)
+    ''')
     value = nb.v4.new_notebook(cells=[nb.v4.new_markdown_cell(dedent('''
         # 04 — Thử hiệu năng Qwen 8B trên Colab trước lượt Kaggle qua đêm
 
@@ -177,7 +197,19 @@ def notebook():
         Sau khi có BENCHMARK_SAVED_ON_DRIVE, báo cáo đã lưu để đọc và chốt lượt
         tiếp theo. Chạy lại cell 4 chỉ lưu báo cáo, không chạy lại model. Cùng
         runtime có thể dùng lại kết quả đo; bật FORCE_REMEASURE để chủ động đo mới.
-    ''').strip()),setup,sample,run,save])
+
+        **Cell 5–6 thử các nhánh bổ sung so trực tiếp với v2:** batch 8/12/24,
+        CPU thread 1, và efficient SDPA với K/V head expansion khi cần. Không
+        cài kernel ngoài hoặc đổi weights/mask/pooling. Chỉ chọn nhánh nhanh
+        hơn v2 ít nhất 5% trên hai lượt đo độc lập, đồng thời vẫn đạt sai số
+        so với encoder gốc. Nếu không có nhánh nào vượt vòng chọn, bỏ qua
+        đo lặp trên mẫu độc lập để tiết kiệm GPU và giữ v2.
+        [Giới hạn GQA của PyTorch 2.8](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.scaled_dot_product_attention.html).
+
+        Cell 5–6 chỉ thử nghiệm; chưa thay worker Kaggle hoặc tính task mới.
+        Phép đo cũ được dùng lại nếu còn trong runtime. Báo cáo bổ sung có
+        T4_EXTRA_SUMMARY và BENCHMARK_SAVED_ON_DRIVE riêng.
+    ''').strip()),setup,sample,run,save,extra,save_extra])
     value.metadata={'accelerator':'GPU','kernelspec':{'display_name':'Python 3','language':'python','name':'python3'},
                     'language_info':{'name':'python'},'colab':{'provenance':[],'gpuType':'T4'}}
     return value
