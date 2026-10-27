@@ -1,6 +1,6 @@
 """Keep all text inputs on Kaggle; subsequent rounds only upload a small plan."""
 from pathlib import Path
-from textwrap import dedent
+from textwrap import dedent, indent
 import nbformat as nb
 
 try:
@@ -840,6 +840,174 @@ def colab_gpu_import_notebook():
     return value
 
 
+def colab_gpu_single_account_notebook():
+    plan_book = colab_gpu_plan_notebook()
+    worker_book = colab_gpu_worker_notebook()
+    import_book = colab_gpu_import_notebook()
+
+    setup = plan_book.cells[1].source.replace(
+        '#@title 1. Colab CPU — kết nối Drive và tải mã khóa',
+        '#@title 1. Colab GPU — kết nối Drive, Kaggle và tải mã khóa')
+    setup = setup.replace('import re\n', 'import re\nimport shutil\n', 1)
+    setup = setup.replace(
+        "if not Path('/var/colab/hostname').is_file():\n    raise RuntimeError('Mounting Colab required')",
+        "if not Path('/var/colab/hostname').is_file() or not shutil.which('nvidia-smi'):\n"
+        "    raise RuntimeError('Chọn Colab GPU trước khi Run all; không chuyển runtime giữa chừng.')")
+    # The source setup's guard text varies by generated transfer version.
+    setup = setup.replace(
+        "if not Path('/var/colab/hostname').is_file():\n    raise RuntimeError('Notebook chuyển dữ liệu này chạy trên Colab CPU. Kaggle dùng 04_new_data_account_0 hoặc 1.')",
+        "if not Path('/var/colab/hostname').is_file() or not shutil.which('nvidia-smi'):\n"
+        "    raise RuntimeError('Chọn Colab GPU trước khi Run all; không chuyển runtime giữa chừng.')")
+    setup = setup.replace(
+        "print('COLAB PLAN: dùng manifest frozen trên Drive; không export corpus hay nạp model.', flush=True)",
+        "print('COLAB GPU: tạo plan, embedding và ghi checkpoint trực tiếp lên Drive.', flush=True)")
+    setup = setup.replace(
+        'SOURCE_KAGGLE_ACCOUNTS = 4  # Original 63b6 plan team; Colab runs one account\n', '')
+    setup = setup.replace('MIGRATE_UNSTARTED_LEGACY = True #@param {type:"boolean"}\n', '')
+    setup = setup.replace(
+        '# Để trống để xuất gói. Sau GPU: owner/notebook[,owner2/notebook2] để nhập Outputs.\n',
+        '# Có thể để trống nếu chưa có Outputs Kaggle cần nhập.\n')
+    if 'Notebook chuyển dữ liệu này chạy trên Colab CPU' in setup:
+        raise ValueError('Single-Colab setup still contains the CPU-only guard.')
+
+    plan_source = plan_book.cells[3].source
+    plan_source = plan_source.replace(
+        '#@title 3. Tạo plan Colab 1×1 GPU; giữ riêng task Kaggle acc 2 đang chạy',
+        '#@title 3. Phân công task tự động; giữ riêng task Kaggle acc 2 đang chạy')
+    # The optional old Kaggle output is imported once at the end, after Colab work.
+    optional_start = plan_source.index("if KAGGLE_NOTEBOOK_OUTPUT.strip():")
+    flow_start = plan_source.index("\nflow=queue_flow(", optional_start) + 1
+    plan_source = plan_source[:optional_start] + plan_source[flow_start:]
+    active_start = plan_source.index("active_path=flow.root/'active_execution_plan.json'")
+    ready_start = plan_source.index("print('COLAB_PLAN_READY:'", active_start)
+    persistent_plan = dedent(f'''\
+        COLAB_PLAN_POINTER=flow.root/'colab_single_gpu_plan.json'
+        if COLAB_PLAN_POINTER.is_file():
+            pointer_record=queue.checked(queue.read_json(COLAB_PLAN_POINTER))
+            if (pointer_record.get('schema')!='colab-single-account-plan-v1'
+                    or pointer_record.get('library_job')!=EXPECTED_LIBRARY_JOB
+                    or pointer_record.get('source_plan')!=CONTINUE_FROM_PLAN):
+                raise RuntimeError('Drive continuation pointer belongs to another library/plan.')
+            plan=flow.saved_plan(pointer_record.get('plan'))
+            plan=queue.validate_plan(plan,library)
+            if (plan.get('team')!={{'accounts':1,'gpu_count':1}}
+                    or plan.get('continued_from_plan')!=CONTINUE_FROM_PLAN):
+                raise RuntimeError('Saved Colab plan is not the expected single-GPU continuation.')
+            target=flow.stage_plan(plan)
+            print('COLAB_PLAN_REUSED: same task assignment; no new planning.',flush=True)
+        else:
+            active_path=flow.root/'active_execution_plan.json'
+            active=queue.checked(queue.read_json(active_path))
+            if active.get('plan')==CONTINUE_FROM_PLAN:
+                target,plan=flow.create_plan(library,receipt_api=api_source,
+                    execution_accounts=1,execution_gpu_count=1,
+                    continue_completed_from=CONTINUE_FROM_PLAN)
+                if target is None:
+                    raise RuntimeError('No dispatchable tasks; inspect the reserved Kaggle account status.')
+            else:
+                plan=flow.saved_plan(active.get('plan'))
+                if (plan.get('team')!={{'accounts':1,'gpu_count':1}}
+                        or plan.get('continued_from_plan')!=CONTINUE_FROM_PLAN):
+                    raise RuntimeError('Drive has another active plan. Refusing to reassign possibly running tasks.')
+                target=flow.stage_plan(plan)
+            pointer_record={{'schema':'colab-single-account-plan-v1',
+                'library_job':EXPECTED_LIBRARY_JOB,'source_plan':CONTINUE_FROM_PLAN,
+                'plan':plan['manifest_sha256'],'state':'PLANNED'}}
+            queue.atomic_json(COLAB_PLAN_POINTER,queue.seal(pointer_record))
+        pointer_record=queue.checked(queue.read_json(COLAB_PLAN_POINTER))
+        RUN_COLAB_WORKER=pointer_record.get('state')!='IMPORTED'
+        RUN_COLAB_IMPORT=RUN_COLAB_WORKER
+        COLAB_PLAN_SHA=plan['manifest_sha256']
+    ''')
+    plan_source = plan_source[:active_start] + persistent_plan + plan_source[ready_start:]
+    plan_source = plan_source.replace(
+        "print('Dùng đúng một Colab GPU: ACCOUNT_ID=0; checkpoint riêng trên Drive.',flush=True)",
+        "print('Colab worker: account 0 | one GPU | automatic resume enabled.',flush=True)\n"
+        "print('CHECKPOINT_ROOT:',PROJECT/'data_staging/colab_gpu_checkpoints'/COLAB_PLAN_SHA/'account-0',flush=True)")
+    plan_source = plan_source.replace("print('COLAB_PLAN_READY:',plan['manifest_sha256'],flush=True)",
+        "print('COLAB_TASK_ASSIGNMENT_LOCKED:',plan['manifest_sha256'],flush=True)")
+    plan_source = plan_source.replace("print('PLAN_ON_DRIVE:',flow.root/'plans'/(plan['manifest_sha256']+'.json'),flush=True)",
+        "print('ASSIGNMENT_RECORD_ON_DRIVE:',flow.root/'plans'/(plan['manifest_sha256']+'.json'),flush=True)")
+
+    worker_source = worker_book.cells[3].source
+    worker_source = worker_source.replace(
+        'KAGGLE_ACCOUNT_ID = 0 #@param {type:"integer"}\n', 'KAGGLE_ACCOUNT_ID = 0\n')
+    worker_source = worker_source.replace(
+        '        COLAB_PLAN_SHA = "" #@param {type:"string"}\n', '')
+    worker_lines = worker_source.splitlines()
+    worker_title = worker_lines[0]
+    worker_title = worker_title.replace(
+        '#@title 3. Chạy một worker Colab GPU;',
+        '#@title 4. Chạy một worker Colab GPU;')
+    worker_body = '\n'.join(worker_lines[1:])
+    worker_body = worker_body.replace("        COLAB_PLAN_SHA = \"\" #@param {type:\"string\"}\n", '')
+    worker_body = worker_body.replace('COLAB_PLAN_SHA = "" #@param {type:"string"}\n', '')
+    worker_body = '\n'.join(line for line in worker_body.splitlines()
+                             if 'COLAB_PLAN_SHA = "" #@param' not in line)
+    worker_body = worker_body.replace(
+        "if KAGGLE_ACCOUNT_ID!=0 or not re.fullmatch(r'[0-9a-f]{64}',COLAB_PLAN_SHA):\n"
+        "    raise ValueError('Dùng ACCOUNT_ID=0 và COLAB_PLAN_SHA chính xác từ notebook tạo plan.')",
+        "if KAGGLE_ACCOUNT_ID!=0 or not re.fullmatch(r'[0-9a-f]{64}',COLAB_PLAN_SHA):\n"
+        "    raise ValueError('Single-account plan binding is invalid; stop without running tasks.')")
+    work_hours = "WORKER_HOURS = 11.0 #@param {type:\"number\"}"
+    worker_body = worker_body.replace(work_hours, '')
+    worker_body = '\n'.join(line.rstrip() for line in worker_body.splitlines()).strip()
+    worker_source = (worker_title + '\n' + work_hours + '\n'
+        "if RUN_COLAB_WORKER:\n" + indent(worker_body, '    ') + "\nelse:\n"
+        "    print('Colab worker already imported; skipping embedding.',flush=True)")
+
+    import_source = import_book.cells[3].source
+    import_lines = import_source.splitlines()
+    import_title = import_lines[0]
+    import_title = import_title.replace(
+        '#@title 3. Nhập Colab receipt;',
+        '#@title 5. Nhập Colab receipt;')
+    import_body = '\n'.join(import_lines[1:]).strip()
+    import_body = import_body.replace(
+        "raise ValueError('Điền COLAB_PLAN_SHA đã dùng ở cả bốn worker.')",
+        "raise ValueError('Assignment lock không hợp lệ; không nhập receipt.')")
+    import_body += dedent(f'''\
+
+        if not missing:
+            queue.atomic_json(COLAB_PLAN_POINTER,queue.seal({{
+                'schema':'colab-single-account-plan-v1','library_job':EXPECTED_LIBRARY_JOB,
+                'source_plan':"{SOURCE_EXECUTION_PLAN}",'plan':COLAB_PLAN_SHA,
+                'state':'IMPORTED','updated_at':queue.utc_now()}}))
+            RUN_COLAB_WORKER=False
+            RUN_COLAB_IMPORT=False
+            print('COLAB_SINGLE_ACCOUNT_IMPORT_COMPLETE: worker will not be reassigned on rerun.',flush=True)
+    ''')
+    import_source = (import_title + '\nif RUN_COLAB_IMPORT:\n' + indent(import_body, '    ')
+        + "\nelse:\n    print('Colab result already imported; skipping repeat import/plan creation.',flush=True)")
+
+    metadata_source = plan_book.cells[2].source.replace(
+        '#@title 2. Kết nối manifest frozen và cache đã có — CPU, không mở vector payload',
+        '#@title 2. Nạp mã và metadata — không chuyển runtime, không mở vector payload')
+    value = nb.v4.new_notebook(cells=[
+        nb.v4.new_markdown_cell(dedent('''
+            # 04 — Colab một GPU: khóa task, embedding và nhập Drive trong cùng notebook
+
+            Chọn một GPU Colab (T4), thêm Secret `KAGGLE_JSON`, kết nối Drive, rồi bấm **Run all**.
+            Notebook tự khóa task của Kaggle acc 2 đang chạy, tạo phân công nội bộ 1×1, chạy worker 0,
+            lưu vector/journal/manifest trực tiếp vào Drive, rồi nhập checkpoint và chuẩn bị
+            lượt Kaggle kế tiếp. Không cần mở notebook plan/import riêng.
+
+            Nếu Colab dừng giữa chừng, chạy lại **cùng notebook**. Plan và checkpoint Drive
+            được giữ nguyên để tiếp tục; không mở thêm phiên Colab song song với account 0.
+            Nếu đã tạo plan 4 account bằng notebook cũ, không khởi chạy worker cũ; notebook
+            này sẽ dừng thay vì âm thầm đổi assignment đang có.
+        ''').strip()),
+        nb.v4.new_code_cell(setup),
+        nb.v4.new_code_cell(metadata_source),
+        nb.v4.new_code_cell(plan_source),
+        nb.v4.new_code_cell(worker_source),
+        nb.v4.new_code_cell(import_source),
+    ])
+    value.metadata = dict(plan_book.metadata)
+    value.metadata['accelerator'] = 'GPU'
+    return value
+
+
 def main():
     nb.write(full_queue_transfer(), ROOT/'notebooks/04_colab_export_full_data_kaggle.ipynb')
     nb.write(three_account_transfer(), ROOT/'notebooks/04_colab_prepare_3_accounts_kaggle.ipynb')
@@ -850,6 +1018,7 @@ def main():
     nb.write(colab_gpu_plan_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_plan.ipynb')
     nb.write(colab_gpu_worker_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_worker.ipynb')
     nb.write(colab_gpu_import_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_import_and_kaggle_continue.ipynb')
+    nb.write(colab_gpu_single_account_notebook(), ROOT/'notebooks/04_colab_full_queue_gpu_single_account.ipynb')
     for account in (0,1):
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_full_data_account_{account}.ipynb')
         nb.write(full_queue_gpu(account), ROOT/f'notebooks/kaggle/04_continue_2acc_account_{account}.ipynb')
